@@ -1,0 +1,162 @@
+{
+  "source_doc": "09-observability.md",
+  "module": "juncture_tracing",
+  "items": [
+    {
+      "id": "09-001",
+      "category": "struct",
+      "parent": null,
+      "name": "MetricsRegistry",
+      "required_methods": ["counter", "histogram", "gauge"],
+      "required_fields": [],
+      "required_variants": [],
+      "findings": ["M-9"],
+      "description": "Explicit metrics API for custom counters, histograms, gauges",
+      "verification_pattern": "pub struct MetricsRegistry"
+    },
+    {
+      "id": "09-002",
+      "category": "trait",
+      "parent": null,
+      "name": "GraphCallbackHandler",
+      "required_methods": ["on_interrupt", "on_resume", "on_checkpoint_saved", "on_node_start", "on_node_end", "on_node_error", "on_graph_end"],
+      "required_fields": [],
+      "required_variants": [],
+      "findings": ["H-05", "Part3#13"],
+      "description": "Graph lifecycle callback trait for business event monitoring",
+      "verification_pattern": "pub trait GraphCallbackHandler"
+    },
+    {
+      "id": "09-003",
+      "category": "struct",
+      "parent": null,
+      "name": "GraphInterruptEvent",
+      "required_methods": [],
+      "required_fields": ["node", "payload", "interrupt_id", "namespace", "resumable"],
+      "required_variants": [],
+      "findings": [],
+      "description": "Interrupt event payload for callback",
+      "verification_pattern": "pub struct GraphInterruptEvent"
+    },
+    {
+      "id": "09-004",
+      "category": "struct",
+      "parent": null,
+      "name": "GraphResumeEvent",
+      "required_methods": [],
+      "required_fields": ["node", "resume_value", "namespace"],
+      "required_variants": [],
+      "findings": [],
+      "description": "Resume event payload for callback",
+      "verification_pattern": "pub struct GraphResumeEvent"
+    },
+    {
+      "id": "09-005",
+      "category": "enum",
+      "parent": null,
+      "name": "DebugEvent",
+      "required_methods": [],
+      "required_fields": [],
+      "required_variants": ["GraphStart", "SuperstepStart", "NodeStart", "NodeEnd", "NodeError", "ChannelWrite", "ChannelUpdate", "Merge", "EdgeTraversed", "CheckpointSaved", "BudgetCheck", "GraphEnd"],
+      "findings": [],
+      "description": "Debug mode event types for development inspection",
+      "verification_pattern": "pub enum DebugEvent"
+    },
+    {
+      "id": "09-006",
+      "category": "struct",
+      "parent": null,
+      "name": "ServerInfo",
+      "required_methods": [],
+      "required_fields": ["assistant_id", "graph_id", "user", "deployment", "version", "instance_id"],
+      "required_variants": [],
+      "findings": ["M-09"],
+      "description": "Server deployment metadata for multi-instance tracing",
+      "verification_pattern": "pub struct ServerInfo"
+    },
+    {
+      "id": "09-007",
+      "category": "struct",
+      "parent": null,
+      "name": "CachePolicy",
+      "required_methods": [],
+      "required_fields": ["key_func"],
+      "required_variants": [],
+      "findings": [],
+      "description": "Cache policy with custom key_func for context-aware caching",
+      "verification_pattern": "pub struct CachePolicy"
+    },
+    {
+      "id": "09-008",
+      "category": "struct",
+      "parent": null,
+      "name": "CacheKeyInput",
+      "required_methods": [],
+      "required_fields": ["model", "messages", "tools", "config"],
+      "required_variants": [],
+      "findings": [],
+      "description": "Input for cache key generation function",
+      "verification_pattern": "pub struct CacheKeyInput"
+    },
+    {
+      "id": "09-009",
+      "category": "struct",
+      "parent": null,
+      "name": "JunctureClient",
+      "required_methods": ["list_graphs", "graph", "create_thread", "get_thread", "list_threads", "delete_thread"],
+      "required_fields": [],
+      "required_variants": [],
+      "findings": ["M-16"],
+      "description": "SDK client for connecting to Juncture Server",
+      "verification_pattern": "pub struct JunctureClient"
+    },
+    {
+      "id": "09-010",
+      "category": "struct",
+      "parent": null,
+      "name": "GraphClient",
+      "required_methods": ["invoke", "stream", "get_state", "get_state_history", "update_state", "resume", "cancel"],
+      "required_fields": [],
+      "required_variants": [],
+      "findings": [],
+      "description": "Single graph operation client",
+      "verification_pattern": "pub struct GraphClient"
+    },
+    {
+      "id": "09-011",
+      "category": "struct",
+      "parent": null,
+      "name": "InvokeConfig",
+      "required_methods": [],
+      "required_fields": ["thread_id", "checkpoint_id", "recursion_limit", "metadata", "tags", "interrupt_before", "interrupt_after"],
+      "required_variants": [],
+      "findings": [],
+      "description": "SDK invoke configuration",
+      "verification_pattern": "pub struct InvokeConfig"
+    },
+    {
+      "id": "09-012",
+      "category": "enum",
+      "parent": null,
+      "name": "AuthConfig",
+      "required_methods": [],
+      "required_fields": [],
+      "required_variants": ["None", "Token", "ApiKey"],
+      "findings": [],
+      "description": "Authentication configuration for SDK client",
+      "verification_pattern": "pub enum AuthConfig"
+    },
+    {
+      "id": "09-013",
+      "category": "enum",
+      "parent": null,
+      "name": "ClientError",
+      "required_methods": [],
+      "required_fields": [],
+      "required_variants": ["Connection", "Auth", "GraphNotFound", "ThreadNotFound", "RunNotFound", "Serialize", "Server", "Timeout"],
+      "findings": [],
+      "description": "SDK client error types",
+      "verification_pattern": "pub enum ClientError"
+    }
+  ]
+}

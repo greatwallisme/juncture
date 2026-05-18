@@ -1,0 +1,162 @@
+{
+  "source_doc": "06-hitl.md",
+  "module": "juncture_core::hitl",
+  "items": [
+    {
+      "id": "06-001",
+      "category": "macro",
+      "parent": null,
+      "name": "interrupt!",
+      "required_methods": [],
+      "required_fields": [],
+      "required_variants": [],
+      "findings": [],
+      "description": "Macro for declaring interrupt points in nodes",
+      "verification_pattern": "macro_rules! interrupt"
+    },
+    {
+      "id": "06-002",
+      "category": "struct",
+      "parent": null,
+      "name": "InterruptContext",
+      "required_methods": ["new", "next_index", "get_resume_value"],
+      "required_fields": ["resume_values", "current_index", "interrupt_tx"],
+      "required_variants": [],
+      "findings": ["Part2#2"],
+      "description": "Arc-based interrupt context safe across await points",
+      "verification_pattern": "pub struct InterruptContext"
+    },
+    {
+      "id": "06-003",
+      "category": "struct",
+      "parent": null,
+      "name": "InterruptSignal",
+      "required_methods": [],
+      "required_fields": ["index", "id", "payload"],
+      "required_variants": [],
+      "findings": ["H-15"],
+      "description": "Interrupt signal with index, optional named ID, and payload",
+      "verification_pattern": "pub struct InterruptSignal"
+    },
+    {
+      "id": "06-004",
+      "category": "fn",
+      "parent": null,
+      "name": "generate_interrupt_id",
+      "required_methods": [],
+      "required_fields": [],
+      "required_variants": [],
+      "findings": ["H-5"],
+      "description": "xxhash-based deterministic interrupt ID generation",
+      "verification_pattern": "fn generate_interrupt_id"
+    },
+    {
+      "id": "06-005",
+      "category": "fn",
+      "parent": null,
+      "name": "__interrupt_impl",
+      "required_methods": [],
+      "required_fields": [],
+      "required_variants": [],
+      "findings": ["H-15", "Part3#14"],
+      "description": "Internal interrupt implementation with named ID support",
+      "verification_pattern": "__interrupt_impl"
+    },
+    {
+      "id": "06-006",
+      "category": "enum",
+      "parent": null,
+      "name": "ResumeValue",
+      "required_methods": [],
+      "required_fields": [],
+      "required_variants": ["Single", "ById", "ByNamespace"],
+      "findings": ["H-16", "Part3#15", "M-8"],
+      "description": "Resume value type: single, by ID, or by namespace",
+      "verification_pattern": "pub enum ResumeValue"
+    },
+    {
+      "id": "06-007",
+      "category": "enum",
+      "parent": null,
+      "name": "CommandGoto",
+      "required_methods": [],
+      "required_fields": [],
+      "required_variants": ["One", "Many", "Parent", "Send"],
+      "findings": [],
+      "description": "Command routing variants including Parent for subgraph",
+      "verification_pattern": "pub enum CommandGoto"
+    },
+    {
+      "id": "06-008",
+      "category": "struct",
+      "parent": null,
+      "name": "ParentCommand",
+      "required_methods": [],
+      "required_fields": ["0"],
+      "required_variants": [],
+      "findings": ["H-14"],
+      "description": "Exception for subgraph to send Command to parent graph",
+      "verification_pattern": "pub struct ParentCommand"
+    },
+    {
+      "id": "06-009",
+      "category": "struct",
+      "parent": null,
+      "name": "Scratchpad",
+      "required_methods": ["is_interrupt_processed", "mark_interrupt_processed"],
+      "required_fields": ["processed_interrupts", "data"],
+      "required_variants": [],
+      "findings": [],
+      "description": "Per-task temporary state for tracking processed interrupts",
+      "verification_pattern": "pub struct Scratchpad"
+    },
+    {
+      "id": "06-010",
+      "category": "struct",
+      "parent": null,
+      "name": "Heartbeat",
+      "required_methods": ["ping"],
+      "required_fields": [],
+      "required_variants": [],
+      "findings": [],
+      "description": "Heartbeat signal for idle_timeout in TimeoutPolicy",
+      "verification_pattern": "pub struct Heartbeat"
+    },
+    {
+      "id": "06-011",
+      "category": "fn",
+      "parent": null,
+      "name": "should_interrupt",
+      "required_methods": [],
+      "required_fields": [],
+      "required_variants": [],
+      "findings": ["C-2"],
+      "description": "Version-gated interrupt check for interrupt_before/after",
+      "verification_pattern": "fn should_interrupt"
+    },
+    {
+      "id": "06-012",
+      "category": "struct",
+      "parent": null,
+      "name": "SendTarget",
+      "required_methods": [],
+      "required_fields": ["node", "state", "timeout"],
+      "required_variants": [],
+      "findings": ["Part3#17"],
+      "description": "Send target with per-task timeout override",
+      "verification_pattern": "pub struct SendTarget"
+    },
+    {
+      "id": "06-013",
+      "category": "const",
+      "parent": null,
+      "name": "HIDDEN_TAG",
+      "required_methods": [],
+      "required_fields": [],
+      "required_variants": [],
+      "findings": ["L-7"],
+      "description": "Tag for filtering internal nodes from interrupt/stream checks",
+      "verification_pattern": "HIDDEN_TAG"
+    }
+  ]
+}

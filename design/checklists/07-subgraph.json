@@ -1,0 +1,126 @@
+{
+  "source_doc": "07-subgraph.md",
+  "module": "juncture_core::subgraph",
+  "items": [
+    {
+      "id": "07-001",
+      "category": "trait",
+      "parent": null,
+      "name": "StateSubset",
+      "required_methods": ["extract", "map_update"],
+      "required_fields": [],
+      "required_variants": [],
+      "findings": [],
+      "description": "Compile-time constraint for shared-state subgraph mode",
+      "verification_pattern": "pub trait StateSubset"
+    },
+    {
+      "id": "07-002",
+      "category": "struct",
+      "parent": null,
+      "name": "SubgraphNode",
+      "required_methods": [],
+      "required_fields": ["subgraph", "input_map", "output_map", "config"],
+      "required_variants": [],
+      "findings": [],
+      "description": "Subgraph node wrapper implementing Node trait",
+      "verification_pattern": "pub struct SubgraphNode"
+    },
+    {
+      "id": "07-003",
+      "category": "struct",
+      "parent": null,
+      "name": "CheckpointNamespace",
+      "required_methods": ["root", "child", "to_string"],
+      "required_fields": ["segments"],
+      "required_variants": [],
+      "findings": [],
+      "description": "Namespace segments for subgraph checkpoint isolation",
+      "verification_pattern": "pub struct CheckpointNamespace"
+    },
+    {
+      "id": "07-004",
+      "category": "struct",
+      "parent": null,
+      "name": "NamespaceSegment",
+      "required_methods": [],
+      "required_fields": ["node_name", "invocation_id"],
+      "required_variants": [],
+      "findings": [],
+      "description": "Single namespace segment with node name and invocation UUID",
+      "verification_pattern": "pub struct NamespaceSegment"
+    },
+    {
+      "id": "07-005",
+      "category": "enum",
+      "parent": null,
+      "name": "SubgraphPersistence",
+      "required_methods": [],
+      "required_fields": [],
+      "required_variants": ["Inherit", "PerThread", "Stateless"],
+      "findings": [],
+      "description": "Subgraph persistence mode",
+      "verification_pattern": "pub enum SubgraphPersistence"
+    },
+    {
+      "id": "07-006",
+      "category": "struct",
+      "parent": null,
+      "name": "SubgraphConfig",
+      "required_methods": [],
+      "required_fields": ["persistence"],
+      "required_variants": [],
+      "findings": [],
+      "description": "Subgraph configuration including persistence mode",
+      "verification_pattern": "pub struct SubgraphConfig"
+    },
+    {
+      "id": "07-007",
+      "category": "struct",
+      "parent": null,
+      "name": "SubgraphTransformer",
+      "required_methods": ["new", "with_filter", "with_internal", "transform", "add_namespace"],
+      "required_fields": ["subgraph_name", "ns", "filter", "include_internal"],
+      "required_variants": [],
+      "findings": ["M-8"],
+      "description": "Subgraph stream event transformer with namespace and filter",
+      "verification_pattern": "pub struct SubgraphTransformer"
+    },
+    {
+      "id": "07-008",
+      "category": "method",
+      "parent": "StateGraph",
+      "name": "add_subgraph_node",
+      "required_methods": [],
+      "required_fields": [],
+      "required_variants": [],
+      "findings": [],
+      "description": "Add subgraph with shared state (StateSubset)",
+      "verification_pattern": "fn add_subgraph_node"
+    },
+    {
+      "id": "07-009",
+      "category": "method",
+      "parent": "StateGraph",
+      "name": "add_subgraph",
+      "required_methods": [],
+      "required_fields": [],
+      "required_variants": [],
+      "findings": [],
+      "description": "Add subgraph with explicit mapping (different state types)",
+      "verification_pattern": "fn add_subgraph"
+    },
+    {
+      "id": "07-010",
+      "category": "method",
+      "parent": "StateGraph",
+      "name": "add_subgraph_with_config",
+      "required_methods": [],
+      "required_fields": [],
+      "required_variants": [],
+      "findings": [],
+      "description": "Add subgraph with explicit mapping and custom config",
+      "verification_pattern": "fn add_subgraph_with_config"
+    }
+  ]
+}
