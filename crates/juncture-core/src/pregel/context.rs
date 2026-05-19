@@ -167,11 +167,13 @@ pub struct TimeoutPolicy {
     pub idle_timeout: Option<Duration>,
 
     /// Progress signal detector (refreshes `idle_timeout` on heartbeat)
+    ///
+    /// Receives a serializable event representation containing event type and node name.
     #[allow(
         clippy::type_complexity,
         reason = "trait object requires full signature"
     )]
-    pub refresh_on: Option<std::sync::Arc<dyn Fn() -> bool + Send + Sync>>,
+    pub refresh_on: Option<std::sync::Arc<dyn Fn(&serde_json::Value) -> bool + Send + Sync>>,
 }
 
 impl std::fmt::Debug for TimeoutPolicy {
@@ -278,4 +280,4 @@ mod tests {
     }
 }
 
-// Rust guideline compliant 2026-05-19
+// Rust guideline compliant 2026-05-20

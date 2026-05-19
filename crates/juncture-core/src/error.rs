@@ -95,14 +95,27 @@ pub enum ErrorCode {
 #[derive(Clone, Debug, thiserror::Error)]
 pub enum InvalidUpdateError {
     /// Multiple writers attempted to write to a replace channel
-    #[error("multiple writers for replace channel")]
-    MultipleWriters,
+    #[error("multiple writers for field '{field}': {conflicting_nodes:?}")]
+    MultipleWriters {
+        /// The field name that had multiple writers
+        field: String,
+        /// Names of the conflicting nodes
+        conflicting_nodes: Vec<String>,
+    },
     /// Multiple overwrite attempts on the same field
-    #[error("multiple overwrite attempts")]
-    MultipleOverwrite,
-    /// An invalid value was provided
-    #[error("invalid value: {0}")]
-    InvalidValue(String),
+    #[error("multiple overwrite attempts for field '{field}'")]
+    MultipleOverwrite {
+        /// The field name that was overwritten
+        field: String,
+    },
+    /// An invalid value was provided for a field
+    #[error("invalid value for field '{field}': {reason}")]
+    InvalidValue {
+        /// The field name with the invalid value
+        field: String,
+        /// Why the value is invalid
+        reason: String,
+    },
 }
 
 /// Node timeout error variants
@@ -514,16 +527,27 @@ mod tests {
     #[test]
     fn invalid_update_error_display() {
         assert_eq!(
-            InvalidUpdateError::MultipleWriters.to_string(),
-            "multiple writers for replace channel"
+            InvalidUpdateError::MultipleWriters {
+                field: "my_field".to_string(),
+                conflicting_nodes: vec!["node_a".to_string(), "node_b".to_string()],
+            }
+            .to_string(),
+            "multiple writers for field 'my_field': [\"node_a\", \"node_b\"]"
         );
         assert_eq!(
-            InvalidUpdateError::MultipleOverwrite.to_string(),
-            "multiple overwrite attempts"
+            InvalidUpdateError::MultipleOverwrite {
+                field: "my_field".to_string(),
+            }
+            .to_string(),
+            "multiple overwrite attempts for field 'my_field'"
         );
         assert_eq!(
-            InvalidUpdateError::InvalidValue("bad".to_string()).to_string(),
-            "invalid value: bad"
+            InvalidUpdateError::InvalidValue {
+                field: "my_field".to_string(),
+                reason: "bad".to_string(),
+            }
+            .to_string(),
+            "invalid value for field 'my_field': bad"
         );
     }
 
@@ -578,4 +602,4 @@ mod tests {
     }
 }
 
-// Rust guideline compliant 2026-05-19
+// Rust guideline compliant 2026-05-20

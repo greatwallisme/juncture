@@ -120,7 +120,10 @@ impl ChatAnthropic {
     /// let model = ChatAnthropic::from_env()?;
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
-    #[allow(clippy::map_err_ignore, reason = "Intentionally converting env var error to AuthError")]
+    #[allow(
+        clippy::map_err_ignore,
+        reason = "Intentionally converting env var error to AuthError"
+    )]
     pub fn from_env() -> Result<Self, LlmError> {
         let api_key = std::env::var("ANTHROPIC_API_KEY")
             .map_err(|_| LlmError::AuthError("ANTHROPIC_API_KEY not set".to_string()))?;
@@ -445,7 +448,10 @@ enum ResponseContentBlock {
 }
 
 /// Convert message content to Anthropic API format.
-#[allow(clippy::match_same_arms, reason = "Explicit handling for different content types")]
+#[allow(
+    clippy::match_same_arms,
+    reason = "Explicit handling for different content types"
+)]
 fn convert_content(
     content: &Content,
     tool_calls: &[ToolCall],
@@ -559,7 +565,10 @@ fn convert_api_response(response: AnthropicResponse) -> Message {
 
 /// Convert role to Anthropic API format.
 #[allow(clippy::match_same_arms, reason = "Explicit roles for clarity")]
-#[allow(clippy::missing_const_for_fn, reason = "Cannot be const due to reference parameter")]
+#[allow(
+    clippy::missing_const_for_fn,
+    reason = "Cannot be const due to reference parameter"
+)]
 fn convert_role_to_anthropic(role: &Role) -> &'static str {
     match role {
         Role::Human => "user",

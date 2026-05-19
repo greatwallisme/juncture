@@ -1,7 +1,6 @@
 //! Integration tests for Interrupt/HITL system
 
-use juncture_core::interrupt;
-use juncture_core::interrupt::InterruptContext;
+use juncture_core::{interrupt::InterruptContext, interrupt_with_ctx};
 use juncture_derive::State;
 use serde_json::json;
 
@@ -104,7 +103,8 @@ async fn test_interrupt_macro_basic() {
     let resume_values = vec![Some(json!("macro_value"))];
     let ctx = InterruptContext::new(resume_values, tx);
 
-    let result = interrupt!(&ctx, json!("test_payload"));
+    // Use interrupt_with_ctx! for explicit context version
+    let result = interrupt_with_ctx!(&ctx, json!("test_payload"));
 
     assert!(result.is_ok());
     assert_eq!(result.unwrap(), json!("macro_value"));
@@ -116,7 +116,8 @@ async fn test_interrupt_macro_with_interrupt() {
     let resume_values = vec![None];
     let ctx = InterruptContext::new(resume_values, tx);
 
-    let result = interrupt!(&ctx, json!("interrupt_test"));
+    // Use interrupt_with_ctx! for explicit context version
+    let result = interrupt_with_ctx!(&ctx, json!("interrupt_test"));
 
     assert!(result.is_err());
 

@@ -58,11 +58,7 @@ pub trait Store: Send + Sync + 'static {
     ///
     /// * `namespace` - Namespace path
     /// * `key` - Item key within namespace
-    async fn get(
-        &self,
-        namespace: &str,
-        key: &str,
-    ) -> Result<Option<Item>, StoreError>;
+    async fn get(&self, namespace: &str, key: &str) -> Result<Option<Item>, StoreError>;
 
     /// Put item into store
     ///
@@ -342,16 +338,15 @@ impl MemoryStore {
 
 #[async_trait]
 impl Store for MemoryStore {
-    async fn get(
-        &self,
-        namespace: &str,
-        key: &str,
-    ) -> Result<Option<Item>, StoreError> {
+    async fn get(&self, namespace: &str, key: &str) -> Result<Option<Item>, StoreError> {
         let data = self.data.read().await;
         Ok(data.get(namespace).and_then(|ns| ns.get(key).cloned()))
     }
 
-    #[allow(clippy::significant_drop_tightening, reason = "Lock must be held for entire put operation")]
+    #[allow(
+        clippy::significant_drop_tightening,
+        reason = "Lock must be held for entire put operation"
+    )]
     async fn put(
         &self,
         namespace: &str,
@@ -362,7 +357,9 @@ impl Store for MemoryStore {
         let now = Utc::now();
         let mut data = self.data.write().await;
 
-        let namespace_map = data.entry(namespace.to_string()).or_insert_with(HashMap::new);
+        let namespace_map = data
+            .entry(namespace.to_string())
+            .or_insert_with(HashMap::new);
         let existing = namespace_map.get(key);
 
         let item = Item {
@@ -377,7 +374,10 @@ impl Store for MemoryStore {
         Ok(())
     }
 
-    #[allow(clippy::significant_drop_tightening, reason = "Lock must be held for entire delete operation")]
+    #[allow(
+        clippy::significant_drop_tightening,
+        reason = "Lock must be held for entire delete operation"
+    )]
     async fn delete(&self, namespace: &str, key: &str) -> Result<(), StoreError> {
         let mut data = self.data.write().await;
         if let Some(namespace_map) = data.get_mut(namespace) {
@@ -386,7 +386,10 @@ impl Store for MemoryStore {
         Ok(())
     }
 
-    #[allow(clippy::significant_drop_tightening, reason = "Lock must be held for entire search operation")]
+    #[allow(
+        clippy::significant_drop_tightening,
+        reason = "Lock must be held for entire search operation"
+    )]
     async fn search(&self, query: SearchQuery) -> Result<SearchResult, StoreError> {
         let data = self.data.read().await;
         let mut items = Vec::new();
@@ -394,7 +397,11 @@ impl Store for MemoryStore {
         for (namespace, namespace_map) in data.iter() {
             if namespace.starts_with(&query.namespace_prefix) {
                 for item in namespace_map.values() {
-                    if query.filter.as_ref().is_some_and(|filter| !evaluate_filter(filter, &item.value)) {
+                    if query
+                        .filter
+                        .as_ref()
+                        .is_some_and(|filter| !evaluate_filter(filter, &item.value))
+                    {
                         continue;
                     }
                     items.push(SearchItem {
@@ -478,8 +485,8 @@ impl Store for MemoryStore {
                     max_depth,
                     limit,
                 } => {
-                    let namespaces =
-                        self.list_namespaces(
+                    let namespaces = self
+                        .list_namespaces(
                             prefix.as_deref(),
                             suffix.as_deref(),
                             max_depth,
@@ -500,30 +507,36 @@ impl Store for MemoryStore {
 /// Evaluate filter expression against value
 fn evaluate_filter(filter: &FilterExpr, value: &serde_json::Value) -> bool {
     match filter {
-        FilterExpr::Eq { field, value: expected } => {
-            get_field(value, field).is_some_and(|v| v == *expected)
+        FilterExpr::Eq {
+            field,
+            value: expected,
+        } => get_field(value, field).is_some_and(|v| v == *expected),
+        FilterExpr::Ne {
+            field,
+            value: expected,
+        } => get_field(value, field).is_none_or(|v| v != *expected),
+        FilterExpr::Gt {
+            field,
+            value: expected,
+        } => compare_numbers(value, field, expected, |a, b| a > b),
+        FilterExpr::Gte {
+            field,
+            value: expected,
+        } => compare_numbers(value, field, expected, |a, b| a >= b),
+        FilterExpr::Lt {
+            field,
+            value: expected,
+        } => compare_numbers(value, field, expected, |a, b| a < b),
+        FilterExpr::Lte {
+            field,
+            value: expected,
+        } => compare_numbers(value, field, expected, |a, b| a <= b),
+        FilterExpr::And { expressions } => {
+            expressions.iter().all(|expr| evaluate_filter(expr, value))
         }
-        FilterExpr::Ne { field, value: expected } => {
-            get_field(value, field).is_none_or(|v| v != *expected)
+        FilterExpr::Or { expressions } => {
+            expressions.iter().any(|expr| evaluate_filter(expr, value))
         }
-        FilterExpr::Gt { field, value: expected } => {
-            compare_numbers(value, field, expected, |a, b| a > b)
-        }
-        FilterExpr::Gte { field, value: expected } => {
-            compare_numbers(value, field, expected, |a, b| a >= b)
-        }
-        FilterExpr::Lt { field, value: expected } => {
-            compare_numbers(value, field, expected, |a, b| a < b)
-        }
-        FilterExpr::Lte { field, value: expected } => {
-            compare_numbers(value, field, expected, |a, b| a <= b)
-        }
-        FilterExpr::And { expressions } => expressions
-            .iter()
-            .all(|expr| evaluate_filter(expr, value)),
-        FilterExpr::Or { expressions } => expressions
-            .iter()
-            .any(|expr| evaluate_filter(expr, value)),
     }
 }
 
@@ -587,8 +600,9 @@ impl SqliteStore {
     ///
     /// Returns `StoreError` if connection fails or table creation fails.
     pub async fn new(database_url: &str) -> Result<Self, StoreError> {
-        let pool = sqlx::SqlitePool::connect(database_url).await
-            .map_err(|e| StoreError::InvalidOperation(format!("Failed to connect to database: {e}")))?;
+        let pool = sqlx::SqlitePool::connect(database_url).await.map_err(|e| {
+            StoreError::InvalidOperation(format!("Failed to connect to database: {e}"))
+        })?;
 
         // Run migrations
         sqlx::query(
@@ -636,17 +650,14 @@ impl SqliteStore {
 #[cfg(feature = "sqlite")]
 #[async_trait]
 impl Store for SqliteStore {
-    async fn get(
-        &self,
-        namespace: &str,
-        key: &str,
-    ) -> Result<Option<Item>, StoreError> {
-        let pool = self.pool.as_ref().ok_or_else(|| {
-            StoreError::InvalidOperation("Store not initialized".to_string())
-        })?;
+    async fn get(&self, namespace: &str, key: &str) -> Result<Option<Item>, StoreError> {
+        let pool = self
+            .pool
+            .as_ref()
+            .ok_or_else(|| StoreError::InvalidOperation("Store not initialized".to_string()))?;
 
         let result = sqlx::query(
-            "SELECT value, created_at, updated_at FROM store_items WHERE namespace = ? AND key = ?"
+            "SELECT value, created_at, updated_at FROM store_items WHERE namespace = ? AND key = ?",
         )
         .bind(namespace)
         .bind(key)
@@ -655,13 +666,15 @@ impl Store for SqliteStore {
         .map_err(|e| StoreError::InvalidOperation(format!("Failed to get item: {e}")))?;
 
         if let Some(row) = result {
-            let value_str: String = row.try_get("value")
+            let value_str: String = row
+                .try_get("value")
                 .map_err(|e| StoreError::Database(e.to_string()))?;
-            let value = serde_json::from_str(&value_str)
-                .map_err(StoreError::Serialization)?;
-            let created_at: String = row.try_get("created_at")
+            let value = serde_json::from_str(&value_str).map_err(StoreError::Serialization)?;
+            let created_at: String = row
+                .try_get("created_at")
                 .map_err(|e| StoreError::Database(e.to_string()))?;
-            let updated_at: String = row.try_get("updated_at")
+            let updated_at: String = row
+                .try_get("updated_at")
                 .map_err(|e| StoreError::Database(e.to_string()))?;
 
             Ok(Some(Item {
@@ -687,12 +700,12 @@ impl Store for SqliteStore {
         value: serde_json::Value,
         _index: Option<Vec<String>>,
     ) -> Result<(), StoreError> {
-        let pool = self.pool.as_ref().ok_or_else(|| {
-            StoreError::InvalidOperation("Store not initialized".to_string())
-        })?;
+        let pool = self
+            .pool
+            .as_ref()
+            .ok_or_else(|| StoreError::InvalidOperation("Store not initialized".to_string()))?;
 
-        let value_str = serde_json::to_string(&value)
-            .map_err(StoreError::Serialization)?;
+        let value_str = serde_json::to_string(&value).map_err(StoreError::Serialization)?;
         let now = Utc::now().to_rfc3339();
 
         sqlx::query(
@@ -702,7 +715,7 @@ impl Store for SqliteStore {
             ON CONFLICT (namespace, key) DO UPDATE SET
                 value = excluded.value,
                 updated_at = excluded.updated_at
-            "
+            ",
         )
         .bind(namespace)
         .bind(key)
@@ -717,18 +730,17 @@ impl Store for SqliteStore {
     }
 
     async fn delete(&self, namespace: &str, key: &str) -> Result<(), StoreError> {
-        let pool = self.pool.as_ref().ok_or_else(|| {
-            StoreError::InvalidOperation("Store not initialized".to_string())
-        })?;
+        let pool = self
+            .pool
+            .as_ref()
+            .ok_or_else(|| StoreError::InvalidOperation("Store not initialized".to_string()))?;
 
-        sqlx::query(
-            "DELETE FROM store_items WHERE namespace = ? AND key = ?"
-        )
-        .bind(namespace)
-        .bind(key)
-        .execute(pool)
-        .await
-        .map_err(|e| StoreError::InvalidOperation(format!("Failed to delete item: {e}")))?;
+        sqlx::query("DELETE FROM store_items WHERE namespace = ? AND key = ?")
+            .bind(namespace)
+            .bind(key)
+            .execute(pool)
+            .await
+            .map_err(|e| StoreError::InvalidOperation(format!("Failed to delete item: {e}")))?;
 
         Ok(())
     }
@@ -750,9 +762,10 @@ impl Store for SqliteStore {
         limit: Option<usize>,
         _offset: Option<usize>,
     ) -> Result<Vec<String>, StoreError> {
-        let pool = self.pool.as_ref().ok_or_else(|| {
-            StoreError::InvalidOperation("Store not initialized".to_string())
-        })?;
+        let pool = self
+            .pool
+            .as_ref()
+            .ok_or_else(|| StoreError::InvalidOperation("Store not initialized".to_string()))?;
 
         let mut query_str = "SELECT DISTINCT namespace FROM store_items WHERE 1=1".to_string();
         let mut params = Vec::new();
@@ -781,7 +794,8 @@ impl Store for SqliteStore {
 
         let mut namespaces = Vec::new();
         for row in rows {
-            let ns: String = row.try_get("namespace")
+            let ns: String = row
+                .try_get("namespace")
                 .map_err(|e| StoreError::Database(e.to_string()))?;
             namespaces.push(ns);
         }
@@ -821,8 +835,8 @@ impl Store for SqliteStore {
                     max_depth,
                     limit,
                 } => {
-                    let namespaces =
-                        self.list_namespaces(
+                    let namespaces = self
+                        .list_namespaces(
                             prefix.as_deref(),
                             suffix.as_deref(),
                             max_depth,
@@ -865,8 +879,9 @@ impl PostgresStore {
     ///
     /// Returns `StoreError` if connection fails or table creation fails.
     pub async fn new(database_url: &str) -> Result<Self, StoreError> {
-        let pool = sqlx::PgPool::connect(database_url).await
-            .map_err(|e| StoreError::InvalidOperation(format!("Failed to connect to database: {e}")))?;
+        let pool = sqlx::PgPool::connect(database_url).await.map_err(|e| {
+            StoreError::InvalidOperation(format!("Failed to connect to database: {e}"))
+        })?;
 
         // Run migrations
         sqlx::query(
@@ -879,7 +894,7 @@ impl PostgresStore {
                 updated_at TIMESTAMPTZ NOT NULL,
                 PRIMARY KEY (namespace, key)
             )
-            "
+            ",
         )
         .execute(&pool)
         .await
@@ -914,14 +929,11 @@ impl PostgresStore {
 #[cfg(feature = "postgres")]
 #[async_trait]
 impl Store for PostgresStore {
-    async fn get(
-        &self,
-        namespace: &str,
-        key: &str,
-    ) -> Result<Option<Item>, StoreError> {
-        let pool = self.pool.as_ref().ok_or_else(|| {
-            StoreError::InvalidOperation("Store not initialized".to_string())
-        })?;
+    async fn get(&self, namespace: &str, key: &str) -> Result<Option<Item>, StoreError> {
+        let pool = self
+            .pool
+            .as_ref()
+            .ok_or_else(|| StoreError::InvalidOperation("Store not initialized".to_string()))?;
 
         let result = sqlx::query(
             "SELECT value, created_at, updated_at FROM store_items WHERE namespace = $1 AND key = $2"
@@ -933,11 +945,14 @@ impl Store for PostgresStore {
         .map_err(|e| StoreError::InvalidOperation(format!("Failed to get item: {e}")))?;
 
         if let Some(row) = result {
-            let value: serde_json::Value = row.try_get("value")
+            let value: serde_json::Value = row
+                .try_get("value")
                 .map_err(|e| StoreError::Database(e.to_string()))?;
-            let created_at: chrono::DateTime<chrono::Utc> = row.try_get("created_at")
+            let created_at: chrono::DateTime<chrono::Utc> = row
+                .try_get("created_at")
                 .map_err(|e| StoreError::Database(e.to_string()))?;
-            let updated_at: chrono::DateTime<chrono::Utc> = row.try_get("updated_at")
+            let updated_at: chrono::DateTime<chrono::Utc> = row
+                .try_get("updated_at")
                 .map_err(|e| StoreError::Database(e.to_string()))?;
 
             Ok(Some(Item {
@@ -959,9 +974,10 @@ impl Store for PostgresStore {
         value: serde_json::Value,
         _index: Option<Vec<String>>,
     ) -> Result<(), StoreError> {
-        let pool = self.pool.as_ref().ok_or_else(|| {
-            StoreError::InvalidOperation("Store not initialized".to_string())
-        })?;
+        let pool = self
+            .pool
+            .as_ref()
+            .ok_or_else(|| StoreError::InvalidOperation("Store not initialized".to_string()))?;
 
         let now = Utc::now();
 
@@ -972,7 +988,7 @@ impl Store for PostgresStore {
             ON CONFLICT (namespace, key) DO UPDATE SET
                 value = EXCLUDED.value,
                 updated_at = EXCLUDED.updated_at
-            "
+            ",
         )
         .bind(namespace)
         .bind(key)
@@ -987,18 +1003,17 @@ impl Store for PostgresStore {
     }
 
     async fn delete(&self, namespace: &str, key: &str) -> Result<(), StoreError> {
-        let pool = self.pool.as_ref().ok_or_else(|| {
-            StoreError::InvalidOperation("Store not initialized".to_string())
-        })?;
+        let pool = self
+            .pool
+            .as_ref()
+            .ok_or_else(|| StoreError::InvalidOperation("Store not initialized".to_string()))?;
 
-        sqlx::query(
-            "DELETE FROM store_items WHERE namespace = $1 AND key = $2"
-        )
-        .bind(namespace)
-        .bind(key)
-        .execute(pool)
-        .await
-        .map_err(|e| StoreError::InvalidOperation(format!("Failed to delete item: {e}")))?;
+        sqlx::query("DELETE FROM store_items WHERE namespace = $1 AND key = $2")
+            .bind(namespace)
+            .bind(key)
+            .execute(pool)
+            .await
+            .map_err(|e| StoreError::InvalidOperation(format!("Failed to delete item: {e}")))?;
 
         Ok(())
     }
@@ -1020,9 +1035,10 @@ impl Store for PostgresStore {
         limit: Option<usize>,
         _offset: Option<usize>,
     ) -> Result<Vec<String>, StoreError> {
-        let pool = self.pool.as_ref().ok_or_else(|| {
-            StoreError::InvalidOperation("Store not initialized".to_string())
-        })?;
+        let pool = self
+            .pool
+            .as_ref()
+            .ok_or_else(|| StoreError::InvalidOperation("Store not initialized".to_string()))?;
 
         let mut query_str = "SELECT DISTINCT namespace FROM store_items WHERE 1=1".to_string();
         let mut param_idx = 1;
@@ -1054,7 +1070,8 @@ impl Store for PostgresStore {
 
         let mut namespaces = Vec::new();
         for row in rows {
-            let ns: String = row.try_get("namespace")
+            let ns: String = row
+                .try_get("namespace")
                 .map_err(|e| StoreError::Database(e.to_string()))?;
             namespaces.push(ns);
         }
@@ -1094,8 +1111,8 @@ impl Store for PostgresStore {
                     max_depth,
                     limit,
                 } => {
-                    let namespaces =
-                        self.list_namespaces(
+                    let namespaces = self
+                        .list_namespaces(
                             prefix.as_deref(),
                             suffix.as_deref(),
                             max_depth,

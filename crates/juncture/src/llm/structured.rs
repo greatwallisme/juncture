@@ -57,7 +57,9 @@ pub struct StructuredOutputModel<
     _phantom: PhantomData<T>,
 }
 
-impl<M: ChatModel, T: DeserializeOwned + JsonSchema + Clone + Send + Sync + 'static> StructuredOutputModel<M, T> {
+impl<M: ChatModel, T: DeserializeOwned + JsonSchema + Clone + Send + Sync + 'static>
+    StructuredOutputModel<M, T>
+{
     /// Create a new structured output wrapper.
     ///
     /// # Arguments
@@ -82,7 +84,10 @@ impl<M: ChatModel, T: DeserializeOwned + JsonSchema + Clone + Send + Sync + 'sta
 
     /// Get the inner model.
     #[must_use]
-    #[allow(clippy::missing_const_for_fn, reason = "Cannot be const in current Rust version")]
+    #[allow(
+        clippy::missing_const_for_fn,
+        reason = "Cannot be const in current Rust version"
+    )]
     pub fn inner(&self) -> &M {
         &self.inner
     }

@@ -128,7 +128,10 @@ impl CacheKeyInput {
 /// Metrics registry for custom metrics
 ///
 /// Provides explicit API for creating and registering custom metrics.
-#[allow(missing_debug_implementations, reason = "Contains OpenTelemetry meter which doesn't implement Debug")]
+#[allow(
+    missing_debug_implementations,
+    reason = "Contains OpenTelemetry meter which doesn't implement Debug"
+)]
 pub struct MetricsRegistry {
     /// OpenTelemetry meter (when available)
     #[cfg(feature = "otel")]
@@ -354,10 +357,7 @@ impl CachePolicy {
 
     /// Set custom cache key function
     #[must_use]
-    pub fn with_key_func(
-        mut self,
-        f: Arc<dyn Fn(&CacheKeyInput) -> String + Send + Sync>,
-    ) -> Self {
+    pub fn with_key_func(mut self, f: Arc<dyn Fn(&CacheKeyInput) -> String + Send + Sync>) -> Self {
         self.key_func = Some(f);
         self
     }
@@ -365,9 +365,10 @@ impl CachePolicy {
     /// Generate cache key from input
     #[must_use]
     pub fn generate_key(&self, input: &CacheKeyInput) -> String {
-        self.key_func
-            .as_ref()
-            .map_or_else(|| format!("{}:{}", input.model, input.hash()), |func| func(input))
+        self.key_func.as_ref().map_or_else(
+            || format!("{}:{}", input.model, input.hash()),
+            |func| func(input),
+        )
     }
 }
 

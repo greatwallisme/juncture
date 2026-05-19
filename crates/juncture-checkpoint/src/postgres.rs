@@ -9,12 +9,46 @@ use std::sync::Arc;
 #[cfg(feature = "postgres")]
 use sqlx::Row;
 
-use crate::error::CheckpointError;
 use juncture_core::checkpoint::{
-    Checkpoint, CheckpointFilter, CheckpointMetadata, CheckpointTuple, PendingWrite,
+    Checkpoint, CheckpointError as CoreCheckpointError, CheckpointFilter, CheckpointMetadata,
+    CheckpointTuple, PendingWrite,
 };
 use juncture_core::config::RunnableConfig;
-use juncture_core::error::JunctureError;
+
+use crate::error::CheckpointError;
+
+// Convert crate's CheckpointError to core's CheckpointError
+#[allow(dead_code, reason = "conversion trait used internally")]
+trait ToCoreCheckpointError<T> {
+    fn map_checkpoint(self) -> Result<T, CoreCheckpointError>;
+}
+
+impl<T> ToCoreCheckpointError<T> for Result<T, CheckpointError> {
+    fn map_checkpoint(self) -> Result<T, CoreCheckpointError> {
+        self.map_err(|e| match e {
+            CheckpointError::Serialize(msg) | CheckpointError::Serialization(msg) => {
+                CoreCheckpointError::Serialize(msg)
+            }
+            CheckpointError::Deserialize(msg) => CoreCheckpointError::Deserialize(msg),
+            CheckpointError::NotFound {
+                thread_id,
+                checkpoint_id,
+            } => CoreCheckpointError::NotFound {
+                thread_id,
+                checkpoint_id,
+            },
+            CheckpointError::Storage(msg) | CheckpointError::Database(msg) => {
+                CoreCheckpointError::Storage(msg)
+            }
+            CheckpointError::SchemaMigration { from, to, reason } => {
+                CoreCheckpointError::Other(format!("Schema migration: {from} -> {to}: {reason}"))
+            }
+            CheckpointError::PoolExhausted => {
+                CoreCheckpointError::Storage("Connection pool exhausted".to_string())
+            }
+        })
+    }
+}
 
 /// `PostgreSQL` checkpoint saver
 ///
@@ -80,7 +114,9 @@ impl PostgresSaver {
         .await
         .map_err(|e| CheckpointError::Database(e.to_string()))?;
 
-        Ok(Self { pool: Arc::new(pool) })
+        Ok(Self {
+            pool: Arc::new(pool),
+        })
     }
 
     /// Get thread ID from config, returning error if not set
@@ -103,16 +139,16 @@ impl juncture_core::checkpoint::CheckpointSaver for PostgresSaver {
     async fn get_tuple(
         &self,
         config: &RunnableConfig,
-    ) -> Result<Option<CheckpointTuple>, JunctureError> {
-        let thread_id = Self::get_thread_id(config)
-            .map_err(|e| JunctureError::checkpoint(e.to_string()))?;
+    ) -> Result<Option<CheckpointTuple>, CoreCheckpointError> {
+        let thread_id =
+            Self::get_thread_id(config).map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
         let checkpoint_ns = Self::get_checkpoint_ns(config);
 
         let row = if let Some(checkpoint_id) = &config.checkpoint_id {
             sqlx::query(
                 "SELECT checkpoint_data, metadata_data
                  FROM checkpoints
-                 WHERE thread_id = $1 AND checkpoint_ns = $2 AND id = $3"
+                 WHERE thread_id = $1 AND checkpoint_ns = $2 AND id = $3",
             )
             .bind(&thread_id)
             .bind(&checkpoint_ns)
@@ -125,25 +161,28 @@ impl juncture_core::checkpoint::CheckpointSaver for PostgresSaver {
                  FROM checkpoints
                  WHERE thread_id = $1 AND checkpoint_ns = $2
                  ORDER BY created_at DESC
-                 LIMIT 1"
+                 LIMIT 1",
             )
             .bind(&thread_id)
             .bind(&checkpoint_ns)
             .fetch_optional(&*self.pool)
             .await
-        }.map_err(|e| JunctureError::checkpoint(e.to_string()))?;
+        }
+        .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
 
         match row {
             Some(row) => {
-                let checkpoint_data: String = row.try_get("checkpoint_data")
-                    .map_err(|e| JunctureError::checkpoint(e.to_string()))?;
-                let metadata_data: String = row.try_get("metadata_data")
-                    .map_err(|e| JunctureError::checkpoint(e.to_string()))?;
+                let checkpoint_data: String = row
+                    .try_get("checkpoint_data")
+                    .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
+                let metadata_data: String = row
+                    .try_get("metadata_data")
+                    .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
 
                 let checkpoint: Checkpoint = serde_json::from_str(&checkpoint_data)
-                    .map_err(|e| JunctureError::checkpoint(e.to_string()))?;
+                    .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
                 let metadata: CheckpointMetadata = serde_json::from_str(&metadata_data)
-                    .map_err(|e| JunctureError::checkpoint(e.to_string()))?;
+                    .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
 
                 Ok(Some(CheckpointTuple {
                     config: config.clone(),
@@ -161,9 +200,9 @@ impl juncture_core::checkpoint::CheckpointSaver for PostgresSaver {
         &self,
         config: &RunnableConfig,
         filter: Option<CheckpointFilter>,
-    ) -> Result<Vec<CheckpointTuple>, JunctureError> {
-        let thread_id = Self::get_thread_id(config)
-            .map_err(|e| JunctureError::checkpoint(e.to_string()))?;
+    ) -> Result<Vec<CheckpointTuple>, CoreCheckpointError> {
+        let thread_id =
+            Self::get_thread_id(config).map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
         let checkpoint_ns = Self::get_checkpoint_ns(config);
 
         let limit = i64::try_from(filter.as_ref().and_then(|f| f.limit).unwrap_or(10))
@@ -174,26 +213,28 @@ impl juncture_core::checkpoint::CheckpointSaver for PostgresSaver {
              FROM checkpoints
              WHERE thread_id = $1 AND checkpoint_ns = $2
              ORDER BY created_at DESC
-             LIMIT $3"
+             LIMIT $3",
         )
         .bind(&thread_id)
         .bind(&checkpoint_ns)
         .bind(limit)
         .fetch_all(&*self.pool)
         .await
-        .map_err(|e| JunctureError::checkpoint(e.to_string()))?;
+        .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
 
         let mut results = Vec::new();
         for row in rows {
-            let checkpoint_data: String = row.try_get("checkpoint_data")
-                .map_err(|e| JunctureError::checkpoint(e.to_string()))?;
-            let metadata_data: String = row.try_get("metadata_data")
-                .map_err(|e| JunctureError::checkpoint(e.to_string()))?;
+            let checkpoint_data: String = row
+                .try_get("checkpoint_data")
+                .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
+            let metadata_data: String = row
+                .try_get("metadata_data")
+                .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
 
             let checkpoint: Checkpoint = serde_json::from_str(&checkpoint_data)
-                .map_err(|e| JunctureError::checkpoint(e.to_string()))?;
+                .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
             let metadata: CheckpointMetadata = serde_json::from_str(&metadata_data)
-                .map_err(|e| JunctureError::checkpoint(e.to_string()))?;
+                .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
 
             results.push(CheckpointTuple {
                 config: config.clone(),
@@ -212,15 +253,15 @@ impl juncture_core::checkpoint::CheckpointSaver for PostgresSaver {
         config: &RunnableConfig,
         checkpoint: Checkpoint,
         metadata: CheckpointMetadata,
-    ) -> Result<RunnableConfig, JunctureError> {
-        let thread_id = Self::get_thread_id(config)
-            .map_err(|e| JunctureError::checkpoint(e.to_string()))?;
+    ) -> Result<RunnableConfig, CoreCheckpointError> {
+        let thread_id =
+            Self::get_thread_id(config).map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
         let checkpoint_ns = Self::get_checkpoint_ns(config);
 
         let checkpoint_data = serde_json::to_string(&checkpoint)
-            .map_err(|e| JunctureError::checkpoint(e.to_string()))?;
+            .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
         let metadata_data = serde_json::to_string(&metadata)
-            .map_err(|e| JunctureError::checkpoint(e.to_string()))?;
+            .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
 
         let now = chrono::Utc::now();
 
@@ -233,7 +274,7 @@ impl juncture_core::checkpoint::CheckpointSaver for PostgresSaver {
                 checkpoint_data = EXCLUDED.checkpoint_data,
                 metadata_data = EXCLUDED.metadata_data,
                 updated_at = EXCLUDED.updated_at
-            "
+            ",
         )
         .bind(&checkpoint.id)
         .bind(&thread_id)
@@ -244,7 +285,7 @@ impl juncture_core::checkpoint::CheckpointSaver for PostgresSaver {
         .bind(now)
         .execute(&*self.pool)
         .await
-        .map_err(|e| JunctureError::checkpoint(e.to_string()))?;
+        .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
 
         let mut updated_config = config.clone();
         updated_config.checkpoint_id = Some(checkpoint.id.clone());
@@ -257,7 +298,7 @@ impl juncture_core::checkpoint::CheckpointSaver for PostgresSaver {
         _config: &RunnableConfig,
         _writes: Vec<PendingWrite>,
         _task_id: &str,
-    ) -> Result<(), JunctureError> {
+    ) -> Result<(), CoreCheckpointError> {
         // PostgreSQL implementation doesn't track pending writes separately
         // They're included in the checkpoint data itself
         Ok(())

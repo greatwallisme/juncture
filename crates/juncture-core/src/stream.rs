@@ -83,7 +83,10 @@ pub enum StreamEvent<S: State> {
     },
 
     /// Budget exceeded
-    BudgetExceeded { reason: String, usage: BudgetUsage },
+    BudgetExceeded {
+        reason: crate::pregel::BudgetExceededReason,
+        usage: BudgetUsage,
+    },
 
     /// Graph execution completed
     End { output: S },
@@ -95,7 +98,11 @@ pub enum StreamEvent<S: State> {
     Tools(ToolsEvent),
 
     /// Checkpoint saved
-    CheckpointSaved { checkpoint_id: String, step: usize },
+    CheckpointSaved {
+        checkpoint_id: String,
+        metadata: crate::checkpoint::CheckpointMetadata,
+        step: usize,
+    },
 
     /// Detailed task event
     TaskDetail {
@@ -146,6 +153,7 @@ pub enum DebugEvent {
     },
     CheckpointSaved {
         checkpoint_id: String,
+        metadata: crate::checkpoint::CheckpointMetadata,
         step: usize,
     },
     ChannelUpdate {
@@ -169,6 +177,7 @@ pub enum ToolsEvent {
         tool_name: String,
         tool_call_id: String,
         node: String,
+        input: serde_json::Value,
     },
     ToolOutputDelta {
         tool_call_id: String,
@@ -176,6 +185,7 @@ pub enum ToolsEvent {
     },
     ToolFinished {
         tool_call_id: String,
+        output: serde_json::Value,
         duration_ms: u64,
     },
     ToolError {
@@ -249,7 +259,10 @@ impl StreamChannel {
     /// # Errors
     ///
     /// Returns an error if the channel is closed
-    pub async fn send(&self, data: serde_json::Value) -> Result<(), tokio::sync::mpsc::error::SendError<serde_json::Value>> {
+    pub async fn send(
+        &self,
+        data: serde_json::Value,
+    ) -> Result<(), tokio::sync::mpsc::error::SendError<serde_json::Value>> {
         self.tx.send(data).await
     }
 }
@@ -290,27 +303,33 @@ impl<S: State> EventEmitter<S> {
     /// # Errors
     ///
     /// Returns an error if the channel is closed
-    pub async fn emit(&self, event: StreamEvent<S>) -> Result<(), tokio::sync::mpsc::error::SendError<StreamEvent<S>>> {
+    pub async fn emit(
+        &self,
+        event: StreamEvent<S>,
+    ) -> Result<(), tokio::sync::mpsc::error::SendError<StreamEvent<S>>> {
         self.tx.send(event).await
     }
 
     #[must_use]
     pub fn stream_writer(&self, node: String) -> StreamEventWriter<S> {
-        StreamEventWriter::new(node, self.mode.clone())
+        StreamEventWriter::new(self.tx.clone(), node, self.mode.clone())
     }
 
     #[must_use]
     #[allow(clippy::match_same_arms, reason = "each arm is explicit for clarity")]
     pub const fn should_emit(&self, event: &StreamEvent<S>) -> bool {
         match (&self.mode, event) {
-            (StreamMode::Values, StreamEvent::Values { .. }) => true,
-            (StreamMode::Updates, StreamEvent::Updates { .. }) => true,
-            (StreamMode::Messages, StreamEvent::Messages { .. }) => true,
-            (StreamMode::Custom, StreamEvent::Custom { .. }) => true,
-            (StreamMode::Debug, StreamEvent::Debug(_)) => true,
-            (StreamMode::Tools, StreamEvent::Tools(_)) => true,
-            (StreamMode::Checkpoints, StreamEvent::CheckpointSaved { .. }) => true,
-            (StreamMode::Tasks, StreamEvent::TaskDetail { .. }) => true,
+            (StreamMode::Values, StreamEvent::Values { .. } | StreamEvent::End { .. }) => true,
+            (StreamMode::Updates, StreamEvent::Updates { .. } | StreamEvent::End { .. }) => true,
+            (StreamMode::Messages, StreamEvent::Messages { .. } | StreamEvent::End { .. }) => true,
+            (StreamMode::Custom, StreamEvent::Custom { .. } | StreamEvent::End { .. }) => true,
+            (StreamMode::Debug, _) => true, // Debug mode receives all events including End
+            (StreamMode::Tools, StreamEvent::Tools(_) | StreamEvent::End { .. }) => true,
+            (
+                StreamMode::Checkpoints,
+                StreamEvent::CheckpointSaved { .. } | StreamEvent::End { .. },
+            ) => true,
+            (StreamMode::Tasks, StreamEvent::TaskDetail { .. } | StreamEvent::End { .. }) => true,
             (StreamMode::Multi(_), _) => true, // Allow all events in multi-mode
             _ => false,
         }
@@ -318,72 +337,86 @@ impl<S: State> EventEmitter<S> {
 }
 
 /// Writer for streaming events from a node
+///
+/// Nodes receive this writer to emit custom streaming events during execution.
+/// The writer carries a sender channel, the current node name, stream mode,
+/// and namespace stack for subgraph isolation.
 #[derive(Clone)]
 pub struct StreamEventWriter<S: State> {
+    tx: Option<tokio::sync::mpsc::Sender<StreamEvent<S>>>,
     node: String,
     mode: StreamMode,
     ns: Vec<String>,
-    _phantom: std::marker::PhantomData<S>,
 }
 
 impl<S: State> StreamEventWriter<S> {
+    /// Create a new writer backed by a real channel
     #[must_use]
-    pub const fn new(node: String, mode: StreamMode) -> Self {
+    pub const fn new(
+        tx: tokio::sync::mpsc::Sender<StreamEvent<S>>,
+        node: String,
+        mode: StreamMode,
+    ) -> Self {
         Self {
+            tx: Some(tx),
             node,
             mode,
             ns: Vec::new(),
-            _phantom: std::marker::PhantomData,
         }
     }
 
+    /// Create a disconnected writer (no-op send)
+    ///
+    /// Used when streaming is not configured for the current execution.
     #[must_use]
-    pub fn with_ns(mut self, ns: Vec<String>) -> Self {
-        self.ns = ns;
-        self
+    pub const fn disconnected(node: String, mode: StreamMode) -> Self {
+        Self {
+            tx: None,
+            node,
+            mode,
+            ns: Vec::new(),
+        }
     }
 
-    /// Send an event through this writer
-    ///
-    /// This method provides node-level context and namespace tracking.
-    /// Events are routed to the appropriate emitter based on mode.
-    ///
-    /// The writer validates that the event matches the configured mode before
-    /// sending, ensuring only relevant events are transmitted.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the event type doesn't match the configured mode
-    #[allow(
-        clippy::result_large_err,
-        clippy::missing_const_for_fn,
-        reason = "StreamEvent can be large and this method validates mode compatibility"
-    )]
-    pub const fn send(&self, event: StreamEvent<S>) -> Result<(), tokio::sync::mpsc::error::SendError<StreamEvent<S>>> {
-        // Validate event mode compatibility using matches! macro
-        let compatible = matches!(
-            (&self.mode, &event),
-            (StreamMode::Values, StreamEvent::Values { .. })
-                | (StreamMode::Updates, StreamEvent::Updates { .. })
-                | (StreamMode::Messages, StreamEvent::Messages { .. })
-                | (StreamMode::Custom, StreamEvent::Custom { .. })
-                | (StreamMode::Debug, StreamEvent::Debug(_))
-                | (StreamMode::Tools, StreamEvent::Tools(_))
-                | (StreamMode::Checkpoints, StreamEvent::CheckpointSaved { .. })
-                | (StreamMode::Tasks, StreamEvent::TaskDetail { .. })
-                | (StreamMode::Multi(_), _)
-        );
+    /// Create a child writer with an additional namespace segment (for subgraphs)
+    #[must_use]
+    pub fn with_ns(&self, ns_segment: String) -> Self {
+        let mut new_ns = self.ns.clone();
+        new_ns.push(ns_segment);
+        Self {
+            tx: self.tx.clone(),
+            node: self.node.clone(),
+            mode: self.mode.clone(),
+            ns: new_ns,
+        }
+    }
 
-        // In the runtime implementation, this would send to the actual channel
-        // The writer decorates events with node and namespace context
-        let _ = (&self.node, &self.mode, &self.ns, compatible);
-        Err(tokio::sync::mpsc::error::SendError(event))
+    /// Send a custom stream event through the channel.
+    ///
+    /// Silently drops the event if the writer is disconnected or the event
+    /// does not match the configured [`StreamMode`].
+    pub async fn send(&self, data: serde_json::Value) {
+        let Some(ref tx) = self.tx else {
+            return;
+        };
+
+        let event = StreamEvent::Custom {
+            node: self.node.clone(),
+            data,
+            ns: self.ns.clone(),
+        };
+
+        let emitter = EventEmitter::new(tx.clone(), self.mode.clone());
+        if emitter.should_emit(&event) {
+            let _ = tx.send(event).await;
+        }
     }
 }
 
 impl<S: State> std::fmt::Debug for StreamEventWriter<S> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("StreamEventWriter")
+            .field("tx", &self.tx.is_some())
             .field("node", &self.node)
             .field("mode", &self.mode)
             .field("ns", &self.ns)
@@ -426,13 +459,17 @@ impl StreamConfig {
 #[derive(Clone, Debug)]
 pub struct StreamResumption {
     pub run_id: String,
-    pub last_checkpoint_id: String,
-    pub last_step: usize,
+    pub last_checkpoint_id: Option<String>,
+    pub last_step: Option<usize>,
 }
 
 impl StreamResumption {
     #[must_use]
-    pub const fn new(run_id: String, last_checkpoint_id: String, last_step: usize) -> Self {
+    pub const fn new(
+        run_id: String,
+        last_checkpoint_id: Option<String>,
+        last_step: Option<usize>,
+    ) -> Self {
         Self {
             run_id,
             last_checkpoint_id,
@@ -442,7 +479,10 @@ impl StreamResumption {
 
     #[must_use]
     pub const fn should_skip(&self, current_step: usize) -> bool {
-        current_step <= self.last_step
+        match self.last_step {
+            Some(last_step) => current_step <= last_step,
+            None => false,
+        }
     }
 }
 
@@ -458,11 +498,16 @@ impl JsonParseTransformer {
 }
 
 impl StreamTransformer for JsonParseTransformer {
+    #[allow(
+        clippy::option_if_let_else,
+        reason = "project rules prohibit map_or with unwrap; match is explicit and readable"
+    )]
     fn transform(&self, data: serde_json::Value) -> serde_json::Value {
         match data {
-            serde_json::Value::String(s) => {
-                serde_json::from_str(&s).unwrap_or(serde_json::Value::Null)
-            }
+            serde_json::Value::String(s) => match serde_json::from_str(&s) {
+                Ok(v) => v,
+                Err(_) => serde_json::Value::Null,
+            },
             _ => data,
         }
     }
@@ -485,8 +530,7 @@ impl StreamTransformer for FilterFieldsTransformer {
     fn transform(&self, data: serde_json::Value) -> serde_json::Value {
         match data {
             serde_json::Value::Object(mut map) => {
-                let keys_to_keep: std::collections::HashSet<_> =
-                    self.fields.iter().collect();
+                let keys_to_keep: std::collections::HashSet<_> = self.fields.iter().collect();
                 map.retain(|k, _| keys_to_keep.contains(k));
                 serde_json::Value::Object(map)
             }
@@ -517,4 +561,4 @@ impl StreamTransformer for BatchTransformer {
     }
 }
 
-// Rust guideline compliant 2026-05-19
+// Rust guideline compliant 2026-05-20

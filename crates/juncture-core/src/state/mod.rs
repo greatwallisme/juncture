@@ -8,8 +8,8 @@ pub use channel::{
     ReplaceReducer, UntrackedChannel,
 };
 pub use messages::{
-    Content, ContentPart, ImageData, ImageSource, Message, REMOVE_ALL_MESSAGES, Role, TokenUsage,
-    ToolCall, messages_reducer,
+    Content, ContentPart, ImageData, ImageSource, Message, MessagesState, MessagesStateUpdate,
+    REMOVE_ALL_MESSAGES, Role, TokenUsage, ToolCall, messages_reducer,
 };
 pub use trait_::{CowState, FieldsChanged, FromState, IntoState, State};
 

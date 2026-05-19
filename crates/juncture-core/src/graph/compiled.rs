@@ -161,6 +161,7 @@ impl<S: State> CompiledGraph<S> {
             metadata: GraphOutputMetadata {
                 steps,
                 checkpoint_id: config.checkpoint_id.clone(),
+                budget_usage: None,
             },
         })
     }
@@ -708,6 +709,9 @@ pub struct GraphOutputMetadata {
 
     /// Checkpoint ID if checkpointing was enabled
     pub checkpoint_id: Option<String>,
+
+    /// Budget usage if budget tracking was enabled
+    pub budget_usage: Option<crate::pregel::BudgetUsage>,
 }
 
 /// State update for manual checkpoint modifications
@@ -717,7 +721,7 @@ pub struct GraphOutputMetadata {
 #[derive(Clone, Debug)]
 pub struct StateUpdate<S: State> {
     /// State update to apply
-    pub values: S::Update,
+    pub update: S::Update,
 
     /// Optional label for this update (shown in state history)
     pub label: Option<String>,
@@ -948,7 +952,7 @@ mod tests {
         let config = RunnableConfig::new();
 
         let update = StateUpdate {
-            values: StateDummyUpdate,
+            update: StateDummyUpdate,
             label: None,
             as_node: None,
         };
@@ -967,7 +971,7 @@ mod tests {
         let config = RunnableConfig::new();
 
         let updates = vec![StateUpdate {
-            values: StateDummyUpdate,
+            update: StateDummyUpdate,
             label: None,
             as_node: None,
         }];
@@ -980,7 +984,7 @@ mod tests {
     #[test]
     fn test_state_update_creation() {
         let update: StateUpdate<StateDummy> = StateUpdate {
-            values: StateDummyUpdate,
+            update: StateDummyUpdate,
             label: Some("test update".to_string()),
             as_node: Some("my_node".to_string()),
         };
@@ -1042,4 +1046,4 @@ mod tests {
     struct StateDummyUpdate;
 }
 
-// Rust guideline compliant 2026-05-19
+// Rust guideline compliant 2026-05-20

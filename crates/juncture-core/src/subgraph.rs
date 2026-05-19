@@ -303,7 +303,7 @@ mod tests {
 ///
 /// Transforms stream events from subgraph execution by adding namespace
 /// prefixes and filtering events based on configuration.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct SubgraphTransformer {
     /// Subgraph name for namespace prefix
     pub subgraph_name: String,
@@ -312,10 +312,28 @@ pub struct SubgraphTransformer {
     pub ns: Vec<String>,
 
     /// Optional filter for event types
-    pub filter: Option<Vec<String>>,
+    ///
+    /// The closure receives the event as a `serde_json::Value` and returns
+    /// true if the event should be included, false otherwise.
+    #[allow(
+        clippy::type_complexity,
+        reason = "trait object requires full signature for filter closure"
+    )]
+    pub filter: Option<std::sync::Arc<dyn Fn(&serde_json::Value) -> bool + Send + Sync>>,
 
     /// Whether to include internal events
     pub include_internal: bool,
+}
+
+impl std::fmt::Debug for SubgraphTransformer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SubgraphTransformer")
+            .field("subgraph_name", &self.subgraph_name)
+            .field("ns", &self.ns)
+            .field("filter", &self.filter.as_ref().map(|_| "<fn>"))
+            .field("include_internal", &self.include_internal)
+            .finish()
+    }
 }
 
 impl SubgraphTransformer {
@@ -334,14 +352,39 @@ impl SubgraphTransformer {
         }
     }
 
-    /// Set event filter
+    /// Set event filter as a closure
     ///
     /// # Arguments
     ///
-    /// * `filter` - List of event types to include (None means all events)
+    /// * `filter` - Closure that receives the event as JSON and returns
+    ///   true if the event should be included
     #[must_use]
-    pub fn with_filter(mut self, filter: Vec<String>) -> Self {
-        self.filter = Some(filter);
+    pub fn with_filter(
+        mut self,
+        filter: impl Fn(&serde_json::Value) -> bool + Send + Sync + 'static,
+    ) -> Self {
+        self.filter = Some(std::sync::Arc::new(filter));
+        self
+    }
+
+    /// Set event filter by event type names (backward compatibility)
+    ///
+    /// # Arguments
+    ///
+    /// * `types` - List of event types to include (empty means all events)
+    #[must_use]
+    pub fn with_filter_types(mut self, types: Vec<String>) -> Self {
+        if types.is_empty() {
+            self.filter = None;
+        } else {
+            let filter = move |value: &serde_json::Value| {
+                value
+                    .get("type")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|event_type| types.iter().any(|t| t == event_type))
+            };
+            self.filter = Some(std::sync::Arc::new(filter));
+        }
         self
     }
 
@@ -361,6 +404,10 @@ impl SubgraphTransformer {
     /// This method adds namespace prefixes to events and filters based
     /// on the configured filter.
     ///
+    /// The filter closure is called with the event type as a JSON value
+    /// containing a "type" field. This allows filtering without requiring
+    /// the full `StreamEvent`<S> to be serializable.
+    ///
     /// # Arguments
     ///
     /// * `event` - The stream event to transform
@@ -379,8 +426,26 @@ impl SubgraphTransformer {
     ) -> Option<crate::stream::StreamEvent<S>> {
         // Apply filter if configured
         if let Some(ref filter) = self.filter {
-            let event_type = Self::get_event_type(event);
-            if !filter.contains(&event_type) {
+            // Extract event type for filtering
+            let event_type = match event {
+                crate::stream::StreamEvent::Values { .. } => "values",
+                crate::stream::StreamEvent::Updates { .. } => "updates",
+                crate::stream::StreamEvent::Messages { .. } => "messages",
+                crate::stream::StreamEvent::Custom { .. } => "custom",
+                crate::stream::StreamEvent::TaskStart { .. } => "task_start",
+                crate::stream::StreamEvent::TaskEnd { .. } => "task_end",
+                crate::stream::StreamEvent::Interrupt { .. } => "interrupt",
+                crate::stream::StreamEvent::BudgetExceeded { .. } => "budget_exceeded",
+                crate::stream::StreamEvent::End { .. } => "end",
+                crate::stream::StreamEvent::Debug(_) => "debug",
+                crate::stream::StreamEvent::Tools(_) => "tools",
+                crate::stream::StreamEvent::CheckpointSaved { .. } => "checkpoint_saved",
+                crate::stream::StreamEvent::TaskDetail { .. } => "task_detail",
+            };
+
+            // Create filter value with event type
+            let filter_value = serde_json::json!({ "type": event_type });
+            if !filter(&filter_value) {
                 return None;
             }
         }
@@ -397,34 +462,6 @@ impl SubgraphTransformer {
     /// * `segment` - The namespace segment to add
     pub fn add_namespace(&mut self, segment: String) {
         self.ns.push(segment);
-    }
-
-    /// Get the event type for filtering
-    ///
-    /// # Arguments
-    ///
-    /// * `event` - The stream event
-    ///
-    /// # Returns
-    ///
-    /// The event type as a string
-    #[must_use]
-    fn get_event_type<S: State>(event: &crate::stream::StreamEvent<S>) -> String {
-        match event {
-            crate::stream::StreamEvent::Values { .. } => "values".to_string(),
-            crate::stream::StreamEvent::Updates { .. } => "updates".to_string(),
-            crate::stream::StreamEvent::Messages { .. } => "messages".to_string(),
-            crate::stream::StreamEvent::Custom { .. } => "custom".to_string(),
-            crate::stream::StreamEvent::TaskStart { .. } => "task_start".to_string(),
-            crate::stream::StreamEvent::TaskEnd { .. } => "task_end".to_string(),
-            crate::stream::StreamEvent::Interrupt { .. } => "interrupt".to_string(),
-            crate::stream::StreamEvent::BudgetExceeded { .. } => "budget_exceeded".to_string(),
-            crate::stream::StreamEvent::End { .. } => "end".to_string(),
-            crate::stream::StreamEvent::Debug(_) => "debug".to_string(),
-            crate::stream::StreamEvent::Tools(_) => "tools".to_string(),
-            crate::stream::StreamEvent::CheckpointSaved { .. } => "checkpoint_saved".to_string(),
-            crate::stream::StreamEvent::TaskDetail { .. } => "task_detail".to_string(),
-        }
     }
 }
 

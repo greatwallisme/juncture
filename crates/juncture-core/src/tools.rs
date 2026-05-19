@@ -85,7 +85,10 @@ pub trait Tool: Send + Sync + 'static {
 /// Tool runtime context injected into tool execution
 ///
 /// Provides access to graph state, configuration, and store during tool execution.
-#[allow(missing_debug_implementations, reason = "Contains dyn Store trait object which doesn't implement Debug")]
+#[allow(
+    missing_debug_implementations,
+    reason = "Contains dyn Store trait object which doesn't implement Debug"
+)]
 pub struct ToolRuntime<S: State> {
     /// Current graph state (read-only snapshot)
     pub state: S,
@@ -95,14 +98,56 @@ pub struct ToolRuntime<S: State> {
     pub config: RunnableConfig,
     /// Cross-thread persistent store
     pub store: Option<Arc<dyn Store>>,
+    /// Streaming sender for tool output deltas
+    stream_tx: Option<tokio::sync::mpsc::UnboundedSender<serde_json::Value>>,
 }
 
 impl<S: State> ToolRuntime<S> {
+    /// Create a new `ToolRuntime` instance
+    ///
+    /// # Arguments
+    ///
+    /// * `state` - Current graph state
+    /// * `tool_call_id` - Tool call identifier
+    /// * `config` - Runtime configuration
+    /// * `store` - Optional cross-thread persistent store
+    /// * `stream_tx` - Optional streaming sender for output deltas
+    #[must_use]
+    pub const fn new(
+        state: S,
+        tool_call_id: String,
+        config: RunnableConfig,
+        store: Option<Arc<dyn Store>>,
+        stream_tx: Option<tokio::sync::mpsc::UnboundedSender<serde_json::Value>>,
+    ) -> Self {
+        Self {
+            state,
+            tool_call_id,
+            config,
+            store,
+            stream_tx,
+        }
+    }
+
     /// Emit tool output delta for streaming
     ///
     /// Allows tools to stream intermediate results during execution.
-    pub const fn emit_output_delta(&self, _delta: &str) {
-        // Streaming functionality to be implemented
+    /// If no streaming channel is configured, this is a no-op.
+    ///
+    /// # Arguments
+    ///
+    /// * `delta` - Output delta fragment to stream
+    #[expect(
+        clippy::unused_async,
+        reason = "async required for future API compatibility with actual async streaming"
+    )]
+    pub async fn emit_output_delta(&self, delta: &str) {
+        if let Some(ref tx) = self.stream_tx {
+            let _ = tx.send(serde_json::json!({
+                "delta": delta,
+                "tool_call_id": self.tool_call_id
+            }));
+        }
     }
 }
 
@@ -194,9 +239,7 @@ impl ToolInterceptor for NopToolInterceptor {
         result: &Result<String, ToolError>,
     ) -> BoxFuture<'_, Result<String, ToolError>> {
         let result_clone = result.clone();
-        Box::pin(async move {
-            result_clone.map_err(|e| ToolError::ExecutionFailed(e.to_string()))
-        })
+        Box::pin(async move { result_clone.map_err(|e| ToolError::ExecutionFailed(e.to_string())) })
     }
 }
 
@@ -252,7 +295,10 @@ impl Default for ToolNodeConfig {
 /// Tool node for executing function calls
 ///
 /// Extracts tool calls from the last AI message and executes them.
-#[allow(missing_debug_implementations, reason = "Contains trait objects which don't implement Debug")]
+#[allow(
+    missing_debug_implementations,
+    reason = "Contains trait objects which don't implement Debug"
+)]
 pub struct ToolNode {
     /// Tool registry
     #[expect(dead_code, reason = "Used in tool execution")]
@@ -378,14 +424,10 @@ fn validate_tool_input(tool: &dyn Tool, input: &serde_json::Value) -> Result<(),
 /// Standard routing function for `ReAct` agents.
 /// Routes to "tools" node if last message has `tool_calls`, otherwise to END.
 ///
-/// # Type Parameters
-///
-/// * `S` - State type
-///
 /// # Arguments
 ///
-/// * `_state` - Graph state
-/// * `_messages_field` - Name of messages field
+/// * `state` - Graph state
+/// * `messages_field` - Name of messages field in state
 ///
 /// # Returns
 ///
@@ -403,13 +445,43 @@ fn validate_tool_input(tool: &dyn Tool, input: &serde_json::Value) -> Result<(),
 ///     },
 /// );
 /// ```
-///
-/// # Implementation
-///
-/// Returns END by default. Custom implementations should inspect the state's
-/// messages field and check if the last message contains `tool_calls`.
-pub const fn tools_condition<S: State>(_state: &S, _messages_field: &str) -> &'static str {
-    crate::END
+pub fn tools_condition<S: State + serde::Serialize>(
+    state: &S,
+    messages_field: &str,
+) -> &'static str {
+    if has_pending_tool_calls(state, messages_field) {
+        "tools"
+    } else {
+        crate::END
+    }
 }
 
-// Rust guideline compliant 2026-05-19
+/// Check if the last AI message in state has pending tool calls.
+///
+/// Serializes the state to JSON, extracts the messages array from the named
+/// field, and checks whether the last message with role `Ai` has non-empty
+/// `tool_calls`.
+fn has_pending_tool_calls<S: serde::Serialize>(state: &S, messages_field: &str) -> bool {
+    let Ok(value) = serde_json::to_value(state) else {
+        return false;
+    };
+
+    let Some(messages) = value.get(messages_field).and_then(|v| v.as_array()) else {
+        return false;
+    };
+
+    // Walk backwards to find the last AI message
+    for msg in messages.iter().rev() {
+        let role = msg.get("role").and_then(|v| v.as_str()).unwrap_or("");
+        if role == "Ai" {
+            return msg
+                .get("tool_calls")
+                .and_then(|v| v.as_array())
+                .is_some_and(|arr| !arr.is_empty());
+        }
+    }
+
+    false
+}
+
+// Rust guideline compliant 2026-05-20

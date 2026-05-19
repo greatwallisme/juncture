@@ -49,11 +49,12 @@ pub use budget::{
 };
 pub use context::{ExecutionConfig, ExecutionContext, TimeoutPolicy};
 pub use durability::Durability;
-pub use loop_::PregelLoop;
+pub use loop_::{PregelLoop, RunControl};
 pub use protocol::PregelProtocol;
 pub use runner::execute_superstep;
 pub use scheduler::{
-    FieldVersionTracker, TriggerToNodes, VersionsSeen, apply_writes, compute_next_tasks,
+    FieldVersionTracker, TriggerToNodes, VersionsSeen, apply_writes, check_replace_conflicts,
+    compute_next_tasks, consume_triggered_channels, schedule_error_handlers,
 };
 pub use stream::{StreamEvent, StreamMode};
 pub use types::{
@@ -61,4 +62,4 @@ pub use types::{
     SyncAsyncFuture, TaskOutput, TaskTrigger,
 };
 
-// Rust guideline compliant 2026-05-19
+// Rust guideline compliant 2026-05-20

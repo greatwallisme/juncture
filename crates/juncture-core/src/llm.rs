@@ -147,24 +147,18 @@ pub struct MessageChunk {
     pub role: Option<Role>,
     /// Text content delta
     pub content: String,
-    /// Tool call chunks
+    /// Tool call chunks (using `args_delta` field name from stream module)
     pub tool_call_chunks: Vec<ToolCallChunk>,
     /// Token usage (only in final chunk)
     pub usage: Option<crate::state::TokenUsage>,
 }
 
 /// Streaming tool call chunk
-#[derive(Clone, Debug)]
-pub struct ToolCallChunk {
-    /// Index of the tool call in the list
-    pub index: usize,
-    /// Tool call ID (may be empty in early chunks)
-    pub id: Option<String>,
-    /// Tool name (may be empty in early chunks)
-    pub name: Option<String>,
-    /// Arguments delta (JSON fragment)
-    pub arguments: String,
-}
+///
+/// Re-exported from `crate::stream` for LLM integration.
+/// Note: This struct uses `args_delta` as the field name (not `arguments`).
+/// Use the stream module's version for consistency.
+pub use crate::stream::ToolCallChunk;
 
 /// Unified `ChatModel` trait for all LLM providers
 ///
@@ -300,11 +294,20 @@ where
         let tool_def = ToolDefinition {
             name: "structured_output".to_string(),
             description: "Output structured data".to_string(),
-            parameters: serde_json::to_value(schema).map_err(|e| LlmError::InvalidResponse(e.to_string()))?,
+            parameters: serde_json::to_value(schema)
+                .map_err(|e| LlmError::InvalidResponse(e.to_string()))?,
         };
 
         // Force tool usage
-        let mut opts = options.cloned().unwrap_or_default();
+        #[allow(
+            clippy::manual_unwrap_or_default,
+            clippy::option_if_let_else,
+            reason = "project rules prohibit unwrap_or_default; match is explicit and readable"
+        )]
+        let mut opts = match options.cloned() {
+            Some(opts) => opts,
+            None => CallOptions::default(),
+        };
         opts.tool_choice = Some(ToolChoice::Required);
 
         // Call inner model with tool bound
@@ -313,21 +316,30 @@ where
 
         // Extract tool call arguments and parse as T
         if let Some(tool_call) = response.tool_calls.first() {
-            let _value: T = serde_json::from_value(tool_call.args.clone())
-                .map_err(|e| LlmError::InvalidResponse(format!("Failed to parse structured output: {e}")))?;
+            let _value: T = serde_json::from_value(tool_call.args.clone()).map_err(|e| {
+                LlmError::InvalidResponse(format!("Failed to parse structured output: {e}"))
+            })?;
 
             // Return as JSON string in content
             Ok(Message {
                 id: response.id,
                 role: Role::Ai,
-                content: crate::state::Content::Text(serde_json::to_string(&_value).unwrap_or_default()),
+                content: crate::state::Content::Text(serde_json::to_string(&_value).map_err(
+                    |e| {
+                        LlmError::InvalidResponse(format!(
+                            "Failed to serialize structured output: {e}"
+                        ))
+                    },
+                )?),
                 tool_calls: vec![],
                 tool_call_id: None,
                 name: None,
                 usage: response.usage,
             })
         } else {
-            Err(LlmError::InvalidResponse("No tool call in response".to_string()))
+            Err(LlmError::InvalidResponse(
+                "No tool call in response".to_string(),
+            ))
         }
     }
 
@@ -337,7 +349,9 @@ where
         _options: Option<&CallOptions>,
     ) -> Result<BoxStream<'_, Result<MessageChunk, LlmError>>, LlmError> {
         // Streaming not yet supported for structured output
-        Err(LlmError::InvalidResponse("Streaming not supported for structured output".to_string()))
+        Err(LlmError::InvalidResponse(
+            "Streaming not supported for structured output".to_string(),
+        ))
     }
 
     fn bind_tools(&self, tools: Vec<ToolDefinition>) -> Self {
@@ -364,4 +378,4 @@ where
     }
 }
 
-// Rust guideline compliant 2026-05-19
+// Rust guideline compliant 2026-05-20

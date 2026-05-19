@@ -104,6 +104,55 @@ pub struct TokenUsage {
 /// Used to clear the entire messages list.
 pub const REMOVE_ALL_MESSAGES: &str = "__remove_all__";
 
+/// Built-in state for simple chat agents
+///
+/// Provides a zero-config entry point for simple chat agents with a
+/// single `messages` field using the messages reducer semantics.
+///
+/// # Examples
+///
+/// ```
+/// use juncture_core::state::MessagesState;
+///
+/// let mut state = MessagesState::default();
+/// state.messages.push(Message::human("Hello"));
+/// state.messages.push(Message::ai("Hi there!"));
+/// ```
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub struct MessagesState {
+    /// Message history using append+merge+delete semantics
+    pub messages: Vec<Message>,
+}
+
+/// Update type for `MessagesState`
+///
+/// All fields are optional to support partial updates.
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub struct MessagesStateUpdate {
+    /// Optional messages update
+    pub messages: Option<Vec<Message>>,
+}
+
+impl crate::State for MessagesState {
+    type Update = MessagesStateUpdate;
+    type FieldVersions = ();
+
+    fn apply(&mut self, update: Self::Update) -> crate::FieldsChanged {
+        let mut changed = crate::FieldsChanged(0);
+
+        if let Some(messages) = update.messages {
+            messages_reducer(&mut self.messages, messages);
+            changed.0 |= 1 << 0;
+        }
+
+        changed
+    }
+
+    fn reset_ephemeral(&mut self) {
+        // No ephemeral fields in MessagesState
+    }
+}
+
 /// Messages reducer with append+merge+delete semantics
 ///
 /// Handles message updates, deletions, and appends.
@@ -231,6 +280,114 @@ impl Message {
             usage: None,
         }
     }
+
+    /// Create a remove-all message sentinel
+    ///
+    /// This message clears the entire messages list when processed
+    /// by the messages reducer. The sentinel has a special ID
+    /// (`REMOVE_ALL_MESSAGES`) that triggers the clear operation.
+    #[must_use]
+    pub fn remove_all() -> Self {
+        Self {
+            id: REMOVE_ALL_MESSAGES.to_string(),
+            role: Role::System,
+            content: Content::Text(String::new()),
+            tool_calls: vec![],
+            tool_call_id: None,
+            name: None,
+            usage: None,
+        }
+    }
 }
 
-// Rust guideline compliant 2026-05-19
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::trait_::State;
+
+    #[test]
+    fn test_messages_state_default() {
+        let state = MessagesState::default();
+        assert!(state.messages.is_empty());
+    }
+
+    #[test]
+    fn test_messages_state_apply() {
+        let mut state = MessagesState::default();
+
+        let update = MessagesStateUpdate {
+            messages: Some(vec![Message::human("Hello")]),
+        };
+
+        let changed = state.apply(update);
+        assert_eq!(state.messages.len(), 1);
+        assert!(!changed.is_empty());
+        assert!(changed.has_field(0));
+    }
+
+    #[test]
+    fn test_messages_state_apply_merge() {
+        let mut state = MessagesState {
+            messages: vec![Message::human("Hello")],
+        };
+
+        let update = MessagesStateUpdate {
+            messages: Some(vec![Message::ai("Hi there!")]),
+        };
+
+        state.apply(update);
+        assert_eq!(state.messages.len(), 2);
+    }
+
+    #[test]
+    fn test_messages_state_apply_none() {
+        let mut state = MessagesState {
+            messages: vec![Message::human("Hello")],
+        };
+
+        let update = MessagesStateUpdate { messages: None };
+
+        let changed = state.apply(update);
+        assert_eq!(state.messages.len(), 1);
+        assert!(changed.is_empty());
+    }
+
+    #[test]
+    fn test_messages_state_reset_ephemeral() {
+        let mut state = MessagesState {
+            messages: vec![Message::human("Hello")],
+        };
+
+        state.reset_ephemeral();
+        // No-op for MessagesState since it has no ephemeral fields
+        assert_eq!(state.messages.len(), 1);
+    }
+
+    #[test]
+    fn test_messages_state_serialization() {
+        let state = MessagesState {
+            messages: vec![Message::human("Hello")],
+        };
+
+        let json = serde_json::to_string(&state).unwrap();
+        let deserialized: MessagesState = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(deserialized.messages.len(), 1);
+        assert_eq!(deserialized.messages[0].role, Role::Human);
+    }
+
+    #[test]
+    fn test_messages_state_update_serialization() {
+        let update = MessagesStateUpdate {
+            messages: Some(vec![Message::ai("Hi!")]),
+        };
+
+        let json = serde_json::to_string(&update).unwrap();
+        let deserialized: MessagesStateUpdate = serde_json::from_str(&json).unwrap();
+
+        assert!(deserialized.messages.is_some());
+        assert_eq!(deserialized.messages.unwrap().len(), 1);
+    }
+}
+
+// Rust guideline compliant 2026-05-20

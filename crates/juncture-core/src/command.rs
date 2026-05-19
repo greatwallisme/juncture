@@ -1,3 +1,4 @@
+use crate::interrupt::ResumeValue;
 use crate::state::State;
 
 /// Command: node return value combining state update and routing
@@ -13,6 +14,13 @@ pub struct Command<S: State> {
 
     /// Target graph (current or parent)
     pub graph: GraphTarget,
+
+    /// Resume value for HITL interrupt resumption
+    ///
+    /// When provided, this value is used to resume from a previously triggered
+    /// interrupt. Supports single values, ID-based mapping, and namespace-based
+    /// mapping via [`ResumeValue`].
+    pub resume: Option<ResumeValue>,
 }
 
 /// Routing instruction from node
@@ -42,6 +50,9 @@ pub struct SendTarget {
 
     /// State to use for this task (overrides current state)
     pub state: serde_json::Value,
+
+    /// Optional per-task timeout override
+    pub timeout: Option<std::time::Duration>,
 }
 
 /// Target graph for routing
@@ -99,9 +110,7 @@ pub struct ParentCommand<S: State>(pub Command<S>);
 
 impl<S: State> std::fmt::Debug for ParentCommand<S> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_tuple("ParentCommand")
-            .field(&"<command>")
-            .finish()
+        f.debug_tuple("ParentCommand").field(&"<command>").finish()
     }
 }
 
@@ -113,6 +122,7 @@ impl<S: State> Command<S> {
             update: Some(update),
             goto: Goto::None,
             graph: GraphTarget::Current,
+            resume: None,
         }
     }
 
@@ -123,6 +133,7 @@ impl<S: State> Command<S> {
             update: None,
             goto: Goto::Next(target.into()),
             graph: GraphTarget::Current,
+            resume: None,
         }
     }
 
@@ -133,6 +144,7 @@ impl<S: State> Command<S> {
             update: Some(update),
             goto: Goto::Next(target.into()),
             graph: GraphTarget::Current,
+            resume: None,
         }
     }
 
@@ -143,6 +155,7 @@ impl<S: State> Command<S> {
             update: None,
             goto: Goto::Send(targets),
             graph: GraphTarget::Current,
+            resume: None,
         }
     }
 
@@ -153,6 +166,7 @@ impl<S: State> Command<S> {
             update: Some(update),
             goto: Goto::Send(targets),
             graph: GraphTarget::Current,
+            resume: None,
         }
     }
 
@@ -163,6 +177,7 @@ impl<S: State> Command<S> {
             update: None,
             goto: Goto::End,
             graph: GraphTarget::Current,
+            resume: None,
         }
     }
 
@@ -172,7 +187,15 @@ impl<S: State> Command<S> {
             update: None,
             goto: Goto::Next(target.into()),
             graph: GraphTarget::Parent,
+            resume: None,
         }
+    }
+
+    /// Attach a resume value to this command
+    #[must_use]
+    pub fn with_resume(mut self, value: ResumeValue) -> Self {
+        self.resume = Some(value);
+        self
     }
 }
 
@@ -182,8 +205,9 @@ impl<S: State> Default for Command<S> {
             update: None,
             goto: Goto::None,
             graph: GraphTarget::Current,
+            resume: None,
         }
     }
 }
 
-// Rust guideline compliant 2025-01-18
+// Rust guideline compliant 2026-05-20

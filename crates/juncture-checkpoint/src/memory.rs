@@ -3,25 +3,46 @@
 //! Thread-safe in-memory implementation of `CheckpointSaver` for development and testing.
 
 use juncture_core::checkpoint::{
-    Checkpoint, CheckpointFilter, CheckpointMetadata, CheckpointTuple, PendingWrite,
-    CheckpointSaver,
+    Checkpoint, CheckpointError as CoreCheckpointError, CheckpointFilter, CheckpointMetadata,
+    CheckpointSaver, CheckpointTuple, PendingWrite,
 };
 use juncture_core::config::RunnableConfig;
-use juncture_core::error::JunctureError;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use crate::error::CheckpointError;
 
-// Convert CheckpointError to JunctureError
-trait ToJunctureError<T> {
-    fn map_checkpoint(self) -> Result<T, JunctureError>;
+// Convert crate's CheckpointError to core's CheckpointError
+#[allow(dead_code, reason = "conversion trait used internally")]
+trait ToCoreCheckpointError<T> {
+    fn map_checkpoint(self) -> Result<T, CoreCheckpointError>;
 }
 
-impl<T> ToJunctureError<T> for Result<T, CheckpointError> {
-    fn map_checkpoint(self) -> Result<T, JunctureError> {
-        self.map_err(|e| JunctureError::checkpoint(e.to_string()))
+impl<T> ToCoreCheckpointError<T> for Result<T, CheckpointError> {
+    fn map_checkpoint(self) -> Result<T, CoreCheckpointError> {
+        self.map_err(|e| match e {
+            CheckpointError::Serialize(msg) | CheckpointError::Serialization(msg) => {
+                CoreCheckpointError::Serialize(msg)
+            }
+            CheckpointError::Deserialize(msg) => CoreCheckpointError::Deserialize(msg),
+            CheckpointError::NotFound {
+                thread_id,
+                checkpoint_id,
+            } => CoreCheckpointError::NotFound {
+                thread_id,
+                checkpoint_id,
+            },
+            CheckpointError::Storage(msg) | CheckpointError::Database(msg) => {
+                CoreCheckpointError::Storage(msg)
+            }
+            CheckpointError::SchemaMigration { from, to, reason } => {
+                CoreCheckpointError::Other(format!("Schema migration: {from} -> {to}: {reason}"))
+            }
+            CheckpointError::PoolExhausted => {
+                CoreCheckpointError::Storage("Connection pool exhausted".to_string())
+            }
+        })
     }
 }
 
@@ -90,7 +111,7 @@ impl CheckpointSaver for MemorySaver {
     async fn get_tuple(
         &self,
         config: &RunnableConfig,
-    ) -> Result<Option<CheckpointTuple>, JunctureError> {
+    ) -> Result<Option<CheckpointTuple>, CoreCheckpointError> {
         let thread_id = Self::get_thread_id(config).map_checkpoint()?;
         let checkpoint_ns = Self::get_checkpoint_ns(config);
 
@@ -135,7 +156,7 @@ impl CheckpointSaver for MemorySaver {
         &self,
         config: &RunnableConfig,
         filter: Option<CheckpointFilter>,
-    ) -> Result<Vec<CheckpointTuple>, JunctureError> {
+    ) -> Result<Vec<CheckpointTuple>, CoreCheckpointError> {
         let thread_id = Self::get_thread_id(config).map_checkpoint()?;
         let checkpoint_ns = Self::get_checkpoint_ns(config);
 
@@ -194,7 +215,7 @@ impl CheckpointSaver for MemorySaver {
         config: &RunnableConfig,
         checkpoint: Checkpoint,
         metadata: CheckpointMetadata,
-    ) -> Result<RunnableConfig, JunctureError> {
+    ) -> Result<RunnableConfig, CoreCheckpointError> {
         let thread_id = Self::get_thread_id(config).map_checkpoint()?;
         let checkpoint_ns = Self::get_checkpoint_ns(config);
         let checkpoint_id = checkpoint.id.clone();
@@ -236,13 +257,13 @@ impl CheckpointSaver for MemorySaver {
         config: &RunnableConfig,
         writes: Vec<PendingWrite>,
         task_id: &str,
-    ) -> Result<(), JunctureError> {
+    ) -> Result<(), CoreCheckpointError> {
         let thread_id = Self::get_thread_id(config).map_checkpoint()?;
         let checkpoint_ns = Self::get_checkpoint_ns(config);
         let checkpoint_id = config
             .checkpoint_id
             .clone()
-            .ok_or_else(|| JunctureError::checkpoint("checkpoint_id is required"))?;
+            .ok_or_else(|| CoreCheckpointError::Storage("checkpoint_id is required".to_string()))?;
 
         let key = (thread_id, checkpoint_id, checkpoint_ns);
 

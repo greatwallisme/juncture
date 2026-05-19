@@ -4,6 +4,7 @@
 //! Different channel types control how values are updated, persisted, and consumed.
 
 use serde::de::DeserializeOwned;
+use serde::ser::SerializeStruct;
 
 /// Reducer trait defining merge semantics for state fields
 ///
@@ -98,10 +99,35 @@ impl<T> Reducer<T> for LastWriteWinsReducer {
 
 /// Bypass reducer: overwrite value directly, bypassing normal merge
 ///
-/// When Overwrap<T> is used in an update, it bypasses the field's reducer
-/// and directly replaces the value.
-#[derive(Debug)]
+/// When `Overwrite<T>` is used in an update, it bypasses the field's reducer
+/// and directly replaces the value. Custom serde uses `{"__overwrite__": value}`
+/// wire format for `LangGraph` checkpoint compatibility.
 pub struct Overwrite<T>(pub T);
+
+impl<T: std::fmt::Debug> std::fmt::Debug for Overwrite<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("Overwrite").field(&self.0).finish()
+    }
+}
+
+impl<T: serde::Serialize> serde::Serialize for Overwrite<T> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut s = serializer.serialize_struct("__overwrite__", 1)?;
+        s.serialize_field("__overwrite__", &self.0)?;
+        s.end()
+    }
+}
+
+impl<'de, T: serde::Deserialize<'de>> serde::Deserialize<'de> for Overwrite<T> {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(serde::Deserialize)]
+        struct Wrapper<T> {
+            __overwrite__: T,
+        }
+        let wrapper = Wrapper::deserialize(deserializer)?;
+        Ok(Self(wrapper.__overwrite__))
+    }
+}
 
 /// Channel trait for state field access with checkpoint support
 ///
@@ -554,6 +580,34 @@ mod tests {
         };
         assert_eq!(rm.id, "msg-123");
     }
+
+    #[test]
+    fn overwrite_serialize_round_trip() {
+        let original = Overwrite(42);
+        let json = serde_json::to_string(&original).expect("should serialize");
+        assert_eq!(json, r#"{"__overwrite__":42}"#);
+
+        let deserialized: Overwrite<i32> = serde_json::from_str(&json).expect("should deserialize");
+        assert_eq!(deserialized.0, 42);
+    }
+
+    #[test]
+    fn overwrite_serialize_complex_type() {
+        let original = Overwrite(vec![1, 2, 3]);
+        let json = serde_json::to_string(&original).expect("should serialize");
+        assert_eq!(json, r#"{"__overwrite__":[1,2,3]}"#);
+
+        let deserialized: Overwrite<Vec<i32>> =
+            serde_json::from_str(&json).expect("should deserialize");
+        assert_eq!(deserialized.0, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn overwrite_debug_format() {
+        let ov = Overwrite(42);
+        let debug_str = format!("{ov:?}");
+        assert_eq!(debug_str, "Overwrite(42)");
+    }
 }
 
-// Rust guideline compliant 2026-05-19
+// Rust guideline compliant 2026-05-20

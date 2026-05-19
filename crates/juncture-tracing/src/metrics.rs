@@ -4,6 +4,164 @@
 //! OpenTelemetry metrics export. This feature is only available when the
 //! `otel` feature is enabled.
 
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
+
+/// Counter metric handle
+///
+/// Provides increment operations for counter metrics.
+#[derive(Clone, Debug)]
+pub struct CounterHandle {
+    registry: Arc<MetricsRegistryInner>,
+    name: String,
+}
+
+impl CounterHandle {
+    /// Increment the counter by 1
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal mutex is poisoned (which indicates another
+    /// thread panicked while holding the lock).
+    pub fn inc(&self) {
+        self.inc_by(1);
+    }
+
+    /// Increment the counter by a specific amount
+    ///
+    /// # Arguments
+    ///
+    /// * `value` - Amount to increment by
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal mutex is poisoned (which indicates another
+    /// thread panicked while holding the lock).
+    #[allow(
+        clippy::significant_drop_tightening,
+        reason = "MutexGuard is needed for entry API; tightening would complicate the code"
+    )]
+    pub fn inc_by(&self, value: u64) {
+        let name = self.name.clone();
+        let mut counters = self.registry.counters.lock().unwrap();
+        let entry = counters.entry(name).or_default();
+        *entry = entry.saturating_add(value);
+    }
+
+    /// Get the current value
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal mutex is poisoned (which indicates another
+    /// thread panicked while holding the lock).
+    #[must_use]
+    pub fn get(&self) -> u64 {
+        let name = self.name.clone();
+        let counters = self.registry.counters.lock().unwrap();
+        counters.get(&name).copied().unwrap_or(0)
+    }
+}
+
+/// Histogram metric handle
+///
+/// Provides value recording for histogram metrics.
+#[derive(Clone, Debug)]
+pub struct HistogramHandle {
+    registry: Arc<MetricsRegistryInner>,
+    name: String,
+}
+
+impl HistogramHandle {
+    /// Record a value
+    ///
+    /// # Arguments
+    ///
+    /// * `value` - Value to record
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal mutex is poisoned (which indicates another
+    /// thread panicked while holding the lock).
+    #[allow(
+        clippy::significant_drop_tightening,
+        reason = "MutexGuard is needed for entry API; tightening would complicate the code"
+    )]
+    pub fn record(&self, value: f64) {
+        let name = self.name.clone();
+        let mut histograms = self.registry.histograms.lock().unwrap();
+        let entry = histograms.entry(name).or_default();
+        entry.push(value);
+    }
+
+    /// Get all recorded values
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal mutex is poisoned (which indicates another
+    /// thread panicked while holding the lock).
+    #[must_use]
+    pub fn get_values(&self) -> Vec<f64> {
+        let name = self.name.clone();
+        let histograms = self.registry.histograms.lock().unwrap();
+        histograms.get(&name).cloned().unwrap_or_default()
+    }
+}
+
+/// Gauge metric handle
+///
+/// Provides set and increment/decrement operations for gauge metrics.
+#[derive(Clone, Debug)]
+pub struct GaugeHandle {
+    value: Arc<AtomicU64>,
+}
+
+impl GaugeHandle {
+    /// Set the gauge to a specific value
+    ///
+    /// # Arguments
+    ///
+    /// * `value` - Value to set
+    pub fn set(&self, value: u64) {
+        self.value.store(value, Ordering::Release);
+    }
+
+    /// Increment the gauge by 1
+    pub fn inc(&self) {
+        self.inc_by(1);
+    }
+
+    /// Increment the gauge by a specific amount
+    ///
+    /// # Arguments
+    ///
+    /// * `value` - Amount to increment by
+    pub fn inc_by(&self, value: u64) {
+        self.value.fetch_add(value, Ordering::Release);
+    }
+
+    /// Decrement the gauge by 1
+    pub fn dec(&self) {
+        self.dec_by(1);
+    }
+
+    /// Decrement the gauge by a specific amount
+    ///
+    /// # Arguments
+    ///
+    /// * `value` - Amount to decrement by
+    pub fn dec_by(&self, value: u64) {
+        self.value.fetch_sub(value, Ordering::Release);
+    }
+
+    /// Get the current value
+    #[must_use]
+    pub fn get(&self) -> u64 {
+        self.value.load(Ordering::Acquire)
+    }
+}
+
 /// Metric name constants
 ///
 /// These constants define the standard metric names used throughout Juncture.
@@ -82,12 +240,20 @@ pub mod names {
 /// use juncture_tracing::metrics::MetricsRegistry;
 ///
 /// let registry = MetricsRegistry::new();
-/// // Future: Use registry to create OpenTelemetry metrics
+/// let counter = registry.counter("my_counter");
+/// counter.inc();
 /// ```
 #[cfg(feature = "otel")]
 #[derive(Clone, Debug)]
 pub struct MetricsRegistry {
-    _private: (),
+    inner: Arc<MetricsRegistryInner>,
+}
+
+/// Inner state of the metrics registry
+#[derive(Debug, Default)]
+struct MetricsRegistryInner {
+    counters: std::sync::Mutex<std::collections::HashMap<String, u64>>,
+    histograms: std::sync::Mutex<std::collections::HashMap<String, Vec<f64>>>,
 }
 
 #[cfg(feature = "otel")]
@@ -102,8 +268,82 @@ impl MetricsRegistry {
     /// let registry = MetricsRegistry::new();
     /// ```
     #[must_use]
-    pub const fn new() -> Self {
-        Self { _private: () }
+    pub fn new() -> Self {
+        Self {
+            inner: Arc::new(MetricsRegistryInner::default()),
+        }
+    }
+
+    /// Create a counter metric handle
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - Metric name
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use juncture_tracing::metrics::MetricsRegistry;
+    ///
+    /// let registry = MetricsRegistry::new();
+    /// let counter = registry.counter("invocations");
+    /// counter.inc();
+    /// counter.inc_by(5);
+    /// ```
+    #[must_use]
+    pub fn counter(&self, name: &str) -> CounterHandle {
+        CounterHandle {
+            registry: Arc::clone(&self.inner),
+            name: name.to_string(),
+        }
+    }
+
+    /// Create a histogram metric handle
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - Metric name
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use juncture_tracing::metrics::MetricsRegistry;
+    ///
+    /// let registry = MetricsRegistry::new();
+    /// let histogram = registry.histogram("duration_ms");
+    /// histogram.record(42.0);
+    /// histogram.record(58.5);
+    /// ```
+    #[must_use]
+    pub fn histogram(&self, name: &str) -> HistogramHandle {
+        HistogramHandle {
+            registry: Arc::clone(&self.inner),
+            name: name.to_string(),
+        }
+    }
+
+    /// Create a gauge metric handle
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - Metric name
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use juncture_tracing::metrics::MetricsRegistry;
+    ///
+    /// let registry = MetricsRegistry::new();
+    /// let gauge = registry.gauge("active_connections");
+    /// gauge.set(10);
+    /// gauge.inc();
+    /// gauge.dec();
+    /// ```
+    #[must_use]
+    pub fn gauge(&self, _name: &str) -> GaugeHandle {
+        GaugeHandle {
+            value: Arc::new(AtomicU64::new(0)),
+        }
     }
 }
 
@@ -171,6 +411,77 @@ mod tests {
             names::BUDGET_REMAINING_COST_USD,
             "juncture.budget.remaining_cost_usd"
         );
+    }
+
+    #[cfg(feature = "otel")]
+    #[test]
+    fn test_counter_handle() {
+        let registry = MetricsRegistry::new();
+        let counter = registry.counter("test_counter");
+
+        assert_eq!(counter.get(), 0);
+        counter.inc();
+        assert_eq!(counter.get(), 1);
+        counter.inc_by(5);
+        assert_eq!(counter.get(), 6);
+    }
+
+    #[cfg(feature = "otel")]
+    #[test]
+    fn test_histogram_handle() {
+        let registry = MetricsRegistry::new();
+        let histogram = registry.histogram("test_histogram");
+
+        assert!(histogram.get_values().is_empty());
+        histogram.record(1.0);
+        histogram.record(2.5);
+        histogram.record(3.0);
+
+        let values = histogram.get_values();
+        assert_eq!(values.len(), 3);
+        // Use approximate comparison for floating point values
+        #[allow(
+            clippy::float_cmp,
+            reason = "test values are exact binary fractions, safe to compare"
+        )]
+        {
+            assert_eq!(values[0], 1.0);
+            assert_eq!(values[1], 2.5);
+            assert_eq!(values[2], 3.0);
+        }
+    }
+
+    #[cfg(feature = "otel")]
+    #[test]
+    fn test_gauge_handle() {
+        let registry = MetricsRegistry::new();
+        let gauge = registry.gauge("test_gauge");
+
+        assert_eq!(gauge.get(), 0);
+        gauge.set(10);
+        assert_eq!(gauge.get(), 10);
+        gauge.inc();
+        assert_eq!(gauge.get(), 11);
+        gauge.inc_by(5);
+        assert_eq!(gauge.get(), 16);
+        gauge.dec();
+        assert_eq!(gauge.get(), 15);
+        gauge.dec_by(3);
+        assert_eq!(gauge.get(), 12);
+    }
+
+    #[cfg(feature = "otel")]
+    #[test]
+    fn test_multiple_counter_handles() {
+        let registry = MetricsRegistry::new();
+        let counter1 = registry.counter("counter_a");
+        let counter2 = registry.counter("counter_b");
+
+        counter1.inc_by(3);
+        counter2.inc_by(5);
+
+        assert_eq!(counter1.get(), 3);
+        assert_eq!(counter2.get(), 5);
     }
 }
 

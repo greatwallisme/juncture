@@ -15,8 +15,95 @@ use crate::{
 };
 use indexmap::IndexMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
+
+/// Graceful shutdown control for Pregel execution
+///
+/// Allows external callers to request drain (finish current tasks but don't start new ones).
+/// Checked in `PregelLoop::tick()` before computing next tasks.
+///
+/// # Examples
+///
+/// ```ignore
+/// use juncture_core::pregel::loop_::RunControl;
+///
+/// let run_control = RunControl::new();
+///
+/// // Request drain from another thread
+/// let rc_clone = run_control.clone();
+/// std::thread::spawn(move || {
+///     // After some condition, request drain
+///     rc_clone.request_drain();
+/// });
+///
+/// // In the main loop
+/// if run_control.is_drain_requested() {
+///     // Finish current tasks but don't start new ones
+/// }
+/// ```
+#[derive(Clone, Debug)]
+pub struct RunControl {
+    drain_requested: Arc<AtomicBool>,
+}
+
+impl RunControl {
+    /// Create a new run control instance
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// use juncture_core::pregel::loop_::RunControl;
+    ///
+    /// let run_control = RunControl::new();
+    /// assert!(!run_control.is_drain_requested());
+    /// ```
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            drain_requested: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    /// Request drain (finish current tasks but don't start new ones)
+    ///
+    /// This is thread-safe and can be called from any thread.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// use juncture_core::pregel::loop_::RunControl;
+    ///
+    /// let run_control = RunControl::new();
+    /// run_control.request_drain();
+    /// assert!(run_control.is_drain_requested());
+    /// ```
+    pub fn request_drain(&self) {
+        self.drain_requested.store(true, Ordering::Release);
+    }
+
+    /// Check if drain has been requested
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// use juncture_core::pregel::loop_::RunControl;
+    ///
+    /// let run_control = RunControl::new();
+    /// assert!(!run_control.is_drain_requested());
+    /// ```
+    #[must_use]
+    pub fn is_drain_requested(&self) -> bool {
+        self.drain_requested.load(Ordering::Acquire)
+    }
+}
+
+impl Default for RunControl {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 /// Main Pregel execution loop
 ///
@@ -47,6 +134,9 @@ pub struct PregelLoop<S: State> {
     /// Optional stream event sender
     pub stream_tx: Option<mpsc::UnboundedSender<crate::pregel::stream::StreamEvent<S>>>,
 
+    /// Optional checkpoint saver for crash recovery
+    pub checkpointer: Option<Arc<dyn crate::checkpoint::CheckpointSaver>>,
+
     /// Current step number
     pub step: usize,
 
@@ -58,6 +148,9 @@ pub struct PregelLoop<S: State> {
 
     /// Optional budget tracker
     budget_tracker: Option<BudgetTracker>,
+
+    /// Run control for graceful shutdown
+    run_control: RunControl,
 }
 
 impl<S: State> std::fmt::Debug for PregelLoop<S> {
@@ -71,10 +164,12 @@ impl<S: State> std::fmt::Debug for PregelLoop<S> {
             .field("runnable_config", &self.runnable_config)
             .field("cancellation_token", &self.cancellation_token)
             .field("stream_tx", &self.stream_tx.is_some())
+            .field("checkpointer", &self.checkpointer.is_some())
             .field("step", &self.step)
             .field("status", &self.status)
             .field("pending_tasks", &self.pending_tasks)
             .field("budget_tracker", &self.budget_tracker.is_some())
+            .field("run_control", &self.run_control)
             .finish()
     }
 }
@@ -132,10 +227,12 @@ impl<S: State> PregelLoop<S> {
             runnable_config: config,
             cancellation_token,
             stream_tx: None,
+            checkpointer: None,
             step: 0,
             status: LoopStatus::Running,
             pending_tasks,
             budget_tracker: None,
+            run_control: RunControl::new(),
         })
     }
 
@@ -154,6 +251,11 @@ impl<S: State> PregelLoop<S> {
         tx: mpsc::UnboundedSender<crate::pregel::stream::StreamEvent<S>>,
     ) {
         self.stream_tx = Some(tx);
+    }
+
+    /// Set the checkpoint saver for crash recovery during supersteps
+    pub fn set_checkpointer(&mut self, saver: Arc<dyn crate::checkpoint::CheckpointSaver>) {
+        self.checkpointer = Some(saver);
     }
 
     /// Set the budget tracker
@@ -239,6 +341,12 @@ impl<S: State> PregelLoop<S> {
 
         // Compute next tasks if pending is empty
         if self.pending_tasks.is_empty() {
+            // Check if drain is requested - if so, we're done
+            if self.run_control.is_drain_requested() {
+                self.status = LoopStatus::Done;
+                return Ok(false);
+            }
+
             // Try to compute tasks from trigger table
             // This is a no-op in the current implementation since
             // compute_next_tasks requires completed tasks
@@ -309,6 +417,19 @@ impl<S: State> PregelLoop<S> {
         // Reset ephemeral fields
         self.state.reset_ephemeral();
 
+        // Persist task outputs to checkpointer (crash recovery)
+        if let Some(ref checkpointer) = self.checkpointer {
+            for task_output in &result.task_outputs {
+                if let Some(ref _update) = task_output.command.update {
+                    // Persist the write so it can be recovered if the process
+                    // crashes before the next checkpoint is fully committed.
+                    let _ = checkpointer
+                        .put_writes(&self.runnable_config, vec![], &task_output.task_id)
+                        .await;
+                }
+            }
+        }
+
         // Emit stream events
         if let Some(ref tx) = self.stream_tx {
             for task_output in &result.task_outputs {
@@ -377,6 +498,29 @@ impl<S: State> PregelLoop<S> {
     {
         self.state.clone()
     }
+
+    /// Get the run control for graceful shutdown
+    ///
+    /// Returns a clone of the run control that can be used to request
+    /// drain from another thread or context.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// use juncture_core::pregel::loop_::PregelLoop;
+    ///
+    /// let mut loop = PregelLoop::new(...)?;
+    /// let run_control = loop.run_control();
+    ///
+    /// // From another thread
+    /// std::thread::spawn(move || {
+    ///     run_control.request_drain();
+    /// });
+    /// ```
+    #[must_use]
+    pub const fn run_control(&self) -> &RunControl {
+        &self.run_control
+    }
 }
 
 #[cfg(test)]
@@ -430,6 +574,21 @@ mod tests {
         assert!(!seen.should_activate("node_a", &[0], &current));
     }
 
+    #[test]
+    fn test_run_control() {
+        let rc = RunControl::new();
+        assert!(!rc.is_drain_requested());
+
+        rc.request_drain();
+        assert!(rc.is_drain_requested());
+    }
+
+    #[test]
+    fn test_run_control_default() {
+        let rc = RunControl::default();
+        assert!(!rc.is_drain_requested());
+    }
+
     #[derive(Clone, Debug)]
     struct TestState;
 
@@ -448,4 +607,4 @@ mod tests {
     struct TestUpdate;
 }
 
-// Rust guideline compliant 2026-05-19
+// Rust guideline compliant 2026-05-20

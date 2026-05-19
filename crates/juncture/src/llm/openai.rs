@@ -117,7 +117,10 @@ impl ChatOpenAI {
     /// let model = ChatOpenAI::from_env()?;
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
-    #[allow(clippy::map_err_ignore, reason = "Intentionally converting env var error to AuthError")]
+    #[allow(
+        clippy::map_err_ignore,
+        reason = "Intentionally converting env var error to AuthError"
+    )]
     pub fn from_env() -> Result<Self, LlmError> {
         let api_key = std::env::var("OPENAI_API_KEY")
             .map_err(|_| LlmError::AuthError("OPENAI_API_KEY not set".to_string()))?;
@@ -226,9 +229,7 @@ impl ChatModel for ChatOpenAI {
             .and_then(|o| o.model_override.as_ref())
             .unwrap_or(&self.model);
 
-        let api_messages: Vec<_> =
-            messages.iter().map(convert_message).collect();
-
+        let api_messages: Vec<_> = messages.iter().map(convert_message).collect();
 
         let request = OpenAIRequest {
             model: model.clone(),
@@ -441,7 +442,10 @@ struct OpenAIResponseFunction {
 }
 
 /// Convert message to `OpenAI` API format.
-#[allow(clippy::match_same_arms, reason = "Explicit handling for different content types")]
+#[allow(
+    clippy::match_same_arms,
+    reason = "Explicit handling for different content types"
+)]
 fn convert_message(message: &Message) -> OpenAIMessage {
     let role = match message.role {
         Role::System => "system",

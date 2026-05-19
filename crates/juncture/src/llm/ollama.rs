@@ -222,7 +222,10 @@ impl ChatModel for ChatOllama {
 }
 
 /// Extract plain text content from Content.
-#[allow(clippy::match_same_arms, reason = "Explicit handling for different content types")]
+#[allow(
+    clippy::match_same_arms,
+    reason = "Explicit handling for different content types"
+)]
 fn extract_text_content(content: &Content) -> String {
     match content {
         Content::Text(text) => text.clone(),

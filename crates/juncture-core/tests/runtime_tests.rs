@@ -111,14 +111,17 @@ fn test_run_control_default() {
 
 #[test]
 fn test_heartbeat_new() {
-    let heartbeat = juncture_core::Heartbeat::new();
-    heartbeat.ping();
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let heartbeat = juncture_core::Heartbeat::new(tx);
+    let result = heartbeat.ping();
+    assert_eq!(result, Ok(()));
 }
 
 #[test]
 fn test_heartbeat_default() {
     let heartbeat = juncture_core::Heartbeat::default();
-    heartbeat.ping();
+    let result = heartbeat.ping();
+    assert_eq!(result, Ok(()));
 }
 
 #[test]

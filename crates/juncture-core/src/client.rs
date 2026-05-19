@@ -183,10 +183,7 @@ impl JunctureClient {
             .map_err(|e| ClientError::Connection(e.to_string()))?;
 
         if response.status().is_success() {
-            response
-                .json()
-                .await
-                .map_err(ClientError::RequestError)
+            response.json().await.map_err(ClientError::RequestError)
         } else {
             Err(ClientError::Server {
                 status: response.status().as_u16(),
@@ -237,10 +234,7 @@ impl JunctureClient {
             .map_err(|e| ClientError::Connection(e.to_string()))?;
 
         if response.status().is_success() {
-            response
-                .json()
-                .await
-                .map_err(ClientError::RequestError)
+            response.json().await.map_err(ClientError::RequestError)
         } else {
             Err(ClientError::Server {
                 status: response.status().as_u16(),
@@ -269,10 +263,7 @@ impl JunctureClient {
             .map_err(|e| ClientError::Connection(e.to_string()))?;
 
         if response.status().is_success() {
-            response
-                .json()
-                .await
-                .map_err(ClientError::RequestError)
+            response.json().await.map_err(ClientError::RequestError)
         } else if response.status() == 404 {
             Err(ClientError::ThreadNotFound(thread_id.to_string()))
         } else {
@@ -306,10 +297,7 @@ impl JunctureClient {
             .map_err(|e| ClientError::Connection(e.to_string()))?;
 
         if response.status().is_success() {
-            response
-                .json()
-                .await
-                .map_err(ClientError::RequestError)
+            response.json().await.map_err(ClientError::RequestError)
         } else {
             Err(ClientError::Server {
                 status: response.status().as_u16(),

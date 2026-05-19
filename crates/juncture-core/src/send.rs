@@ -45,8 +45,9 @@ impl<S: State + serde::Serialize> From<Send<S>> for crate::command::SendTarget {
             // Convert state to JSON value
             state: serde_json::to_value(send.state)
                 .expect("state must be serializable for Send API"),
+            timeout: None,
         }
     }
 }
 
-// Rust guideline compliant 2025-01-18
+// Rust guideline compliant 2026-05-20

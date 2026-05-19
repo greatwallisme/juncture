@@ -11,6 +11,13 @@ use xxhash_rust::xxh3::Xxh3;
 
 pub use context::InterruptContext;
 
+// Task-local storage for the interrupt context during node execution.
+// This allows the `interrupt!` macro to access the context without
+// requiring it to be passed explicitly as a parameter.
+tokio::task_local! {
+    pub static INTERRUPT_CONTEXT: std::sync::Arc<InterruptContext>;
+}
+
 // The interrupt! macro is exported at the crate root via #[macro_export]
 
 /// Signal sent when a node requests interruption
@@ -73,66 +80,65 @@ impl From<Vec<serde_json::Value>> for ResumeValue {
 /// Tag used to mark interrupt signals that should be hidden from external consumers
 pub const HIDDEN_TAG: &str = "__hidden__";
 
-/// Generate a deterministic interrupt ID from a payload
+/// Generate a deterministic interrupt ID from node name and index
 ///
 /// Uses xxhash for fast, deterministic ID generation based on the
-/// interrupt payload content.
+/// node name and index.
 ///
 /// # Arguments
 ///
-/// * `payload` - The interrupt payload as JSON value
+/// * `node_name` - The node name
+/// * `index` - The interrupt index
 ///
 /// # Returns
 ///
-/// A hexadecimal string representing the hash of the payload
+/// A hexadecimal string representing the 128-bit hash (32 characters)
 ///
 /// # Examples
 ///
 /// ```ignore
 /// use juncture_core::interrupt::generate_interrupt_id;
-/// use serde_json::json;
 ///
-/// let payload = json!({"user_input": "continue"});
-/// let id = generate_interrupt_id(&payload);
-/// assert!(id.len() == 16); // xxh3 produces 16-character hex string
+/// let id = generate_interrupt_id("my_node", 0);
+/// assert!(id.len() == 32); // xxh3 128-bit hash produces 32-character hex string
 /// ```
 #[must_use]
-pub fn generate_interrupt_id(payload: &serde_json::Value) -> String {
+pub fn generate_interrupt_id(node_name: &str, index: usize) -> String {
     let mut hasher = Xxh3::new();
-    payload.hash(&mut hasher);
-    let hash = hasher.finish();
-    format!("{hash:016x}")
+    node_name.hash(&mut hasher);
+    index.hash(&mut hasher);
+    // Use finish() twice to get 128-bit result (finish128 is not available in this version)
+    let hash1 = hasher.finish();
+    let mut hasher2 = Xxh3::new();
+    node_name.hash(&mut hasher2);
+    index.hash(&mut hasher2);
+    hasher2.write_u8(1); // Add differentiator to get different second hash
+    let hash2 = hasher2.finish();
+    format!("{hash1:016x}{hash2:016x}")
 }
 
 /// Check if execution should interrupt based on the current state
 ///
-/// Examines pending tasks and compares against configured interrupt
-/// triggers to determine if execution should pause.
+/// Two-step check:
+/// 1. **Version gating**: Only fire if any channel was updated since the last
+///    interrupt (comparing `channel_versions` against `versions_seen`).
+/// 2. **Node name check**: Verify that a pending task targets a node listed
+///    in `interrupt_before` or `interrupt_after`.
+///
+/// The version gate prevents infinite interrupt loops after checkpoint restore
+/// when no state actually changed.
 ///
 /// # Arguments
 ///
 /// * `pending_tasks` - Tasks scheduled for the next superstep
 /// * `interrupt_before` - Nodes that should interrupt before execution
 /// * `interrupt_after` - Nodes that should interrupt after execution
+/// * `channel_versions` - Current field version map (channel -> version)
+/// * `versions_seen` - Last-seen versions at the time of the previous interrupt
 ///
 /// # Returns
 ///
 /// `Some(Vec<InterruptSignal>)` if interruption is needed, `None` otherwise
-///
-/// # Examples
-///
-/// ```ignore
-/// use juncture_core::interrupt::should_interrupt;
-/// use std::collections::HashSet;
-///
-/// let mut before = HashSet::new();
-/// before.insert("human_review".to_string());
-///
-/// let signals = should_interrupt(&pending_tasks, &before, &HashSet::new());
-/// if let Some(signals) = signals {
-///     // Handle interrupt
-/// }
-/// ```
 #[allow(
     clippy::implicit_hasher,
     reason = "accepting standard HashSet is fine for this use case"
@@ -142,19 +148,31 @@ pub fn should_interrupt<S: crate::State>(
     pending_tasks: &[crate::PendingTask<S>],
     interrupt_before: &HashSet<String>,
     interrupt_after: &HashSet<String>,
+    channel_versions: &HashMap<String, u64>,
+    versions_seen: &HashMap<String, Vec<u64>>,
 ) -> Option<Vec<InterruptSignal>> {
+    // Step 1: Version gate -- skip interrupt if no channels updated since last
+    let any_updates = channel_versions.iter().any(|(chan, ver)| {
+        let max_seen: u64 = versions_seen
+            .get(chan)
+            .map_or(0, |vers| vers.iter().copied().max().unwrap_or(0));
+        ver > &max_seen
+    });
+
+    if !any_updates && !versions_seen.is_empty() {
+        return None;
+    }
+
+    // Step 2: Node name check
     let mut signals = Vec::new();
 
     for task in pending_tasks {
         let node_name = &task.node_name;
 
-        // Check if node is in interrupt_before
         if interrupt_before.contains(node_name) {
             signals.push(InterruptSignal {
                 index: signals.len(),
-                id: Some(generate_interrupt_id(
-                    &serde_json::json!({"node": node_name, "trigger": "before"}),
-                )),
+                id: Some(generate_interrupt_id(node_name, signals.len())),
                 payload: serde_json::json!({
                     "node": node_name,
                     "reason": "interrupt_before",
@@ -162,13 +180,10 @@ pub fn should_interrupt<S: crate::State>(
             });
         }
 
-        // Check if node is in interrupt_after
         if interrupt_after.contains(node_name) {
             signals.push(InterruptSignal {
                 index: signals.len(),
-                id: Some(generate_interrupt_id(
-                    &serde_json::json!({"node": node_name, "trigger": "after"}),
-                )),
+                id: Some(generate_interrupt_id(node_name, signals.len())),
                 payload: serde_json::json!({
                     "node": node_name,
                     "reason": "interrupt_after",
@@ -213,11 +228,8 @@ pub async fn __interrupt_impl(
 
     let interrupt_id = id.map_or_else(
         || {
-            let mut hasher = Xxh3::new();
-            "current_node".hash(&mut hasher);
-            index.hash(&mut hasher);
-            let hash = hasher.finish();
-            format!("{hash:016x}")
+            // Use "current_node" as default node name when no explicit ID is provided
+            generate_interrupt_id("current_node", index)
         },
         std::string::ToString::to_string,
     );
@@ -307,4 +319,4 @@ impl Scratchpad {
     }
 }
 
-// Rust guideline compliant 2026-05-19
+// Rust guideline compliant 2026-05-20

@@ -14,7 +14,10 @@ use crate::store::Store;
 /// `ReAct` agent configuration
 ///
 /// Configuration for creating `ReAct` (Reasoning + Acting) agents with tools.
-#[allow(missing_debug_implementations, reason = "Contains Arc<dyn Node> and Arc<dyn Fn> which don't implement Debug")]
+#[allow(
+    missing_debug_implementations,
+    reason = "Contains Arc<dyn Node> and Arc<dyn Fn> which don't implement Debug"
+)]
 pub struct ReactAgentConfig<S: State, M: ChatModel> {
     /// LLM model
     pub model: M,
@@ -158,7 +161,10 @@ impl<S: State, M: ChatModel> ReactAgentConfig<S, M> {
 /// Prompt source for agents
 ///
 /// Can be a static string or a dynamic function.
-#[allow(missing_debug_implementations, reason = "Contains Arc<dyn Fn> which doesn't implement Debug")]
+#[allow(
+    missing_debug_implementations,
+    reason = "Contains Arc<dyn Fn> which doesn't implement Debug"
+)]
 pub enum PromptSource<S: State> {
     /// Static prompt string
     Static(String),

@@ -11,7 +11,46 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use crate::config::RunnableConfig;
-use crate::error::JunctureError;
+
+/// Checkpoint operation errors
+///
+/// Represents all possible errors that can occur during checkpoint operations.
+/// This type is defined in `juncture-core` for use in the `CheckpointSaver` trait.
+/// The juncture-checkpoint crate provides a compatible implementation with
+/// additional storage-specific errors.
+#[derive(Debug, Clone, thiserror::Error)]
+pub enum CheckpointError {
+    /// Serialization failed
+    #[error("Serialization failed: {0}")]
+    Serialize(String),
+
+    /// Deserialization failed
+    #[error("Deserialization failed: {0}")]
+    Deserialize(String),
+
+    /// Checkpoint not found
+    #[error("Checkpoint not found: thread={thread_id}, id={checkpoint_id}")]
+    NotFound {
+        /// Thread identifier
+        thread_id: String,
+        /// Checkpoint identifier
+        checkpoint_id: String,
+    },
+
+    /// Storage operation error
+    #[error("Storage error: {0}")]
+    Storage(String),
+
+    /// Other checkpoint errors
+    #[error("Checkpoint error: {0}")]
+    Other(String),
+}
+
+impl From<serde_json::Error> for CheckpointError {
+    fn from(err: serde_json::Error) -> Self {
+        Self::Serialize(err.to_string())
+    }
+}
 
 /// Namespace for checkpoint isolation in subgraph execution
 ///
@@ -191,46 +230,46 @@ pub trait CheckpointSaver: Send + Sync + 'static {
     ///
     /// # Errors
     ///
-    /// Returns [`JunctureError::Checkpoint`] if retrieval fails.
+    /// Returns [`CheckpointError`] if retrieval fails.
     async fn get_tuple(
         &self,
         config: &RunnableConfig,
-    ) -> Result<Option<CheckpointTuple>, JunctureError>;
+    ) -> Result<Option<CheckpointTuple>, CheckpointError>;
 
     /// List checkpoints with optional filtering
     ///
     /// # Errors
     ///
-    /// Returns [`JunctureError::Checkpoint`] if listing fails.
+    /// Returns [`CheckpointError`] if listing fails.
     async fn list(
         &self,
         config: &RunnableConfig,
         filter: Option<CheckpointFilter>,
-    ) -> Result<Vec<CheckpointTuple>, JunctureError>;
+    ) -> Result<Vec<CheckpointTuple>, CheckpointError>;
 
     /// Save a checkpoint
     ///
     /// # Errors
     ///
-    /// Returns [`JunctureError::Checkpoint`] if saving fails.
+    /// Returns [`CheckpointError`] if saving fails.
     async fn put(
         &self,
         config: &RunnableConfig,
         checkpoint: Checkpoint,
         metadata: CheckpointMetadata,
-    ) -> Result<RunnableConfig, JunctureError>;
+    ) -> Result<RunnableConfig, CheckpointError>;
 
     /// Save incremental writes from a completed task
     ///
     /// # Errors
     ///
-    /// Returns [`JunctureError::Checkpoint`] if saving fails.
+    /// Returns [`CheckpointError`] if saving fails.
     async fn put_writes(
         &self,
         config: &RunnableConfig,
         writes: Vec<PendingWrite>,
         task_id: &str,
-    ) -> Result<(), JunctureError>;
+    ) -> Result<(), CheckpointError>;
 }
 
 /// Complete checkpoint state
@@ -496,4 +535,4 @@ pub struct PregelTaskInfo {
     pub interrupts: Vec<serde_json::Value>,
 }
 
-// Rust guideline compliant 2026-05-19
+// Rust guideline compliant 2026-05-20

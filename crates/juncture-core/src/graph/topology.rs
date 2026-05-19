@@ -23,6 +23,9 @@ pub enum TopologyError {
     #[error("node '{name}' already exists")]
     DuplicateNode { name: String },
 
+    #[error("node '{name}' is invalid: {reason}")]
+    InvalidNodeName { name: String, reason: String },
+
     #[error("no entry point set")]
     NoEntryPoint,
 

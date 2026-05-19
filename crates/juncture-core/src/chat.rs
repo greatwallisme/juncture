@@ -7,8 +7,7 @@ use async_trait::async_trait;
 use futures::stream;
 
 use crate::llm::{
-    CallOptions, ChatModel, LlmError, MessageChunk, StructuredOutputModel,
-    ToolDefinition,
+    CallOptions, ChatModel, LlmError, MessageChunk, StructuredOutputModel, ToolDefinition,
 };
 use crate::state::{Content, Message, Role};
 
@@ -55,9 +54,8 @@ impl ChatAnthropic {
     /// Reads `ANTHROPIC_API_KEY` from environment.
     #[must_use]
     pub fn from_env() -> Self {
-        Self::new("claude-sonnet-4-20250514").with_api_key(
-            std::env::var("ANTHROPIC_API_KEY").unwrap_or_default(),
-        )
+        Self::new("claude-sonnet-4-20250514")
+            .with_api_key(std::env::var("ANTHROPIC_API_KEY").unwrap_or_default())
     }
 
     /// Set API key
@@ -161,7 +159,6 @@ impl ChatModel for ChatAnthropic {
 
 /// `OpenAI` implementation
 #[derive(Clone, Debug)]
-#[expect(dead_code, reason = "Fields reserved for future API implementation")]
 pub struct ChatOpenAI {
     /// Model name
     model: String,
@@ -203,10 +200,6 @@ impl ChatOpenAI {
     }
 
     /// Set API key
-    ///
-    /// # Arguments
-    ///
-    /// * `key` - API key
     #[must_use]
     pub fn with_api_key(mut self, key: impl Into<String>) -> Self {
         self.api_key = key.into();
@@ -215,13 +208,149 @@ impl ChatOpenAI {
 
     /// Set base URL
     ///
-    /// # Arguments
-    ///
-    /// * `url` - Base URL (for compatible APIs)
+    /// Compatible with Groq, Together AI, vLLM, Azure `OpenAI` endpoints.
     #[must_use]
     pub fn with_base_url(mut self, url: impl Into<String>) -> Self {
         self.base_url = url.into();
         self
+    }
+
+    /// Build the request body for the `OpenAI` Chat Completions API
+    fn build_request_body(
+        &self,
+        messages: &[Message],
+        options: Option<&CallOptions>,
+    ) -> serde_json::Value {
+        let opts = options.unwrap_or(&self.default_options);
+
+        let mut body = serde_json::json!({
+            "model": self.model,
+            "messages": messages.iter().map(|m| {
+                let mut msg = serde_json::json!({
+                    "role": match m.role {
+                        Role::System => "system",
+                        Role::Human => "user",
+                        Role::Ai => "assistant",
+                        Role::Tool => "tool",
+                    },
+                    "content": match &m.content {
+                        Content::Text(t) => serde_json::Value::String(t.clone()),
+                        Content::MultiPart(parts) => serde_json::Value::Array(
+                            parts.iter().map(|p| match p {
+                                crate::state::ContentPart::Text { text } => serde_json::json!({
+                                    "type": "text",
+                                    "text": text
+                                }),
+                                _ => serde_json::Value::Null,
+                            }).collect()
+                        ),
+                    },
+                });
+                if !m.tool_calls.is_empty() {
+                    msg["tool_calls"] = serde_json::json!(
+                        m.tool_calls.iter().map(|tc| serde_json::json!({
+                            "id": tc.id,
+                            "type": "function",
+                            "function": {
+                                "name": tc.name,
+                                "arguments": tc.args.to_string(),
+                            }
+                        })).collect::<Vec<_>>()
+                    );
+                }
+                if let Some(ref tc_id) = m.tool_call_id {
+                    msg["tool_call_id"] = serde_json::Value::String(tc_id.clone());
+                }
+                msg
+            }).collect::<Vec<_>>(),
+        });
+
+        if let Some(temp) = opts.temperature {
+            body["temperature"] = serde_json::Value::from(temp);
+        }
+        if let Some(max_tokens) = opts.max_tokens {
+            body["max_tokens"] = serde_json::Value::from(max_tokens);
+        }
+        if let Some(top_p) = opts.top_p {
+            body["top_p"] = serde_json::Value::from(top_p);
+        }
+        if let Some(ref stop) = opts.stop_sequences {
+            body["stop"] = serde_json::json!(stop);
+        }
+
+        if !self.tools.is_empty() {
+            body["tools"] = serde_json::json!(
+                self.tools
+                    .iter()
+                    .map(|t| serde_json::json!({
+                        "type": "function",
+                        "function": {
+                            "name": t.name,
+                            "description": t.description,
+                            "parameters": t.parameters,
+                        }
+                    }))
+                    .collect::<Vec<_>>()
+            );
+        }
+
+        body
+    }
+
+    /// Parse the `OpenAI` Chat Completions response into a Message
+    fn parse_response(resp: &serde_json::Value) -> Result<Message, LlmError> {
+        let choice = resp
+            .get("choices")
+            .and_then(|c| c.get(0))
+            .ok_or_else(|| LlmError::InvalidResponse("No choices in response".to_string()))?;
+
+        let message = choice
+            .get("message")
+            .ok_or_else(|| LlmError::InvalidResponse("No message in choice".to_string()))?;
+
+        let content = message
+            .get("content")
+            .and_then(|c| c.as_str())
+            .unwrap_or("")
+            .to_string();
+
+        let tool_calls: Vec<crate::state::ToolCall> = message
+            .get("tool_calls")
+            .and_then(|tc| tc.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|tc| {
+                        let id = tc.get("id")?.as_str()?.to_string();
+                        let func = tc.get("function")?;
+                        let name = func.get("name")?.as_str()?.to_string();
+                        let args = func
+                            .get("arguments")
+                            .and_then(|a| a.as_str())
+                            .and_then(|s| serde_json::from_str(s).ok())
+                            .unwrap_or(serde_json::Value::Null);
+                        Some(crate::state::ToolCall { id, name, args })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let usage = resp.get("usage").and_then(|u| {
+            Some(crate::state::TokenUsage {
+                input_tokens: u.get("prompt_tokens")?.as_u64()?,
+                output_tokens: u.get("completion_tokens")?.as_u64()?,
+                total_tokens: u.get("total_tokens")?.as_u64()?,
+            })
+        });
+
+        Ok(Message {
+            id: uuid::Uuid::new_v4().to_string(),
+            role: Role::Ai,
+            content: Content::Text(content),
+            tool_calls,
+            tool_call_id: None,
+            name: None,
+            usage,
+        })
     }
 }
 
@@ -229,20 +358,68 @@ impl ChatOpenAI {
 impl ChatModel for ChatOpenAI {
     async fn invoke(
         &self,
-        _messages: &[Message],
-        _options: Option<&CallOptions>,
+        messages: &[Message],
+        options: Option<&CallOptions>,
     ) -> Result<Message, LlmError> {
-        // Basic implementation returning an empty AI message.
-        // Full implementation would make HTTP request to OpenAI Chat Completions API.
-        Ok(Message {
-            id: uuid::Uuid::new_v4().to_string(),
-            role: Role::Ai,
-            content: Content::Text(String::new()),
-            tool_calls: vec![],
-            tool_call_id: None,
-            name: None,
-            usage: None,
-        })
+        let body = self.build_request_body(messages, options);
+        let url = format!("{}/chat/completions", self.base_url);
+
+        let response = self
+            .http_client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", self.api_key))
+            .header("Content-Type", "application/json")
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| {
+                if e.is_connect() || e.is_timeout() {
+                    LlmError::NetworkError(e.to_string())
+                } else if e.is_status() {
+                    match e.status() {
+                        Some(reqwest::StatusCode::UNAUTHORIZED) => {
+                            LlmError::AuthError("Invalid API key".to_string())
+                        }
+                        Some(reqwest::StatusCode::TOO_MANY_REQUESTS) => {
+                            LlmError::RateLimited { retry_after: None }
+                        }
+                        _ => LlmError::NetworkError(e.to_string()),
+                    }
+                } else {
+                    LlmError::NetworkError(e.to_string())
+                }
+            })?;
+
+        let status = response.status();
+        let resp_text = response
+            .text()
+            .await
+            .map_err(|e| LlmError::NetworkError(e.to_string()))?;
+
+        if status == reqwest::StatusCode::UNAUTHORIZED {
+            return Err(LlmError::AuthError("Invalid API key".to_string()));
+        }
+        if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            return Err(LlmError::RateLimited { retry_after: None });
+        }
+        if status == reqwest::StatusCode::BAD_REQUEST {
+            if resp_text.contains("context_length_exceeded")
+                || resp_text.contains("maximum context length")
+            {
+                return Err(LlmError::ContextLengthExceeded { used: 0, limit: 0 });
+            }
+            return Err(LlmError::InvalidResponse(resp_text));
+        }
+        if !status.is_success() {
+            return Err(LlmError::InvalidResponse(format!(
+                "HTTP {status}: {resp_text}"
+            )));
+        }
+
+        let resp_json: serde_json::Value = serde_json::from_str(&resp_text)
+            .map_err(|e| LlmError::InvalidResponse(format!("Invalid JSON: {e}")))?;
+
+        Self::parse_response(&resp_json)
     }
 
     async fn stream(
@@ -250,8 +427,7 @@ impl ChatModel for ChatOpenAI {
         _messages: &[Message],
         _options: Option<&CallOptions>,
     ) -> Result<crate::llm::BoxStream<'_, Result<MessageChunk, LlmError>>, LlmError> {
-        // Basic implementation returning an empty stream.
-        // Full implementation would use SSE to stream from OpenAI API.
+        // SSE streaming implementation deferred to facade crate
         Ok(Box::pin(stream::empty()))
     }
 

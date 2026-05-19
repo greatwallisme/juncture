@@ -75,11 +75,12 @@ impl<C: Clone + Send + Sync + 'static> Runtime<C> {
     where
         C: Default,
     {
+        let (heartbeat_tx, _heartbeat_rx) = tokio::sync::mpsc::unbounded_channel();
         Self {
             context: C::default(),
             store: None,
             stream_writer: StreamWriter::new(),
-            heartbeat: Heartbeat::new(),
+            heartbeat: Heartbeat::new(heartbeat_tx),
             previous: None,
             execution_info: None,
             control: None,
@@ -89,11 +90,12 @@ impl<C: Clone + Send + Sync + 'static> Runtime<C> {
     /// Create a new runtime with custom context
     #[must_use]
     pub fn with_context(context: C) -> Self {
+        let (heartbeat_tx, _heartbeat_rx) = tokio::sync::mpsc::unbounded_channel();
         Self {
             context,
             store: None,
             stream_writer: StreamWriter::new(),
-            heartbeat: Heartbeat::new(),
+            heartbeat: Heartbeat::new(heartbeat_tx),
             previous: None,
             execution_info: None,
             control: None,
@@ -159,31 +161,61 @@ impl Default for StreamWriter {
 /// Heartbeat mechanism for long-running nodes
 ///
 /// Nodes can send heartbeats to indicate they are still active,
-/// preventing idle timeout detection.
-#[derive(Clone, Debug)]
+/// preventing idle timeout detection. The heartbeat carries an
+/// unbounded channel sender that signals the runtime's idle-timeout
+/// watchdog each time `ping()` is called.
 pub struct Heartbeat {
-    _private: (),
+    tx: tokio::sync::mpsc::UnboundedSender<()>,
+    // Keep the receiver alive so ping() doesn't fail when using
+    // the default constructor (the runtime's idle-timeout watcher
+    // replaces this with its own receiver).
+    _rx: std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<()>>>,
+}
+
+impl Clone for Heartbeat {
+    fn clone(&self) -> Self {
+        Self {
+            tx: self.tx.clone(),
+            _rx: std::sync::Mutex::new(None),
+        }
+    }
+}
+
+impl std::fmt::Debug for Heartbeat {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Heartbeat")
+            .field("tx", &"<UnboundedSender>")
+            .finish()
+    }
 }
 
 impl Heartbeat {
-    /// Create a new heartbeat
+    /// Create a new heartbeat from an unbounded sender
     #[must_use]
-    pub const fn new() -> Self {
-        Self { _private: () }
+    pub const fn new(tx: tokio::sync::mpsc::UnboundedSender<()>) -> Self {
+        Self {
+            tx,
+            _rx: std::sync::Mutex::new(None),
+        }
     }
 
     /// Send a heartbeat signal
     ///
-    /// Heartbeat signaling will be enhanced in Phase 5 with actual
-    /// idle timeout detection and monitoring capabilities.
-    pub const fn ping(&self) {
-        // Heartbeat signaling will be implemented in Phase 5
+    /// # Errors
+    ///
+    /// Returns `Err` if the receiver has been dropped (runtime shutdown).
+    pub fn ping(&self) -> Result<(), tokio::sync::mpsc::error::SendError<()>> {
+        self.tx.send(())
     }
 }
 
 impl Default for Heartbeat {
     fn default() -> Self {
-        Self::new()
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        Self {
+            tx,
+            _rx: std::sync::Mutex::new(Some(rx)),
+        }
     }
 }
 
