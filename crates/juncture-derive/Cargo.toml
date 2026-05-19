@@ -1,0 +1,21 @@
+[package]
+name = "juncture-derive"
+version.workspace = true
+edition.workspace = true
+description = "Proc-macro derive implementation for Juncture State trait"
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[lib]
+proc-macro = true
+
+[dependencies]
+syn = { version = "2", features = ["full", "parsing", "extra-traits"] }
+quote = "1"
+proc-macro2 = "1"
+
+[lints]
+workspace = true

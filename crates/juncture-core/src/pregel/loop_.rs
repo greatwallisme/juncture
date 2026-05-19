@@ -1,0 +1,451 @@
+//! Main Pregel execution loop
+//!
+//! This module provides the `PregelLoop` struct that orchestrates graph execution
+//! using the Pregel algorithm with version tracking and task scheduling.
+
+use crate::{
+    JunctureError, Node, State,
+    edge::TriggerTable,
+    pregel::{
+        budget::BudgetTracker,
+        runner::execute_superstep,
+        scheduler::{FieldVersionTracker, VersionsSeen, compute_next_tasks},
+        types::{LoopStatus, PendingTask, SuperstepResult},
+    },
+};
+use indexmap::IndexMap;
+use std::sync::Arc;
+use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
+
+/// Main Pregel execution loop
+///
+/// Orchestrates graph execution using the Pregel algorithm, managing
+/// task scheduling, version tracking, and execution state.
+pub struct PregelLoop<S: State> {
+    /// Current execution state
+    pub state: S,
+
+    /// Graph nodes
+    pub nodes: IndexMap<String, Arc<dyn Node<S>>>,
+
+    /// Trigger table for routing
+    pub trigger_table: TriggerTable<S>,
+
+    /// Field version tracker
+    pub field_versions: FieldVersionTracker,
+
+    /// Versions seen by each node
+    pub versions_seen: VersionsSeen,
+
+    /// Execution configuration
+    pub runnable_config: crate::config::RunnableConfig,
+
+    /// Cancellation token
+    pub cancellation_token: CancellationToken,
+
+    /// Optional stream event sender
+    pub stream_tx: Option<mpsc::UnboundedSender<crate::pregel::stream::StreamEvent<S>>>,
+
+    /// Current step number
+    pub step: usize,
+
+    /// Loop status
+    pub status: LoopStatus,
+
+    /// Pending tasks for next superstep
+    pub pending_tasks: Vec<PendingTask<S>>,
+
+    /// Optional budget tracker
+    budget_tracker: Option<BudgetTracker>,
+}
+
+impl<S: State> std::fmt::Debug for PregelLoop<S> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PregelLoop")
+            .field("state", &"<state>")
+            .field("nodes", &self.nodes.len())
+            .field("trigger_table", &self.trigger_table)
+            .field("field_versions", &self.field_versions)
+            .field("versions_seen", &self.versions_seen)
+            .field("runnable_config", &self.runnable_config)
+            .field("cancellation_token", &self.cancellation_token)
+            .field("stream_tx", &self.stream_tx.is_some())
+            .field("step", &self.step)
+            .field("status", &self.status)
+            .field("pending_tasks", &self.pending_tasks)
+            .field("budget_tracker", &self.budget_tracker.is_some())
+            .finish()
+    }
+}
+
+impl<S: State> PregelLoop<S> {
+    /// Create a new Pregel loop
+    ///
+    /// # Arguments
+    ///
+    /// * `state` - Initial state
+    /// * `nodes` - Graph nodes
+    /// * `trigger_table` - Trigger table for routing
+    /// * `config` - Execution configuration
+    /// * `num_fields` - Number of fields in the state
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The trigger table is invalid
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// use juncture_core::pregel::loop_::PregelLoop;
+    ///
+    /// let loop = PregelLoop::new(
+    ///     initial_state,
+    ///     nodes,
+    ///     trigger_table,
+    ///     config,
+    ///     5, // number of fields
+    /// )?;
+    /// ```
+    pub fn new(
+        state: S,
+        nodes: IndexMap<String, Arc<dyn Node<S>>>,
+        trigger_table: TriggerTable<S>,
+        config: crate::config::RunnableConfig,
+        num_fields: usize,
+    ) -> Result<Self, JunctureError> {
+        let node_names: Vec<String> = nodes.keys().cloned().collect();
+        let field_versions = FieldVersionTracker::new(num_fields);
+        let versions_seen = VersionsSeen::new(&node_names, num_fields);
+        let cancellation_token = CancellationToken::new();
+
+        // Initialize pending tasks from entry point
+        let pending_tasks = Self::compute_initial_tasks(&trigger_table);
+
+        Ok(Self {
+            state,
+            nodes,
+            trigger_table,
+            field_versions,
+            versions_seen,
+            runnable_config: config,
+            cancellation_token,
+            stream_tx: None,
+            step: 0,
+            status: LoopStatus::Running,
+            pending_tasks,
+            budget_tracker: None,
+        })
+    }
+
+    /// Set the stream event sender
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// use tokio::sync::mpsc;
+    ///
+    /// let (tx, _rx) = mpsc::unbounded_channel();
+    /// loop.set_stream_sender(tx);
+    /// ```
+    pub fn set_stream_sender(
+        &mut self,
+        tx: mpsc::UnboundedSender<crate::pregel::stream::StreamEvent<S>>,
+    ) {
+        self.stream_tx = Some(tx);
+    }
+
+    /// Set the budget tracker
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// use juncture_core::pregel::budget::BudgetTracker;
+    ///
+    /// let budget = BudgetTracker::new(BudgetConfig::new());
+    /// loop.set_budget_tracker(budget);
+    /// ```
+    pub fn set_budget_tracker(&mut self, tracker: BudgetTracker) {
+        self.budget_tracker = Some(tracker);
+    }
+
+    /// Compute initial tasks from entry point
+    fn compute_initial_tasks(trigger_table: &TriggerTable<S>) -> Vec<PendingTask<S>> {
+        // Find nodes that have incoming edges from START
+        let mut initial_tasks = Vec::new();
+
+        for (node_name, sources) in &trigger_table.incoming {
+            for source in sources {
+                if let crate::edge::TriggerSource::Edge { from } = source
+                    && from == crate::edge::START
+                {
+                    initial_tasks.push(PendingTask::pull(
+                        uuid::Uuid::new_v4().to_string(),
+                        node_name.clone(),
+                    ));
+                    break;
+                }
+            }
+        }
+
+        initial_tasks
+    }
+
+    /// Execute one tick of the loop
+    ///
+    /// Returns `true` if execution should continue, `false` if done.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - Recursion limit is reached
+    /// - Cancellation is requested
+    /// - Budget limits are exceeded
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// while loop.tick()? {
+    ///     let result = loop.execute_superstep().await?;
+    ///     loop.after_tick(result)?;
+    /// }
+    /// ```
+    pub fn tick(&mut self) -> Result<bool, JunctureError> {
+        // Check recursion limit
+        if self.step >= self.runnable_config.recursion_limit {
+            self.status = LoopStatus::OutOfSteps;
+            return Err(JunctureError::recursion_limit(
+                self.step,
+                self.runnable_config.recursion_limit,
+            ));
+        }
+
+        // Check cancellation
+        if self.cancellation_token.is_cancelled() {
+            self.status = LoopStatus::Cancelled;
+            return Ok(false);
+        }
+
+        // Check budget
+        if let Some(tracker) = &self.budget_tracker
+            && let Some(reason) = tracker.check()
+        {
+            self.status = LoopStatus::BudgetExceeded;
+            return Err(JunctureError::execution(format!(
+                "Budget exceeded: {reason}"
+            )));
+        }
+
+        // Compute next tasks if pending is empty
+        if self.pending_tasks.is_empty() {
+            // Try to compute tasks from trigger table
+            // This is a no-op in the current implementation since
+            // compute_next_tasks requires completed tasks
+            self.status = LoopStatus::Done;
+            return Ok(false);
+        }
+
+        Ok(true)
+    }
+
+    /// Execute one superstep
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - Task execution fails
+    /// - Cancellation is requested
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// let result = loop.execute_superstep().await?;
+    /// ```
+    pub async fn execute_superstep(&mut self) -> Result<SuperstepResult<S>, JunctureError> {
+        execute_superstep(
+            &self.pending_tasks,
+            &self.state,
+            &self.nodes,
+            &self.runnable_config,
+            &self.cancellation_token,
+        )
+        .await
+    }
+
+    /// Process results after a superstep
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - Task computation fails
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// loop.after_tick(result).await?;
+    /// ```
+    pub async fn after_tick(&mut self, result: SuperstepResult<S>) -> Result<(), JunctureError> {
+        // Apply writes from completed tasks
+        let mut total_changed = crate::FieldsChanged(0);
+
+        for task_output in &result.task_outputs {
+            if let Some(ref update) = task_output.command.update {
+                let changed = self.state.apply(update.clone());
+                total_changed.merge(&changed);
+            }
+        }
+
+        // Bump field versions for changed fields
+        self.field_versions.bump_all(&total_changed);
+
+        // Mark versions as consumed
+        for task_output in &result.task_outputs {
+            let current_versions = self.field_versions.versions().to_vec();
+            self.versions_seen
+                .mark_consumed(&task_output.node_name, &current_versions);
+        }
+
+        // Reset ephemeral fields
+        self.state.reset_ephemeral();
+
+        // Emit stream events
+        if let Some(ref tx) = self.stream_tx {
+            for task_output in &result.task_outputs {
+                let event = crate::pregel::stream::StreamEvent::TaskEnd {
+                    task_id: task_output.task_id.clone(),
+                    node_name: task_output.node_name.clone(),
+                    duration: task_output.duration,
+                };
+                let _ = tx.send(event);
+            }
+        }
+
+        // Compute next pending tasks
+        self.pending_tasks =
+            compute_next_tasks(&result.task_outputs, &self.trigger_table, &self.state).await?;
+
+        // Increment step
+        self.step += 1;
+
+        // Report step to budget tracker
+        if let Some(ref tracker) = self.budget_tracker {
+            tracker.report_step();
+        }
+
+        Ok(())
+    }
+
+    /// Consume the loop and return the final state
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// let final_state = loop.into_state();
+    /// ```
+    #[must_use]
+    pub fn into_state(self) -> S {
+        self.state
+    }
+
+    /// Get the current step number
+    #[must_use]
+    pub const fn step(&self) -> usize {
+        self.step
+    }
+
+    /// Get the current status
+    #[must_use]
+    pub const fn status(&self) -> &LoopStatus {
+        &self.status
+    }
+
+    /// Check if the loop is still running
+    #[must_use]
+    pub const fn is_running(&self) -> bool {
+        matches!(self.status, LoopStatus::Running)
+    }
+
+    /// Get a clone of the current state without consuming the loop
+    ///
+    /// Useful for streaming execution where state snapshots are needed
+    /// after each superstep without terminating the loop.
+    #[must_use]
+    pub fn snapshot_state(&self) -> S
+    where
+        S: Clone,
+    {
+        self.state.clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{Command, node::IntoNode, node::NodeFnCommand};
+
+    #[test]
+    fn test_pregel_loop_creation() {
+        let state = TestState;
+        let mut nodes = IndexMap::new();
+        nodes.insert(
+            "test_node".to_string(),
+            NodeFnCommand(|_s| async move { Ok(Command::end()) }).into_node("test_node"),
+        );
+
+        let trigger_table = TriggerTable::new();
+        let config = crate::config::RunnableConfig::new();
+
+        let result = PregelLoop::new(state, nodes, trigger_table, config, 0);
+        result.unwrap();
+    }
+
+    #[test]
+    fn test_field_version_tracker() {
+        let mut tracker = FieldVersionTracker::new(5);
+
+        assert_eq!(tracker.get(0), 0);
+        assert_eq!(tracker.global_max(), 0);
+
+        tracker.bump(0);
+        assert_eq!(tracker.get(0), 1);
+        assert_eq!(tracker.global_max(), 1);
+
+        tracker.bump(2);
+        assert_eq!(tracker.get(2), 2);
+        assert_eq!(tracker.global_max(), 2);
+    }
+
+    #[test]
+    fn test_versions_seen() {
+        let node_names = vec!["node_a".to_string(), "node_b".to_string()];
+        let mut seen = VersionsSeen::new(&node_names, 3);
+
+        assert!(!seen.should_activate("node_a", &[0], &[0, 0, 0]));
+
+        let current = vec![1, 0, 0];
+        assert!(seen.should_activate("node_a", &[0], &current));
+
+        seen.mark_consumed("node_a", &current);
+        assert!(!seen.should_activate("node_a", &[0], &current));
+    }
+
+    #[derive(Clone, Debug)]
+    struct TestState;
+
+    impl State for TestState {
+        type Update = TestUpdate;
+        type FieldVersions = ();
+
+        fn apply(&mut self, _: Self::Update) -> crate::FieldsChanged {
+            crate::FieldsChanged(0)
+        }
+
+        fn reset_ephemeral(&mut self) {}
+    }
+
+    #[derive(Clone, Debug, Default)]
+    struct TestUpdate;
+}
+
+// Rust guideline compliant 2026-05-19

@@ -8,7 +8,19 @@
       "parent": null,
       "name": "PregelLoop",
       "required_methods": [],
-      "required_fields": ["context", "config", "nodes", "trigger_table", "checkpointer", "runnable_config", "cancellation_token", "budget_tracker", "stream_tx", "step", "status"],
+      "required_fields": [
+        "context",
+        "config",
+        "nodes",
+        "trigger_table",
+        "checkpointer",
+        "runnable_config",
+        "cancellation_token",
+        "budget_tracker",
+        "stream_tx",
+        "step",
+        "status"
+      ],
       "required_variants": [],
       "findings": [],
       "description": "Pregel loop orchestrator: tick/execute_superstep/after_tick",
@@ -20,7 +32,12 @@
       "parent": null,
       "name": "ExecutionContext",
       "required_methods": [],
-      "required_fields": ["state", "field_versions", "versions_seen", "pending_writes"],
+      "required_fields": [
+        "state",
+        "field_versions",
+        "versions_seen",
+        "pending_writes"
+      ],
       "required_variants": [],
       "findings": [],
       "description": "Mutable execution state holder",
@@ -32,7 +49,15 @@
       "parent": null,
       "name": "ExecutionConfig",
       "required_methods": [],
-      "required_fields": ["recursion_limit", "interrupt_before", "interrupt_after", "budget", "durability", "retry_policies", "timeout_policies"],
+      "required_fields": [
+        "recursion_limit",
+        "interrupt_before",
+        "interrupt_after",
+        "budget",
+        "durability",
+        "retry_policies",
+        "timeout_policies"
+      ],
       "required_variants": [],
       "findings": [],
       "description": "Immutable execution parameters",
@@ -44,7 +69,12 @@
       "parent": null,
       "name": "PendingTask",
       "required_methods": [],
-      "required_fields": ["id", "node_name", "trigger", "state_override"],
+      "required_fields": [
+        "id",
+        "node_name",
+        "trigger",
+        "state_override"
+      ],
       "required_variants": [],
       "findings": [],
       "description": "Pending task with UUID, node name, trigger type, optional state override",
@@ -57,7 +87,10 @@
       "name": "TaskTrigger",
       "required_methods": [],
       "required_fields": [],
-      "required_variants": ["Pull", "Push"],
+      "required_variants": [
+        "Pull",
+        "Push"
+      ],
       "findings": [],
       "description": "Task trigger: Pull (edge) or Push (Send API)",
       "verification_pattern": "pub enum TaskTrigger"
@@ -69,7 +102,16 @@
       "name": "LoopStatus",
       "required_methods": [],
       "required_fields": [],
-      "required_variants": ["Running", "Done", "OutOfSteps", "InterruptBefore", "InterruptAfter", "BudgetExceeded", "Cancelled", "Drained"],
+      "required_variants": [
+        "Running",
+        "Done",
+        "OutOfSteps",
+        "InterruptBefore",
+        "InterruptAfter",
+        "BudgetExceeded",
+        "Cancelled",
+        "Drained"
+      ],
       "findings": [],
       "description": "Loop execution status",
       "verification_pattern": "pub enum LoopStatus"
@@ -80,7 +122,9 @@
       "parent": null,
       "name": "SuperstepResult",
       "required_methods": [],
-      "required_fields": ["task_outputs"],
+      "required_fields": [
+        "task_outputs"
+      ],
       "required_variants": [],
       "findings": [],
       "description": "Superstep execution result with task outputs",
@@ -92,7 +136,12 @@
       "parent": null,
       "name": "TaskOutput",
       "required_methods": [],
-      "required_fields": ["task_id", "node_name", "command", "duration"],
+      "required_fields": [
+        "task_id",
+        "node_name",
+        "command",
+        "duration"
+      ],
       "required_variants": [],
       "findings": [],
       "description": "Single task output",
@@ -106,7 +155,10 @@
       "required_methods": [],
       "required_fields": [],
       "required_variants": [],
-      "findings": ["H-5", "R-A2-2"],
+      "findings": [
+        "H-5",
+        "R-A2-2"
+      ],
       "description": "Superstep executor with optional max_parallel_tasks semaphore",
       "verification_pattern": "pub async fn execute_superstep"
     },
@@ -118,7 +170,10 @@
       "required_methods": [],
       "required_fields": [],
       "required_variants": [],
-      "findings": ["H-9", "C-1"],
+      "findings": [
+        "H-9",
+        "C-1"
+      ],
       "description": "Apply writes with path-based sorting: PULL by name, PUSH by index",
       "verification_pattern": "fn apply_writes"
     },
@@ -130,19 +185,28 @@
       "required_methods": [],
       "required_fields": [],
       "required_variants": [],
-      "findings": ["H-8"],
+      "findings": [
+        "H-8"
+      ],
       "description": "Compute next tasks from completed outputs, trigger table, state",
-      "verification_pattern": "pub fn compute_next_tasks"
+      "verification_pattern": "pub\\s+(?:async\\s+)?fn\\s+compute_next_tasks"
     },
     {
       "id": "03-012",
       "category": "struct",
       "parent": null,
       "name": "TriggerToNodes",
-      "required_methods": ["from_trigger_table", "triggered_nodes"],
-      "required_fields": ["mapping"],
+      "required_methods": [
+        "from_trigger_table",
+        "triggered_nodes"
+      ],
+      "required_fields": [
+        "mapping"
+      ],
       "required_variants": [],
-      "findings": ["H-8"],
+      "findings": [
+        "H-8"
+      ],
       "description": "Reverse mapping from channel names to subscribing nodes",
       "verification_pattern": "pub struct TriggerToNodes"
     },
@@ -152,7 +216,13 @@
       "parent": null,
       "name": "BudgetConfig",
       "required_methods": [],
-      "required_fields": ["max_tokens", "max_cost_usd", "max_duration", "max_steps", "on_exceeded"],
+      "required_fields": [
+        "max_tokens",
+        "max_cost_usd",
+        "max_duration",
+        "max_steps",
+        "on_exceeded"
+      ],
       "required_variants": [],
       "findings": [],
       "description": "Budget configuration with limits and exceeded action",
@@ -165,7 +235,11 @@
       "name": "BudgetExceededAction",
       "required_methods": [],
       "required_fields": [],
-      "required_variants": ["Terminate", "Interrupt", "Custom"],
+      "required_variants": [
+        "Terminate",
+        "Interrupt",
+        "Custom"
+      ],
       "findings": [],
       "description": "Action when budget exceeded",
       "verification_pattern": "pub enum BudgetExceededAction"
@@ -175,8 +249,16 @@
       "category": "struct",
       "parent": null,
       "name": "BudgetTracker",
-      "required_methods": ["report_usage", "check"],
-      "required_fields": ["tokens_used", "cost_usd", "start_time", "steps_completed"],
+      "required_methods": [
+        "report_usage",
+        "check"
+      ],
+      "required_fields": [
+        "tokens_used",
+        "cost_usd",
+        "start_time",
+        "steps_completed"
+      ],
       "required_variants": [],
       "findings": [],
       "description": "Budget usage tracker with atomic counters",
@@ -188,7 +270,12 @@
       "parent": null,
       "name": "BudgetUsage",
       "required_methods": [],
-      "required_fields": ["tokens_used", "cost_usd", "duration", "steps_completed"],
+      "required_fields": [
+        "tokens_used",
+        "cost_usd",
+        "duration",
+        "steps_completed"
+      ],
       "required_variants": [],
       "findings": [],
       "description": "Budget usage snapshot",
@@ -199,12 +286,49 @@
       "category": "enum",
       "parent": null,
       "name": "JunctureError",
-      "required_methods": ["error_code", "is_graph_recursion_limit", "is_invalid_concurrent_update", "is_node_failed", "is_cancelled", "is_interrupted", "is_budget_exceeded", "is_serialize", "is_checkpoint", "is_empty_channel", "is_empty_input", "is_task_not_found"],
+      "required_methods": [
+        "error_code",
+        "is_graph_recursion_limit",
+        "is_invalid_concurrent_update",
+        "is_node_failed",
+        "is_cancelled",
+        "is_interrupted",
+        "is_budget_exceeded",
+        "is_serialize",
+        "is_checkpoint",
+        "is_empty_channel",
+        "is_empty_input",
+        "is_task_not_found"
+      ],
       "required_fields": [],
-      "required_variants": ["Topology", "NodeFailed", "RecursionLimitExceeded", "Cancelled", "Interrupted", "BudgetExceeded", "MultipleWriters", "TaskPanicked", "Checkpoint", "Serialize", "Llm", "NodeNotFound", "NodeTimeout", "GraphDrained", "EmptyChannel", "EmptyInput", "TaskNotFound"],
-      "findings": ["R-A5-1", "M-15", "L-2", "L-3", "L-4"],
+      "required_variants": [
+        "Topology",
+        "NodeFailed",
+        "RecursionLimitExceeded",
+        "Cancelled",
+        "Interrupted",
+        "BudgetExceeded",
+        "MultipleWriters",
+        "TaskPanicked",
+        "Checkpoint",
+        "Serialize",
+        "Llm",
+        "NodeNotFound",
+        "NodeTimeout",
+        "GraphDrained",
+        "EmptyChannel",
+        "EmptyInput",
+        "TaskNotFound"
+      ],
+      "findings": [
+        "R-A5-1",
+        "M-15",
+        "L-2",
+        "L-3",
+        "L-4"
+      ],
       "description": "Unified error enum with is_xxx() helper methods",
-      "verification_pattern": "pub enum JunctureError"
+      "verification_pattern": "pub\\s+struct\\s+JunctureError"
     },
     {
       "id": "03-018",
@@ -213,8 +337,14 @@
       "name": "BubbleUp",
       "required_methods": [],
       "required_fields": [],
-      "required_variants": ["Interrupt", "Drained", "ParentCommand"],
-      "findings": ["M-4"],
+      "required_variants": [
+        "Interrupt",
+        "Drained",
+        "ParentCommand"
+      ],
+      "findings": [
+        "M-4"
+      ],
       "description": "Control flow signals that bubble from subgraph to parent",
       "verification_pattern": "pub enum BubbleUp"
     },
@@ -225,8 +355,16 @@
       "name": "ErrorCode",
       "required_methods": [],
       "required_fields": [],
-      "required_variants": ["GraphRecursionLimit", "InvalidConcurrentUpdate", "InvalidNodeReturnValue", "MultipleSubgraphs", "InvalidChatHistory"],
-      "findings": ["L-12"],
+      "required_variants": [
+        "GraphRecursionLimit",
+        "InvalidConcurrentUpdate",
+        "InvalidNodeReturnValue",
+        "MultipleSubgraphs",
+        "InvalidChatHistory"
+      ],
+      "findings": [
+        "L-12"
+      ],
       "description": "Standard error code enum for retry/handler matching",
       "verification_pattern": "pub enum ErrorCode"
     },
@@ -236,7 +374,14 @@
       "parent": null,
       "name": "RetryPolicy",
       "required_methods": [],
-      "required_fields": ["initial_interval", "backoff_factor", "max_interval", "max_attempts", "jitter", "retry_on"],
+      "required_fields": [
+        "initial_interval",
+        "backoff_factor",
+        "max_interval",
+        "max_attempts",
+        "jitter",
+        "retry_on"
+      ],
       "required_variants": [],
       "findings": [],
       "description": "Node-level retry with exponential backoff and jitter",
@@ -248,7 +393,11 @@
       "parent": null,
       "name": "TimeoutPolicy",
       "required_methods": [],
-      "required_fields": ["run_timeout", "idle_timeout", "refresh_on"],
+      "required_fields": [
+        "run_timeout",
+        "idle_timeout",
+        "refresh_on"
+      ],
       "required_variants": [],
       "findings": [],
       "description": "Node-level timeout with run and idle timers",
@@ -261,7 +410,10 @@
       "name": "NodeTimeoutError",
       "required_methods": [],
       "required_fields": [],
-      "required_variants": ["RunTimeout", "IdleTimeout"],
+      "required_variants": [
+        "RunTimeout",
+        "IdleTimeout"
+      ],
       "findings": [],
       "description": "Node timeout error variants",
       "verification_pattern": "pub enum NodeTimeoutError"
@@ -273,7 +425,11 @@
       "name": "Durability",
       "required_methods": [],
       "required_fields": [],
-      "required_variants": ["Sync", "Async", "Exit"],
+      "required_variants": [
+        "Sync",
+        "Async",
+        "Exit"
+      ],
       "findings": [],
       "description": "Checkpoint persistence mode",
       "verification_pattern": "pub enum Durability"
@@ -283,7 +439,12 @@
       "category": "trait",
       "parent": null,
       "name": "PregelProtocol",
-      "required_methods": ["invoke", "stream", "get_state", "update_state"],
+      "required_methods": [
+        "invoke",
+        "stream",
+        "get_state",
+        "update_state"
+      ],
       "required_fields": [],
       "required_variants": [],
       "findings": [],
@@ -295,10 +456,18 @@
       "category": "enum",
       "parent": null,
       "name": "SyncAsyncFuture",
-      "required_methods": ["result", "is_ready"],
+      "required_methods": [
+        "result",
+        "is_ready"
+      ],
       "required_fields": [],
-      "required_variants": ["Ready", "Future"],
-      "findings": ["M-6"],
+      "required_variants": [
+        "Ready",
+        "Future"
+      ],
+      "findings": [
+        "M-6"
+      ],
       "description": "May be sync or async task result for functional API",
       "verification_pattern": "pub enum SyncAsyncFuture"
     }

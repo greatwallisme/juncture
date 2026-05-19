@@ -70,4 +70,5 @@ Hooks in `.claude/settings.local.json` auto-run verification on `.rs` file write
 - All Rust code must pass with zero warnings and zero errors (clippy pedantic/nursery/cargo/restriction)
 - Never use `unwrap()`, `todo!()`, `unimplemented!()` in committed code
 - Never write placeholder/mock code
+- Never use file-level `#![allow(...)]` or `#![expect(...)]` -- always apply `#[allow(...)]` or `#[expect(...)]` at the item level (function, struct, field, impl block) with a reason
 - Hookify rules in `.claude/hookify.*.local.md` block simplification patterns in `.rs` files

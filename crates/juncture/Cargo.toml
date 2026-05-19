@@ -1,0 +1,39 @@
+[package]
+name = "juncture"
+version.workspace = true
+edition.workspace = true
+description = "Typed state machine framework for LLM agents - Rust implementation of LangGraph"
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+juncture-core = { path = "../juncture-core" }
+juncture-derive = { path = "../juncture-derive" }
+juncture-store = { path = "../juncture-store", optional = true }
+async-trait = "0.1"
+futures = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["rt", "macros", "time"] }
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4"] }
+
+# Provider dependencies (feature-gated)
+reqwest = { version = "0.12", features = ["json", "stream"], optional = true }
+eventsource-stream = { version = "0.2", optional = true }
+schemars = { version = "0.8", optional = true }
+
+[features]
+default = []
+anthropic = ["reqwest", "eventsource-stream"]
+openai = ["reqwest", "eventsource-stream"]
+ollama = ["reqwest"]
+structured-output = ["schemars"]
+store = ["juncture-store"]
+
+[lints]
+workspace = true
