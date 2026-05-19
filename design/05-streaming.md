@@ -628,6 +628,11 @@ pub struct StreamConfig {
     /// 只包含指定命名空间的子图事件（空 = 全部）
     pub subgraph_filter: Vec<String>,
 }
+
+// > **实现备注 (D-05-6)**: 实际实现中 `subgraph_filter` 字段类型为 `Option<Vec<String>>` 而非 `Vec<String>`。
+// > `None` 表示包含所有子图事件（等价于设计中的"空 = 全部"），`Some(vec![])` 表示不包含任何子图事件，
+// > `Some(names)` 表示只包含指定命名空间。使用 `Option` 包装更符合 Rust 惯用法，
+// > 避免了"空 Vec 有两种含义"的歧义。
 ```
 
 ---

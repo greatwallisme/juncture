@@ -643,6 +643,12 @@ pub trait Channel<T> {
         // 默认 no-op
         false
     }
+
+    // > **实现备注 (D-01-3)**: 实际的 Channel trait 还包含两个额外方法用于自包含的 checkpoint 序列化：
+    // > `fn checkpoint() -> Option<serde_json::Value>` 和
+    // > `fn from_checkpoint(value: serde_json::Value) -> Result<Self, String>`。
+    // > 这将 checkpoint 持久化逻辑混入 Channel trait，但使每个 channel 可以独立完成序列化/反序列化，
+    // > 无需外部序列化器感知内部类型。
 }
 
 /// EphemeralChannel 的 consume 实现
@@ -1390,6 +1396,10 @@ pub enum DeltaBlob<T> {
     /// 完整快照值
     Snapshot(T),
 }
+
+// > **实现备注 (D-01-6)**: 实际实现中 `DeltaBlob` 的 `Snapshot` 变体使用 `serde_json::Value`
+// > 而非泛型 `T`：`Snapshot(serde_json::Value)`。这消除了编译时类型保证，但简化了 checkpoint
+// > 序列化——所有快照统一为 JSON 值，避免了为每个泛型 T 实现 serde trait 的约束传播。
 ```
 
 ### 7.3 快照策略

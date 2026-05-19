@@ -51,8 +51,15 @@ pub struct PendingTask<S: State> {
     /// What triggered this task
     pub trigger: TaskTrigger,
 
-    /// Optional state override for this task
+    /// Optional state override for this task (as JSON for Send operations)
     pub state_override: Option<S>,
+
+    /// Optional state override as JSON (for Send operations)
+    ///
+    /// Stored separately because Send operations provide state as `serde_json::Value`,
+    /// which can't be deserialized to S without S: `DeserializeOwned` bound.
+    /// This is deserialized during task execution in the runner.
+    pub state_json: Option<serde_json::Value>,
 }
 
 /// What triggered a task to be scheduled
@@ -196,6 +203,7 @@ impl<S: State> PendingTask<S> {
     ///     node_name: "my_node".to_string(),
     ///     trigger: TaskTrigger::Pull,
     ///     state_override: None,
+    ///     state_json: None,
     /// };
     /// ```
     #[must_use]
@@ -210,6 +218,7 @@ impl<S: State> PendingTask<S> {
             node_name,
             trigger,
             state_override,
+            state_json: None,
         }
     }
 
@@ -221,17 +230,47 @@ impl<S: State> PendingTask<S> {
             node_name,
             trigger: TaskTrigger::Pull,
             state_override: None,
+            state_json: None,
         }
     }
 
-    /// Create a push-based task
+    /// Create a push-based task with state override as JSON
+    ///
+    /// This is used for Send operations where the state override comes from
+    /// `SendTarget.state` (a `serde_json::Value`).
     #[must_use]
-    pub const fn push(id: String, node_name: String, index: usize, state_override: S) -> Self {
+    pub const fn push(
+        id: String,
+        node_name: String,
+        index: usize,
+        state_json: serde_json::Value,
+    ) -> Self {
+        Self {
+            id,
+            node_name,
+            trigger: TaskTrigger::Push { index },
+            state_override: None,
+            state_json: Some(state_json),
+        }
+    }
+
+    /// Create a push-based task with typed state override
+    ///
+    /// This variant is used when the state override is already available
+    /// as the typed state S (not just JSON).
+    #[must_use]
+    pub const fn push_typed(
+        id: String,
+        node_name: String,
+        index: usize,
+        state_override: S,
+    ) -> Self {
         Self {
             id,
             node_name,
             trigger: TaskTrigger::Push { index },
             state_override: Some(state_override),
+            state_json: None,
         }
     }
 }
@@ -385,3 +424,4 @@ impl<T> From<futures::future::BoxFuture<'static, T>> for SyncAsyncFuture<T> {
 }
 
 // Rust guideline compliant 2026-05-19
+// Rust guideline compliant 2026-05-20

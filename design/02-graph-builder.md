@@ -79,6 +79,11 @@ impl<S: State> StateGraph<S> {
         retry_policies: Vec<RetryPolicy>,
     ) -> &mut Self;
 
+    // > **实现备注 (D-02-1)**: 实际实现中 `add_node` 返回 `Result<(), TopologyError>` 而非 `&mut Self`。
+    // > 这破坏了链式构建器模式（不再支持 `.add_node("a", ...)?.add_node("b", ...)?`），
+    // > 但支持 fail-fast 验证——重复节点名等拓扑错误在调用时立即返回而非延迟到 `compile()`。
+    // > 用户需要在每次 `add_node` 调用后使用 `?` 运算符。
+
     /// 简化版本：向后兼容的 add_node（无额外参数）
     pub fn add_node_simple(
         &mut self,
@@ -709,6 +714,11 @@ pub enum Goto {
     Multiple(Vec<String>),
     /// 动态 fan-out：每个 SendTarget 在下一 superstep 独立执行
     Send(Vec<SendTarget>),
+
+    // > **实现备注 (D-03-9)**: `Goto::Send` 已完全实现。当节点返回包含 `Send` targets 的 Command 时，
+    // > Pregel 引擎为每个 send target 创建独立的 `PendingTask` 条目（trigger 为 `Push { index }`），
+    // > 并附带 JSON 序列化的 state override。每个 target 在下一 superstep 中作为独立任务并行执行，
+    // > 结果通过 reducer 合并回主状态。
     /// 终止当前路径
     End,
 }

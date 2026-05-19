@@ -708,6 +708,11 @@ pub struct CachePolicy {
     pub key_func: Option<Arc<dyn Fn(&CacheKeyInput) -> String + Send + Sync>>,
 }
 
+// > **实现备注 (D-09-3)**: 实际实现中 `CachePolicy` 命名为 `LlmCachePolicy`，添加了 `Llm` 前缀
+// > 以避免与 `RunnableConfig` 中已有的通用 `CachePolicy` 类型产生命名冲突。
+// > `LlmCachePolicy` 专门用于 LLM 调用级别的缓存控制，
+// > 而通用 `CachePolicy` 用于节点级别的缓存配置。
+
 /// 缓存键生成输入
 pub struct CacheKeyInput {
     pub model: String,
@@ -864,6 +869,12 @@ pub struct InvokeConfig {
     pub interrupt_before: Option<Vec<String>>,
     pub interrupt_after: Option<Vec<String>>,
 }
+
+// > **实现备注 (D-09-5)**: 实际实现中 `InvokeConfig` 的所有字段均为 `Option<T>` 类型（如上所示），
+// > 符合 Rust 惯用的配置覆盖模式。`None` 表示使用服务端默认值，`Some` 表示显式覆盖。
+// > 这与设计中描述的 `RunnableConfig`（部分字段为非 Option，如 `recursion_limit: usize`）不同，
+// > 但 `InvokeConfig` 作为跨网络传输的客户端配置类型，全部使用 Option 更适合
+// > JSON 序列化和 partial update 语义。
 ```
 
 ### 12.4 使用示例

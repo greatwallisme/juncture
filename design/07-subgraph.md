@@ -131,6 +131,11 @@ impl<S: State> StateGraph<S> {
 }
 ```
 
+// > **实现备注 (D-07-3)**: 实际实现中 `add_subgraph_node` 接受 `Arc<CompiledGraph<Sub>>` 而非
+// > `CompiledGraph<Sub>`（CompiledGraph 已内部使用 Arc，但显式 Arc 允许同一子图在多个父图中复用），
+// > 且返回 `Result<(), TopologyError>` 而非 `&mut Self`，与 `add_node` 的 fail-fast 验证模式一致。
+```
+
 ### 2.2 模式 2：显式映射（不同 State 类型）
 
 ```rust
@@ -181,6 +186,12 @@ impl<S: State> StateGraph<S> {
     where
         Sub: State + Serialize + DeserializeOwned;
 }
+```
+
+// > **实现备注 (D-07-4)**: 实际实现中 `add_subgraph` 使用 `SubgraphMount` 结构体封装
+// > input_map 和 output_map，并将方法签名改为接受 `SubgraphMount<S>` 参数。
+// > 同时返回 `Result<(), TopologyError>` 而非 `&mut Self`，与 `add_node` 的 fail-fast
+// > 验证模式一致。`SubgraphMount` 提供类型安全的构建器 API 来配置映射函数和子图持久化选项。
 ```
 
 #### 类型安全保证

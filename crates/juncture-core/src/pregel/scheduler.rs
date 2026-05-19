@@ -352,12 +352,20 @@ pub async fn compute_next_tasks<S: State>(
                     }
                 }
             }
-            crate::Goto::Send(_send_targets) => {
+            crate::Goto::Send(send_targets) => {
                 // Dynamic fan-out with state overrides
-                // Note: Send operations require State to implement Deserialize
-                // which is not a general requirement. This will be implemented
-                // in a future phase by adding a separate trait bound for
-                // deserializable states or using a different approach.
+                for (idx, target) in send_targets.iter().enumerate() {
+                    if !seen_nodes.contains(&target.node) {
+                        seen_nodes.insert(target.node.clone());
+                        // State override is stored as JSON and deserialized during task execution
+                        next_tasks.push(PendingTask::push(
+                            uuid::Uuid::new_v4().to_string(),
+                            target.node.clone(),
+                            idx,
+                            target.state.clone(),
+                        ));
+                    }
+                }
             }
             crate::Goto::End => {
                 // Termination, no next tasks
@@ -886,3 +894,4 @@ mod scheduler_tests {
 // Rust guideline compliant 2026-05-20
 
 // Rust guideline compliant 2026-05-19
+// Rust guideline compliant 2026-05-20

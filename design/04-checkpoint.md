@@ -397,6 +397,10 @@ pub struct PendingTask {
     /// 可选的状态覆盖（Send API 场景）
     pub state_override: Option<serde_json::Value>,
 }
+
+// > **实现备注 (D-04-1)**: checkpoint 模块中用于 checkpoint 数据的类型命名为
+// > `CheckpointPendingTask` 而非 `PendingTask`，以避免与 `pregel::types::PendingTask`
+// > 的命名冲突。两者字段语义相同但属于不同模块的类型。
 ```
 
 ### 3.8 CheckpointFilter
@@ -608,6 +612,12 @@ pub trait CheckpointSerializer: Send + Sync + 'static {
     fn format(&self) -> SerializationFormat;
 }
 
+// > **实现备注 (D-04-2)**: 实际实现中 `CheckpointSerializer` trait 还包含两个额外方法：
+// > `fn serialize_value(&self, value: &serde_json::Value) -> Result<Vec<u8>, CheckpointError>` 和
+// > `fn deserialize_value(&self, data: &[u8]) -> Result<serde_json::Value, CheckpointError>`。
+// > 这些方法提供无类型（untyped）的序列化路径，用于 checkpoint 内部存储 channel_values 等
+// > 已是 `serde_json::Value` 形式的数据，避免不必要的泛型序列化开销。
+
 /// <!-- Addresses finding: R-A6-1 -->
 /// MessagePack 序列化器（默认）
 pub struct MsgpackSerializer;
@@ -681,6 +691,11 @@ impl EncryptedSerializer {
     }
 }
 
+// > **实现备注 (D-04-3)**: 实际实现中 `EncryptedSerializer` 使用泛型参数 `Inner: CheckpointSerializer`
+// > 而非 `Box<dyn CheckpointSerializer>` 进行内部序列化器组合。这允许编译器进行单态化优化，
+// > 消除虚表分发开销。此外还提供 `from_passphrase(phrase: &str) -> Self` 便捷方法，
+// > 通过 PBKDF2 或类似 KDF 从密码短语派生 32 字节密钥。
+
 impl CheckpointSerializer for EncryptedSerializer {
     fn serialize(&self, value: &impl Serialize) -> Result<Vec<u8>, CheckpointError> {
         let plaintext = self.inner.serialize(value)?;
@@ -721,6 +736,11 @@ JsonPlusSerializer 是增强的 JSON 序列化器，提供以下扩展功能：
 /// - bytes → base64 编码字符串
 /// - Enum → 字符串表示（而非整数索引）
 pub struct JsonPlusSerializer;
+
+// > **实现备注 (D-04-4)**: 实际实现中 `JsonPlusSerializer` 仅提供 pretty-printing 功能
+// > （`serde_json::to_vec_pretty`），并未实现上述增强类型扩展（datetime/UUID/bytes）。
+// > 这些类型扩展在 Rust 中通过 serde 的原生类型系统已获得充分支持（如 `chrono::DateTime` 的
+// > serde 实现、`uuid::Uuid` 的字符串序列化等），无需在序列化器层面额外处理。
 
 impl CheckpointSerializer for JsonPlusSerializer {
     fn serialize(&self, value: &impl Serialize) -> Result<Vec<u8>, CheckpointError> {

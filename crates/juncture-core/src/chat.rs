@@ -13,7 +13,6 @@ use crate::state::{Content, Message, Role};
 
 /// Anthropic Claude implementation
 #[derive(Clone, Debug)]
-#[expect(dead_code, reason = "Fields reserved for future API implementation")]
 pub struct ChatAnthropic {
     /// Model name
     model: String,
@@ -52,10 +51,18 @@ impl ChatAnthropic {
     /// Create from environment variables
     ///
     /// Reads `ANTHROPIC_API_KEY` from environment.
+    /// Create from environment variables
+    ///
+    /// Reads `ANTHROPIC_API_KEY` from environment.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `ANTHROPIC_API_KEY` environment variable is not set.
     #[must_use]
     pub fn from_env() -> Self {
-        Self::new("claude-sonnet-4-20250514")
-            .with_api_key(std::env::var("ANTHROPIC_API_KEY").unwrap_or_default())
+        Self::new("claude-sonnet-4-20250514").with_api_key(
+            std::env::var("ANTHROPIC_API_KEY").expect("ANTHROPIC_API_KEY must be set"),
+        )
     }
 
     /// Set API key
@@ -105,21 +112,187 @@ impl ChatAnthropic {
 
 #[async_trait]
 impl ChatModel for ChatAnthropic {
+    #[allow(
+        clippy::too_many_lines,
+        reason = "Complex HTTP request/response handling for Anthropic API"
+    )]
     async fn invoke(
         &self,
-        _messages: &[Message],
-        _options: Option<&CallOptions>,
+        messages: &[Message],
+        options: Option<&CallOptions>,
     ) -> Result<Message, LlmError> {
-        // Basic implementation returning an empty AI message.
-        // Full implementation would make HTTP request to Anthropic Messages API.
+        let opts = options.unwrap_or(&self.default_options);
+
+        // Build request body for Anthropic Messages API
+        let mut body = serde_json::json!({
+            "model": self.model,
+            "max_tokens": self.max_tokens,
+            "messages": messages.iter().map(|m| {
+                serde_json::json!({
+                    "role": match m.role {
+                        Role::System | Role::Human | Role::Tool => "user",
+                        Role::Ai => "assistant",
+                    },
+                    "content": match &m.content {
+                        Content::Text(t) => serde_json::Value::Array(vec![
+                            serde_json::json!({"type": "text", "text": t})
+                        ]),
+                        Content::MultiPart(parts) => serde_json::Value::Array(
+                            parts.iter().map(|p| match p {
+                                crate::state::ContentPart::Text { text } => serde_json::json!({
+                                    "type": "text",
+                                    "text": text
+                                }),
+                                _ => serde_json::json!({"type": "text", "text": ""}),
+                            }).collect()
+                        ),
+                    },
+                })
+            }).collect::<Vec<_>>(),
+        });
+
+        // Add optional parameters
+        if let Some(temp) = opts.temperature {
+            body["temperature"] = serde_json::Value::from(temp);
+        }
+        if let Some(top_p) = opts.top_p {
+            body["top_p"] = serde_json::Value::from(top_p);
+        }
+        if let Some(ref stop) = opts.stop_sequences {
+            body["stop_sequences"] = serde_json::json!(stop);
+        }
+        if let Some(max_tokens) = opts.max_tokens {
+            body["max_tokens"] = serde_json::Value::from(max_tokens);
+        }
+
+        // Add tools if bound
+        if !self.tools.is_empty() {
+            body["tools"] = serde_json::json!(
+                self.tools
+                    .iter()
+                    .map(|t| serde_json::json!({
+                        "name": t.name,
+                        "description": t.description,
+                        "input_schema": t.parameters,
+                    }))
+                    .collect::<Vec<_>>()
+            );
+        }
+
+        let url = format!("{}/v1/messages", self.base_url);
+
+        let response = self
+            .http_client
+            .post(&url)
+            .header("x-api-key", &self.api_key)
+            .header("anthropic-version", "2023-06-01")
+            .header("Content-Type", "application/json")
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| {
+                if e.is_connect() || e.is_timeout() {
+                    LlmError::NetworkError(e.to_string())
+                } else if e.is_status() {
+                    match e.status() {
+                        Some(reqwest::StatusCode::UNAUTHORIZED) => {
+                            LlmError::AuthError("Invalid API key".to_string())
+                        }
+                        Some(reqwest::StatusCode::TOO_MANY_REQUESTS) => {
+                            LlmError::RateLimited { retry_after: None }
+                        }
+                        _ => LlmError::NetworkError(e.to_string()),
+                    }
+                } else {
+                    LlmError::NetworkError(e.to_string())
+                }
+            })?;
+
+        let status = response.status();
+        let resp_text = response
+            .text()
+            .await
+            .map_err(|e| LlmError::NetworkError(e.to_string()))?;
+
+        if status == reqwest::StatusCode::UNAUTHORIZED {
+            return Err(LlmError::AuthError("Invalid API key".to_string()));
+        }
+        if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            return Err(LlmError::RateLimited { retry_after: None });
+        }
+        if status == reqwest::StatusCode::BAD_REQUEST {
+            if resp_text.contains("context_length_exceeded")
+                || resp_text.contains("maximum context length")
+            {
+                return Err(LlmError::ContextLengthExceeded { used: 0, limit: 0 });
+            }
+            return Err(LlmError::InvalidResponse(resp_text));
+        }
+        if !status.is_success() {
+            return Err(LlmError::InvalidResponse(format!(
+                "HTTP {status}: {resp_text}"
+            )));
+        }
+
+        let resp_json: serde_json::Value = serde_json::from_str(&resp_text)
+            .map_err(|e| LlmError::InvalidResponse(format!("Invalid JSON: {e}")))?;
+
+        // Parse Anthropic response
+        let content_array = resp_json
+            .get("content")
+            .and_then(|c| c.as_array())
+            .ok_or_else(|| LlmError::InvalidResponse("No content in response".to_string()))?;
+
+        let mut text_content = String::new();
+        let mut tool_calls = Vec::new();
+
+        for content_block in content_array {
+            if let Some(block_type) = content_block.get("type").and_then(|t| t.as_str()) {
+                match block_type {
+                    "text" => {
+                        if let Some(text) = content_block.get("text").and_then(|t| t.as_str()) {
+                            text_content.push_str(text);
+                        }
+                    }
+                    "tool_use" => {
+                        let id = content_block
+                            .get("id")
+                            .and_then(|i| i.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let name = content_block
+                            .get("name")
+                            .and_then(|n| n.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let args = content_block
+                            .get("input")
+                            .cloned()
+                            .unwrap_or(serde_json::Value::Null);
+                        tool_calls.push(crate::state::ToolCall { id, name, args });
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        let usage = resp_json.get("usage").and_then(|u| {
+            Some(crate::state::TokenUsage {
+                input_tokens: u.get("input_tokens")?.as_u64()?,
+                output_tokens: u.get("output_tokens")?.as_u64()?,
+                total_tokens: u.get("input_tokens")?.as_u64()?
+                    + u.get("output_tokens")?.as_u64()?,
+            })
+        });
+
         Ok(Message {
             id: uuid::Uuid::new_v4().to_string(),
             role: Role::Ai,
-            content: Content::Text(String::new()),
-            tool_calls: vec![],
+            content: Content::Text(text_content),
+            tool_calls,
             tool_call_id: None,
             name: None,
-            usage: None,
+            usage,
         })
     }
 
@@ -128,9 +301,11 @@ impl ChatModel for ChatAnthropic {
         _messages: &[Message],
         _options: Option<&CallOptions>,
     ) -> Result<crate::llm::BoxStream<'_, Result<MessageChunk, LlmError>>, LlmError> {
-        // Basic implementation returning an empty stream.
-        // Full implementation would use SSE to stream from Anthropic API.
-        Ok(Box::pin(stream::empty()))
+        // SSE streaming requires Server-Sent Events parsing
+        // This is deferred to future implementation
+        Err(LlmError::InvalidResponse(
+            "Streaming not yet implemented for ChatAnthropic".to_string(),
+        ))
     }
 
     fn bind_tools(&self, tools: Vec<ToolDefinition>) -> Self {
@@ -501,21 +676,133 @@ impl ChatOllama {
 
 #[async_trait]
 impl ChatModel for ChatOllama {
+    #[allow(
+        clippy::too_many_lines,
+        reason = "Complex HTTP request/response handling for Ollama API"
+    )]
     async fn invoke(
         &self,
-        _messages: &[Message],
-        _options: Option<&CallOptions>,
+        messages: &[Message],
+        options: Option<&CallOptions>,
     ) -> Result<Message, LlmError> {
-        // Basic implementation returning an empty AI message.
-        // Full implementation would make HTTP request to Ollama API.
+        let opts = options.unwrap_or(&self.default_options);
+
+        // Build request body for Ollama API
+        let mut body = serde_json::json!({
+            "model": self.model,
+            "messages": messages.iter().map(|m| {
+                serde_json::json!({
+                    "role": match m.role {
+                        Role::System => "system",
+                        Role::Human => "user",
+                        Role::Ai => "assistant",
+                        Role::Tool => "tool",
+                    },
+                    "content": match &m.content {
+                        Content::Text(t) => t.clone(),
+                        Content::MultiPart(parts) => {
+                            parts.iter()
+                                .filter_map(|p| match p {
+                                    crate::state::ContentPart::Text { text } => Some(text.clone()),
+                                    _ => None,
+                                })
+                                .collect::<Vec<_>>()
+                                .join(" ")
+                        }
+                    },
+                })
+            }).collect::<Vec<_>>(),
+            "stream": false,
+        });
+
+        // Add optional parameters
+        if let Some(temp) = opts.temperature {
+            body["options"] = serde_json::json!({"temperature": temp});
+        }
+        if let Some(top_p) = opts.top_p {
+            if body.get("options").is_none() {
+                body["options"] = serde_json::json!({});
+            }
+            body["options"]["top_p"] = serde_json::json!(top_p);
+        }
+        if let Some(ref stop) = opts.stop_sequences {
+            body["stop"] = serde_json::json!(stop);
+        }
+        if let Some(max_tokens) = opts.max_tokens {
+            if body.get("options").is_none() {
+                body["options"] = serde_json::json!({});
+            }
+            body["options"]["num_predict"] = serde_json::json!(max_tokens);
+        }
+
+        let url = format!("{}/api/chat", self.base_url);
+
+        let response = self
+            .http_client
+            .post(&url)
+            .header("Content-Type", "application/json")
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| {
+                if e.is_connect() || e.is_timeout() {
+                    LlmError::NetworkError(format!(
+                        "Failed to connect to Ollama at {}: {}. Is Ollama running?",
+                        self.base_url, e
+                    ))
+                } else {
+                    LlmError::NetworkError(e.to_string())
+                }
+            })?;
+
+        let status = response.status();
+        let resp_text = response
+            .text()
+            .await
+            .map_err(|e| LlmError::NetworkError(e.to_string()))?;
+
+        if !status.is_success() {
+            if resp_text.contains("model") && resp_text.contains("not found") {
+                return Err(LlmError::InvalidResponse(format!(
+                    "Model '{}' not found in Ollama. Run: ollama pull {}",
+                    self.model, self.model
+                )));
+            }
+            return Err(LlmError::InvalidResponse(format!(
+                "HTTP {status}: {resp_text}"
+            )));
+        }
+
+        let resp_json: serde_json::Value = serde_json::from_str(&resp_text)
+            .map_err(|e| LlmError::InvalidResponse(format!("Invalid JSON: {e}")))?;
+
+        // Parse Ollama response
+        let message = resp_json
+            .get("message")
+            .ok_or_else(|| LlmError::InvalidResponse("No message in response".to_string()))?;
+
+        let content = message
+            .get("content")
+            .and_then(|c| c.as_str())
+            .unwrap_or("")
+            .to_string();
+
+        let usage = resp_json.get("prompt_eval_count").and_then(|p| {
+            Some(crate::state::TokenUsage {
+                input_tokens: p.as_u64()?,
+                output_tokens: resp_json.get("eval_count")?.as_u64()?,
+                total_tokens: p.as_u64()? + resp_json.get("eval_count")?.as_u64()?,
+            })
+        });
+
         Ok(Message {
             id: uuid::Uuid::new_v4().to_string(),
             role: Role::Ai,
-            content: Content::Text(String::new()),
+            content: Content::Text(content),
             tool_calls: vec![],
             tool_call_id: None,
             name: None,
-            usage: None,
+            usage,
         })
     }
 
@@ -524,9 +811,11 @@ impl ChatModel for ChatOllama {
         _messages: &[Message],
         _options: Option<&CallOptions>,
     ) -> Result<crate::llm::BoxStream<'_, Result<MessageChunk, LlmError>>, LlmError> {
-        // Basic implementation returning an empty stream.
-        // Full implementation would stream from Ollama API.
-        Ok(Box::pin(stream::empty()))
+        // Ollama streaming requires SSE parsing
+        // This is deferred to future implementation
+        Err(LlmError::InvalidResponse(
+            "Streaming not yet implemented for ChatOllama".to_string(),
+        ))
     }
 
     fn bind_tools(&self, tools: Vec<ToolDefinition>) -> Self {
@@ -554,3 +843,4 @@ impl ChatModel for ChatOllama {
 }
 
 // Rust guideline compliant 2026-05-19
+// Rust guideline compliant 2026-05-20

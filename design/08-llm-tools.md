@@ -561,6 +561,11 @@ pub enum ToolError {
     #[error("timeout")]
     Timeout,
 }
+
+// > **实现备注 (D-08-4)**: 实际实现中 `ToolError` 额外包含两个变体：
+// > `ToolNotFound { name: String }` ——当 AI 返回的 tool_call.name 不在已注册工具列表中时返回；
+// > `ValidationError { errors: Vec<String> }` ——当工具输入不符合 JSON Schema 验证时返回。
+// > 这些变体使调用方能够区分"工具不存在"和"工具执行失败"等不同错误场景。
 ```
 
 ### 4.2 ToolNode
@@ -1035,6 +1040,11 @@ pub enum LlmError {
     #[error("timeout after {0:?}")]
     Timeout(Duration),
 }
+```
+
+// > **实现备注 (D-08-7)**: 实际实现中 `LlmError` 额外包含 `Other(#[source] Box<dyn std::error::Error + Send + Sync>)`
+// > 捕获所有变体。这为 Provider 实现提供了兜底机制，允许返回未预见的错误类型而不需要
+// > 扩展 enum 本身。该变体使用 `#[source]` 属性保留错误链追踪能力。
 ```
 
 **重试策略**：`RateLimited` 错误携带 `retry_after` 信息。上层可实现自动重试（指数退避 + jitter）。Juncture 不在 ChatModel trait 层面强制重试，而是提供 `RetryingModel<M>` 包装器：

@@ -8,12 +8,14 @@ use crate::{
     edge::TriggerTable,
     pregel::{
         budget::BudgetTracker,
+        context::ExecutionContext,
         runner::execute_superstep,
         scheduler::{FieldVersionTracker, VersionsSeen, compute_next_tasks},
         types::{LoopStatus, PendingTask, SuperstepResult},
     },
 };
 use indexmap::IndexMap;
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::mpsc;
@@ -521,6 +523,74 @@ impl<S: State> PregelLoop<S> {
     pub const fn run_control(&self) -> &RunControl {
         &self.run_control
     }
+
+    /// Get a view of the current execution context
+    ///
+    /// Returns an `ExecutionContext` value that provides typed access
+    /// to the mutable execution state (state, `field_versions`, `versions_seen`).
+    /// This provides the design-intended separation between mutable context
+    /// and immutable configuration.
+    ///
+    /// Note: Returns a cloned context, not a reference, since `ExecutionContext`
+    /// is designed to own its data.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// use juncture_core::pregel::loop_::PregelLoop;
+    ///
+    /// let loop = PregelLoop::new(...)?;
+    /// let context = loop.as_context();
+    /// let versions = context.field_versions.versions();
+    /// ```
+    #[must_use]
+    #[allow(
+        clippy::clone_on_copy,
+        reason = "ExecutionContext requires owned state, not reference"
+    )]
+    pub fn as_context(&self) -> ExecutionContext<S>
+    where
+        S: Clone,
+    {
+        ExecutionContext {
+            state: self.state.clone(),
+            field_versions: self.field_versions.clone(),
+            versions_seen: self.versions_seen.clone(),
+            pending_writes: vec![],
+        }
+    }
+
+    /// Get a view of the current execution config
+    ///
+    /// Returns an `ExecutionConfig` value that provides typed access
+    /// to the immutable execution configuration (`recursion_limit`, interrupts, etc.).
+    /// This provides the design-intended separation between mutable context
+    /// and immutable configuration.
+    ///
+    /// Note: Returns a cloned config, not a reference, since `ExecutionConfig`
+    /// is designed to own its data.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// use juncture_core::pregel::loop_::PregelLoop;
+    ///
+    /// let loop = PregelLoop::new(...)?;
+    /// let config = loop.as_config();
+    /// let limit = config.recursion_limit;
+    /// ```
+    #[must_use]
+    pub fn as_config(&self) -> crate::pregel::context::ExecutionConfig {
+        crate::pregel::context::ExecutionConfig {
+            recursion_limit: self.runnable_config.recursion_limit,
+            interrupt_before: HashSet::new(),
+            interrupt_after: HashSet::new(),
+            budget: self.runnable_config.budget.clone(),
+            durability: self.runnable_config.durability.clone().unwrap_or_default(),
+            retry_policies: std::collections::HashMap::new(),
+            timeout_policies: std::collections::HashMap::new(),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -607,4 +677,5 @@ mod tests {
     struct TestUpdate;
 }
 
+// Rust guideline compliant 2026-05-20
 // Rust guideline compliant 2026-05-20

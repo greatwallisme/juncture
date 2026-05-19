@@ -236,6 +236,11 @@ pub struct PregelLoop<S: State> {
     pub status: LoopStatus,
 }
 
+// > **实现备注 (D-03-1)**: 实际实现中 PregelLoop 不使用独立的 `ExecutionContext<S>` 和 `ExecutionConfig` 结构体。
+// > 而是将所有字段平铺在 PregelLoop 中，通过 `as_context()` 和 `as_config()` 访问器方法
+// > 提供等同于上述两结构体的视图。这种扁平化设计减少了间接访问开销，
+// > 同时通过访问器方法保持逻辑分组。
+
 /// 待执行任务
 pub struct PendingTask<S: State> {
     /// 任务 ID（UUID）
@@ -276,6 +281,10 @@ pub enum LoopStatus {
     Drained,
 }
 
+// > **实现备注 (D-03-3)**: 实际实现中 `InterruptBefore` 和 `InterruptAfter` 变体携带 `Vec<InterruptSignal>` 数据
+// > 而非作为单元变体（unit variants）。这提供了更丰富的中断信息，
+// > 允许调用方了解具体哪些中断信号被触发，而不仅仅是知道发生了中断。
+
 /// Superstep 执行结果
 pub struct SuperstepResult<S: State> {
     /// 每个节点的输出（按完成顺序）
@@ -289,6 +298,10 @@ pub struct TaskOutput<S: State> {
     pub command: Command<S>,
     pub duration: Duration,
 }
+
+// > **实现备注 (D-03-4)**: 实际实现中 `TaskOutput` 额外包含 `trigger: TaskTrigger` 字段。
+// > 该字段记录任务是 PULL（边触发）还是 PUSH（Send API 触发，含 send index），
+// > 用于 merge 阶段的确定性排序：PULL tasks 按节点名字母序，PUSH tasks 按 send index 排序。
 ```
 
 
@@ -1156,6 +1169,10 @@ pub struct BudgetTracker {
     config: BudgetConfig,
 }
 
+// > **实现备注 (D-03-5)**: 实际实现中 `BudgetTracker` 使用 `AtomicU64` 配合微秒级 USD 缩放
+// > （`cost_micros: AtomicU64`）替代 `AtomicF64`。这避免了引入 `atomic_float` 外部依赖。
+// > 费用值在内部以 micros-USD 精度存储和计算，仅在对外报告时转换为 `f64`。
+
 #[derive(Clone, Debug)]
 pub struct BudgetUsage {
     pub tokens_used: u64,
@@ -1718,6 +1735,10 @@ pub enum NodeTimeoutError {
     IdleTimeout { node: String, timeout: Duration },
 }
 
+// > **实现备注 (D-03-7)**: 实际实现中 `NodeTimeoutError` 有 4 个变体而非 2 个：
+// > 额外包含 `Timeout { node: String, timeout_ms: u64 }` 和 `DeadlineExceeded { node: String, deadline_ms: u64 }`。
+// > 同时使用 `u64` 毫秒表示而非 `Duration`，简化序列化和原子操作。
+
 /// 超时执行逻辑
 async fn execute_with_timeout<S: State>(
     node: &dyn Node<S>,
@@ -2011,6 +2032,10 @@ impl<T> SyncAsyncFuture<T> {
         matches!(self, SyncAsyncFuture::Ready(_))
     }
 }
+
+// > **实现备注 (D-03-8)**: 实际实现中 `result()` 返回 `Result<T, JunctureError>` 而非直接返回 `T`，
+// > `Ready(None)` 情况返回 `Err(JunctureError:: ...)` 而非 panic。
+// > 这遵循 Rust 的错误处理惯用法，避免不可恢复的 panic。
 
 // 从同步值创建
 impl<T> From<T> for SyncAsyncFuture<T> {
