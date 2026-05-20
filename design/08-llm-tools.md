@@ -32,7 +32,7 @@ pub enum Role {
     System,
     Human,
     #[serde(rename = "assistant")]
-    AI,
+    Ai,  // Rust 惯用法命名；serde rename 确保 JSON 序列化为 "assistant"
     Tool,
 }
 
@@ -429,7 +429,7 @@ impl<S: AgentState> StatefulTool<S> for SearchTool {
 ///
 /// 这是 create_react_agent 中条件边的默认路由函数，
 /// 也可以独立使用于自定义图。
-pub fn tools_condition<S: State>(
+pub fn tools_condition<S: State + serde::Serialize>(
     state: &S,
     messages_field: &str,  // 默认 "messages"
 ) -> &'static str {
@@ -909,6 +909,10 @@ pub fn create_react_agent_with_config<M: ChatModel>(
 - `system_message`：自动在每次 LLM 调用前注入 system message
 - `max_iterations`：限制 agent-tools 循环次数（通过 recursion_limit 实现）
 - `interrupt_before_tools`：工具执行前触发 HITL interrupt，人工审批工具调用
+
+> **Implementation Note (C-08-3)**: `juncture` facade crate 的 `ReactAgentConfig` 包含 `system_message` 字段（与设计一致），
+> 但 `juncture-core` 的 `ReactAgentConfig<S, M>` 使用 `prompt: Option<PromptSource<S>>` 替代 `system_message`，
+> 提供更灵活的 prompt 来源（静态字符串或动态函数）。两个 crate 的配置结构体字段名存在差异。
 
 ---
 

@@ -732,6 +732,9 @@ pub struct Command<S: State> {
 /// 注意：Goto 不再是泛型类型。Send 目标使用动态序列化状态。
 /// 这简化了类型签名和 proc-macro 生成代码。
 pub enum Goto {
+    /// 不显式路由，使用图的外部边定义
+    /// 实现添加：比 Option<Goto> 更清晰地表达"使用默认边"语义
+    None,
     /// 路由到单个节点
     Next(String),
     /// 路由到多个节点（并行）
@@ -1093,6 +1096,9 @@ pub struct StateUpdate<S: State> {
 pub struct StateFilter {
     /// 只返回指定 source 的 checkpoint
     pub source: Option<CheckpointSource>,
+    /// 实现添加：基于 step 的过滤（比 source 更直观）
+    pub after_step: Option<usize>,
+    pub before_step: Option<usize>,
     /// 最大返回数量
     pub limit: Option<usize>,
 }
@@ -1383,6 +1389,9 @@ pub struct RunnableConfig {
     /// <!-- Addresses finding: M-2 -->
     /// Checkpoint 命名空间（子图隔离）。
     pub checkpoint_ns: Option<String>,
+    /// 实现添加：HITL 中断控制（指定节点执行前/后触发中断）
+    pub interrupt_before: Option<Vec<String>>,
+    pub interrupt_after: Option<Vec<String>>,
 }
 
 /// <!-- Addresses finding: H-4 -->

@@ -790,6 +790,8 @@ impl<S: State + Serialize + DeserializeOwned> SubgraphTransformer<S> {
             subgraph_name,
             ns,
             filter: None,
+            /// > **Implementation Note (C-07-2)**: Implementation additionally provides
+            /// > `with_filter_types()` for type-based filtering alongside closure-based `with_filter()`.
             include_internal: false,
         }
     }

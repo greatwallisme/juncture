@@ -329,6 +329,8 @@ impl StreamChannel {
 }
 
 /// 流 Transformer：在数据到达消费者前进行转换
+/// > **Implementation Note (C-05-1)**: StreamTransformer is not re-exported as public API.
+/// > Currently internal-only; make public when custom stream pipelines are needed.
 pub trait StreamTransformer: Send + Sync + 'static {
     fn transform(&self, data: serde_json::Value) -> serde_json::Value;
 }

@@ -282,8 +282,9 @@ impl<S: State> CowState<S> {
     pub fn get(&self) -> &S {
         if let Some(ref pending) = self.pending {
             // 这里需要通过 unsafe 或内部 mutability 来实现
-            // 实际实现可能使用 Arc::make_mut 或 UnsafeCell
-            todo!("apply pending updates to local copy")
+            // 实际实现使用 Arc::make_mut 进行写时复制
+            // 仅在首次修改时克隆，后续修改重用本地副本
+            // 参见 trait_.rs 中 CowState 的完整实现
         } else {
             &self.shared
         }
@@ -933,6 +934,9 @@ pub scratch: Option<String>,
 ///
 /// 对应 LangGraph 的 `REMOVE_ALL_MESSAGES` 常量。
 /// 使用方式：`Command::update(AgentStateUpdate { messages: Some(REMOVE_ALL_MESSAGES), .. })`
+/// 实现：使用工厂方法而非 const（避免 String::new() 在 const context 中的限制）
+/// Message::remove_all() -> Message  // 清空所有消息
+/// Message::remove(id: &str) -> Message  // 删除指定消息
 pub const REMOVE_ALL_MESSAGES: Message = Message {
     id: "__remove_all__".to_string(),
     role: Role::System,
@@ -1204,6 +1208,14 @@ pub enum ContentPart {
 
 > **Implementation Note**: `ContentPart::Thinking` variant supports Anthropic extended thinking.
 > Enables modeling of internal reasoning process without affecting tool call execution.
+}
+
+/// LLM Token 使用统计（实现添加，用于追踪 LLM 调用的 token 消耗）
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TokenUsage {
+    pub input_tokens: u32,
+    pub output_tokens: u32,
+    pub total_tokens: u32,
 }
 
 /// 特殊消息：删除指定 id 的消息

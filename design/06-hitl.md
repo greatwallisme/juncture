@@ -186,6 +186,10 @@ Pregel 引擎捕获 Interrupted
   └─ 向 stream 发送 StreamEvent::Interrupt { node, payloads, resumable: true }
 ```
 
+> **Implementation Note (C-06-3)**: 当前 `StreamEvent::Interrupt` 的 `ns`（namespace）字段始终发送空 `Vec`。
+> 子图中断事件因此无法正确携带命名空间信息，影响子图隔离场景下的中断事件路由。
+> 未来需要在发送时传入实际的子图命名空间栈。
+
 #### Resume 流程
 
 ```
@@ -567,6 +571,9 @@ async fn router_node(state: AgentState) -> Result<NodeOutput<AgentState>> {
 }
 ```
 
+> **Implementation Note (C-06-1)**: 实际实现使用 `Goto` 枚举（而非设计中的 `CommandGoto`），变体命名为 `Next`、`Multiple`、`End`（对应设计中的 `One`、`Many`、`Parent`）。功能等价，命名遵循 Rust 惯用法。
+> `Command::goto()` 方法用于构造 goto 路由。
+
 ---
 
 ## 6. 设计约束与最佳实践
@@ -600,6 +607,10 @@ let config = RunnableConfig {
     ..Default::default()
 };
 ```
+
+> **Implementation Note (C-06-2)**: `HIDDEN_TAG` 常量已定义于 `interrupt/mod.rs:81`，但过滤逻辑尚未实现。
+> 当前 interrupt_before/interrupt_after 检查和 StreamMode 输出中未使用该标签进行过滤。
+> 该功能计划在未来版本中实现。
 
 ### 幂等性要求
 

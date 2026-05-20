@@ -625,6 +625,11 @@ pub trait CheckpointSerializer: Send + Sync + 'static {
     fn serialize(&self, value: &impl Serialize) -> Result<Vec<u8>, CheckpointError>;
     fn deserialize<T: DeserializeOwned>(&self, data: &[u8]) -> Result<T, CheckpointError>;
     fn format(&self) -> SerializationFormat;
+
+    /// 无类型序列化路径，用于已是 `serde_json::Value` 的数据，避免不必要的泛型开销
+    fn serialize_value(&self, value: &serde_json::Value) -> Result<Vec<u8>, CheckpointError>;
+    /// 无类型反序列化路径
+    fn deserialize_value(&self, data: &[u8]) -> Result<serde_json::Value, CheckpointError>;
 }
 
 // > **实现备注 (D-04-2)**: 实际实现中 `CheckpointSerializer` trait 还包含两个额外方法：
@@ -694,13 +699,13 @@ Checkpoint 中存储 `schema_version`。加载时：
 ```rust
 /// AES-256-GCM 加密序列化器
 /// 在标准序列化后增加加密层
-pub struct EncryptedSerializer {
-    inner: Box<dyn CheckpointSerializer>,
+pub struct EncryptedSerializer<S: CheckpointSerializer> {
+    inner: S,  // 泛型参数，允许编译器单态化优化，消除虚表分发开销
     cipher: Aes256Gcm,
 }
 
-impl EncryptedSerializer {
-    pub fn new(inner: Box<dyn CheckpointSerializer>, key: &[u8; 32]) -> Self {
+impl<S: CheckpointSerializer> EncryptedSerializer<S> {
+    pub fn new(inner: S, key: &[u8; 32]) -> Self {
         let cipher = Aes256Gcm::new(key.into());
         Self { inner, cipher }
     }
@@ -756,6 +761,7 @@ pub struct JsonPlusSerializer;
 // > （`serde_json::to_vec_pretty`），并未实现上述增强类型扩展（datetime/UUID/bytes）。
 // > 这些类型扩展在 Rust 中通过 serde 的原生类型系统已获得充分支持（如 `chrono::DateTime` 的
 // > serde 实现、`uuid::Uuid` 的字符串序列化等），无需在序列化器层面额外处理。
+// > 因此 JsonPlusSerializer 等价于带 pretty-print 的 JsonSerializer。
 
 impl CheckpointSerializer for JsonPlusSerializer {
     fn serialize(&self, value: &impl Serialize) -> Result<Vec<u8>, CheckpointError> {

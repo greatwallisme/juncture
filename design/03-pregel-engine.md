@@ -269,10 +269,10 @@ pub enum LoopStatus {
     Done,
     /// 超出步数限制
     OutOfSteps,
-    /// interrupt_before 触发
-    InterruptBefore,
-    /// interrupt_after 触发
-    InterruptAfter,
+    /// interrupt_before 触发（携带具体中断信号）
+    InterruptBefore(Vec<InterruptSignal>),
+    /// interrupt_after 触发（携带具体中断信号）
+    InterruptAfter(Vec<InterruptSignal>),
     /// 预算超限
     BudgetExceeded,
     /// 被取消
@@ -297,6 +297,7 @@ pub struct TaskOutput<S: State> {
     pub node_name: String,
     pub command: Command<S>,
     pub duration: Duration,
+    pub trigger: TaskTrigger,  // PULL/PUSH 来源，用于 merge 阶段确定性排序
 }
 
 // > **实现备注 (D-03-4)**: 实际实现中 `TaskOutput` 额外包含 `trigger: TaskTrigger` 字段。
@@ -1163,7 +1164,7 @@ pub enum BudgetExceededAction {
 /// 预算使用量追踪器
 pub struct BudgetTracker {
     pub tokens_used: AtomicU64,
-    pub cost_usd: AtomicF64,  // 使用 atomic_float crate
+    pub cost_usd_micros: AtomicU64,  // micros-USD 精度，避免 atomic_float 依赖
     pub start_time: Instant,
     pub steps_completed: AtomicUsize,
     config: BudgetConfig,
@@ -1728,11 +1729,17 @@ impl Default for TimeoutPolicy {
 /// 节点超时错误
 #[derive(Debug, thiserror::Error)]
 pub enum NodeTimeoutError {
-    #[error("节点 '{node}' 执行超时（{timeout:?}）")]
-    RunTimeout { node: String, timeout: Duration },
+    #[error("节点 '{node}' 总超时（{timeout_ms}ms）")]
+    Timeout { node: String, timeout_ms: u64 },
 
-    #[error("节点 '{node}' 空闲超时（{timeout:?}）")]
-    IdleTimeout { node: String, timeout: Duration },
+    #[error("节点 '{node}' 执行超时（{timeout_ms}ms）")]
+    RunTimeout { node: String, timeout_ms: u64 },
+
+    #[error("节点 '{node}' 空闲超时（{timeout_ms}ms）")]
+    IdleTimeout { node: String, timeout_ms: u64 },
+
+    #[error("节点 '{node}' 截止时间已过（{deadline_ms}ms）")]
+    DeadlineExceeded { node: String, deadline_ms: u64 },
 }
 
 // > **实现备注 (D-03-7)**: 实际实现中 `NodeTimeoutError` 有 4 个变体而非 2 个：
@@ -2019,10 +2026,10 @@ pub enum SyncAsyncFuture<T> {
 
 impl<T> SyncAsyncFuture<T> {
     /// 阻塞获取结果（如果还未就绪，则等待）
-    pub async fn result(self) -> T {
+    pub async fn result(self) -> Result<T, JunctureError> {
         match self {
-            SyncAsyncFuture::Ready(Some(value)) => value,
-            SyncAsyncFuture::Ready(None) => panic!("Task result not available"),
+            SyncAsyncFuture::Ready(Some(value)) => Ok(value),
+            SyncAsyncFuture::Ready(None) => Err(JunctureError::Internal("Task result not available".into())),
             SyncAsyncFuture::Future(fut) => fut.await,
         }
     }

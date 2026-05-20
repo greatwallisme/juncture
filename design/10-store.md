@@ -396,6 +396,10 @@ pub enum FilterExpr {
 
 > **Implementation Note**: Complete `FilterExpr::matches()` method with full evaluation engine.
 > Supports dot-notation path access (e.g., "metadata.status") and type-aware JSON comparison logic.
+> **Implementation Note (C-10-1)**: Core implementation uses struct variants `And { expressions }` instead of
+> tuple variants `And(Vec)`. Standalone crate uses tuple variants. Serialization format differs between the two.
+> **Implementation Note (C-10-2)**: Core Store trait omits `Debug` bound (claims impossibility with async traits);
+> standalone crate successfully implements `Debug` for `Store` trait objects.
 **使用示例**：
 
 ```rust
