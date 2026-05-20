@@ -61,6 +61,12 @@ pub struct RunnableConfig {
 
     /// Resume value for HITL interrupt continuation
     pub resume_value: Option<serde_json::Value>,
+
+    /// Nodes that should interrupt before execution (HITL)
+    pub interrupt_before: Option<Vec<String>>,
+
+    /// Nodes that should interrupt after execution (HITL)
+    pub interrupt_after: Option<Vec<String>>,
 }
 
 impl std::fmt::Debug for RunnableConfig {
@@ -89,6 +95,8 @@ impl std::fmt::Debug for RunnableConfig {
                 &self.node_finished_callback.as_ref().map(|_| "<fn>"),
             )
             .field("resume_value", &self.resume_value)
+            .field("interrupt_before", &self.interrupt_before)
+            .field("interrupt_after", &self.interrupt_after)
             .finish()
     }
 }
@@ -178,6 +186,38 @@ impl RunnableConfig {
     #[must_use]
     pub fn with_budget(mut self, budget: BudgetConfig) -> Self {
         self.budget = Some(budget);
+        self
+    }
+
+    /// Set `interrupt_before` nodes (HITL - interrupt before node execution)
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// use juncture_core::config::RunnableConfig;
+    ///
+    /// let config = RunnableConfig::new()
+    ///     .with_interrupt_before(vec!["human_input".to_string()]);
+    /// ```
+    #[must_use]
+    pub fn with_interrupt_before(mut self, nodes: Vec<String>) -> Self {
+        self.interrupt_before = Some(nodes);
+        self
+    }
+
+    /// Set `interrupt_after` nodes (HITL - interrupt after node execution)
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// use juncture_core::config::RunnableConfig;
+    ///
+    /// let config = RunnableConfig::new()
+    ///     .with_interrupt_after(vec!["confirmation".to_string()]);
+    /// ```
+    #[must_use]
+    pub fn with_interrupt_after(mut self, nodes: Vec<String>) -> Self {
+        self.interrupt_after = Some(nodes);
         self
     }
 }

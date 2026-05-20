@@ -17,6 +17,15 @@ pub trait State: Clone + Send + Sync + std::fmt::Debug + 'static {
     /// Reset ephemeral fields (called after each superstep)
     fn reset_ephemeral(&mut self);
 
+    /// Finish a specific field (called when graph execution completes)
+    ///
+    /// This allows channels to finalize their state. For example,
+    /// `LastValueAfterFinishChannel` only makes its value available after
+    /// `finish()` is called.
+    ///
+    /// Default implementation is a no-op for channels that don't need finish semantics.
+    fn finish_field(&mut self, _field_idx: usize) {}
+
     /// Get current field versions (owned copy).
     ///
     /// Versions are managed by `PregelLoop` via its own `FieldVersionTracker`.

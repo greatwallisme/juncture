@@ -6,9 +6,11 @@
 use crate::{
     JunctureError, Node, State,
     config::RunnableConfig,
+    interrupt::InterruptContext,
     pregel::types::{PendingTask, SuperstepResult, TaskOutput},
 };
 use std::{sync::Arc, time::Instant};
+use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
@@ -25,10 +27,13 @@ use tokio_util::sync::CancellationToken;
 /// * `nodes` - Graph nodes
 /// * `config` - Execution configuration
 /// * `cancellation_token` - Token for cooperative cancellation
+/// * `checkpointer` - Optional checkpointer for immediate write persistence
 ///
 /// # Returns
 ///
-/// A `SuperstepResult` containing outputs from all completed tasks.
+/// A tuple containing:
+/// - A `SuperstepResult` with outputs from all completed tasks
+/// - The interrupt signal receiver channel (for draining interrupt signals)
 ///
 /// # Errors
 ///
@@ -53,7 +58,14 @@ use tokio_util::sync::CancellationToken;
 /// # let nodes = IndexMap::new();
 /// # let config = RunnableConfig::new();
 /// # let token = CancellationToken::new();
-/// let result = execute_superstep(&pending_tasks, &state, &nodes, &config, &token).await?;
+/// let (result, _interrupt_rx) = execute_superstep(
+///     &pending_tasks,
+///     &state,
+///     &nodes,
+///     &config,
+///     &token,
+///     None::<Arc<dyn CheckpointSaver>>
+/// ).await?;
 /// ```
 pub async fn execute_superstep<S: State>(
     pending_tasks: &[PendingTask<S>],
@@ -61,10 +73,30 @@ pub async fn execute_superstep<S: State>(
     nodes: &indexmap::IndexMap<String, Arc<dyn Node<S>>>,
     config: &RunnableConfig,
     cancellation_token: &CancellationToken,
-) -> Result<SuperstepResult<S>, JunctureError> {
+    checkpointer: Option<&Arc<dyn crate::checkpoint::CheckpointSaver>>,
+) -> Result<
+    (
+        SuperstepResult<S>,
+        mpsc::UnboundedReceiver<crate::interrupt::InterruptSignal>,
+    ),
+    JunctureError,
+> {
     if pending_tasks.is_empty() {
-        return Ok(SuperstepResult::empty());
+        // Return empty result and a dummy channel
+        let (_interrupt_tx, interrupt_rx) = mpsc::unbounded_channel();
+        return Ok((SuperstepResult::empty(), interrupt_rx));
     }
+
+    // Create interrupt context for HITL support
+    // Extract resume values from config if available
+    let resume_values = config
+        .resume_value
+        .as_ref()
+        .map(|v| vec![Some(v.clone())])
+        .unwrap_or_default();
+
+    let (interrupt_tx, interrupt_rx) = mpsc::unbounded_channel();
+    let interrupt_context = Arc::new(InterruptContext::new(resume_values, interrupt_tx));
 
     let semaphore = Arc::new(tokio::sync::Semaphore::new(config.max_parallel_tasks));
     let mut join_set = JoinSet::new();
@@ -83,6 +115,7 @@ pub async fn execute_superstep<S: State>(
         let task_trigger = task.trigger.clone();
         let permit = Arc::clone(&semaphore);
         let token = cancellation_token.clone();
+        let ctx = Arc::clone(&interrupt_context);
 
         join_set.spawn(async move {
             // Acquire semaphore permit
@@ -90,13 +123,17 @@ pub async fn execute_superstep<S: State>(
 
             let start = Instant::now();
 
-            // Execute task with cancellation support
+            // Execute task with cancellation support and interrupt context
+            // The INTERRUPT_CONTEXT.scope() makes the context available to
+            // the interrupt!() macro within node execution
             let result = tokio::select! {
                 biased;
                 () = token.cancelled() => {
                     return Err(JunctureError::execution("Task cancelled"));
                 }
-                result = node.call(task_state, &task_config) => result,
+                result = crate::interrupt::INTERRUPT_CONTEXT.scope(ctx, async move {
+                    node.call(task_state, &task_config).await
+                }) => result,
             };
 
             let duration = start.elapsed();
@@ -117,6 +154,14 @@ pub async fn execute_superstep<S: State>(
     while let Some(result) = join_set.join_next().await {
         match result {
             Ok(Ok(output)) => {
+                // Persist writes immediately after each task completes
+                // This ensures crash recovery can resume from the last completed task
+                if let Some(cp) = checkpointer
+                    && output.command.update.is_some()
+                {
+                    let _ = cp.put_writes(config, vec![], &output.task_id).await;
+                }
+
                 task_outputs.push(output);
             }
             Ok(Err(error)) => {
@@ -138,7 +183,7 @@ pub async fn execute_superstep<S: State>(
         }
     }
 
-    Ok(SuperstepResult { task_outputs })
+    Ok((SuperstepResult { task_outputs }, interrupt_rx))
 }
 
 #[cfg(test)]
@@ -153,7 +198,7 @@ mod tests {
         let config = RunnableConfig::new();
         let token = CancellationToken::new();
 
-        let result = execute_superstep(&[], &state, &nodes, &config, &token)
+        let (result, _rx) = execute_superstep(&[], &state, &nodes, &config, &token, None)
             .await
             .unwrap();
         assert!(result.is_empty());
@@ -177,7 +222,7 @@ mod tests {
             "test_node".to_string(),
         )];
 
-        let result = execute_superstep(&tasks, &state, &nodes, &config, &token)
+        let (result, _rx) = execute_superstep(&tasks, &state, &nodes, &config, &token, None)
             .await
             .unwrap();
 
@@ -205,7 +250,7 @@ mod tests {
             .map(|i| PendingTask::pull(uuid::Uuid::new_v4().to_string(), format!("node_{i}")))
             .collect();
 
-        let result = execute_superstep(&tasks, &state, &nodes, &config, &token)
+        let (result, _rx) = execute_superstep(&tasks, &state, &nodes, &config, &token, None)
             .await
             .unwrap();
 
@@ -237,7 +282,7 @@ mod tests {
         // Cancel immediately
         token.cancel();
 
-        let result = execute_superstep(&tasks, &state, &nodes, &config, &token).await;
+        let result = execute_superstep(&tasks, &state, &nodes, &config, &token, None).await;
 
         assert!(result.is_err());
         assert!(result.unwrap_err().is_execution());
@@ -255,7 +300,7 @@ mod tests {
             "nonexistent".to_string(),
         )];
 
-        let result = execute_superstep(&tasks, &state, &nodes, &config, &token).await;
+        let result = execute_superstep(&tasks, &state, &nodes, &config, &token, None).await;
 
         assert!(result.is_err());
         assert!(result.unwrap_err().is_execution());

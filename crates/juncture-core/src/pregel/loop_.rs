@@ -6,6 +6,7 @@
 use crate::{
     JunctureError, Node, State,
     edge::TriggerTable,
+    interrupt::should_interrupt,
     pregel::{
         budget::BudgetTracker,
         context::ExecutionContext,
@@ -15,7 +16,7 @@ use crate::{
     },
 };
 use indexmap::IndexMap;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::mpsc;
@@ -356,6 +357,42 @@ impl<S: State> PregelLoop<S> {
             return Ok(false);
         }
 
+        // Check interrupt_before before executing next superstep
+        if let Some(ref interrupt_before_nodes) = self.runnable_config.interrupt_before {
+            let interrupt_before_set: HashSet<String> =
+                interrupt_before_nodes.iter().cloned().collect();
+
+            // Build channel versions map for should_interrupt
+            let channel_versions: HashMap<String, u64> = self
+                .field_versions
+                .versions()
+                .iter()
+                .enumerate()
+                .map(|(idx, ver)| (format!("field_{idx}"), *ver))
+                .collect();
+
+            // Build versions_seen map for should_interrupt
+            let versions_seen_map: HashMap<String, Vec<u64>> = self
+                .nodes
+                .keys()
+                .map(|node_name| {
+                    let versions = self.versions_seen.get_versions(node_name);
+                    (node_name.clone(), versions.to_vec())
+                })
+                .collect();
+
+            if let Some(signals) = should_interrupt(
+                &self.pending_tasks,
+                &interrupt_before_set,
+                &HashSet::new(), // interrupt_after not checked here
+                &channel_versions,
+                &versions_seen_map,
+            ) {
+                self.status = LoopStatus::InterruptBefore(signals);
+                return Ok(false);
+            }
+        }
+
         Ok(true)
     }
 
@@ -373,14 +410,21 @@ impl<S: State> PregelLoop<S> {
     /// let result = loop.execute_superstep().await?;
     /// ```
     pub async fn execute_superstep(&mut self) -> Result<SuperstepResult<S>, JunctureError> {
-        execute_superstep(
+        let (result, interrupt_rx) = execute_superstep(
             &self.pending_tasks,
             &self.state,
             &self.nodes,
             &self.runnable_config,
             &self.cancellation_token,
+            self.checkpointer.as_ref(),
         )
-        .await
+        .await?;
+
+        // Drop the interrupt receiver to signal completion
+        // Any pending interrupt signals will be discarded
+        drop(interrupt_rx);
+
+        Ok(result)
     }
 
     /// Process results after a superstep
@@ -419,19 +463,6 @@ impl<S: State> PregelLoop<S> {
         // Reset ephemeral fields
         self.state.reset_ephemeral();
 
-        // Persist task outputs to checkpointer (crash recovery)
-        if let Some(ref checkpointer) = self.checkpointer {
-            for task_output in &result.task_outputs {
-                if let Some(ref _update) = task_output.command.update {
-                    // Persist the write so it can be recovered if the process
-                    // crashes before the next checkpoint is fully committed.
-                    let _ = checkpointer
-                        .put_writes(&self.runnable_config, vec![], &task_output.task_id)
-                        .await;
-                }
-            }
-        }
-
         // Emit stream events
         if let Some(ref tx) = self.stream_tx {
             for task_output in &result.task_outputs {
@@ -447,6 +478,49 @@ impl<S: State> PregelLoop<S> {
         // Compute next pending tasks
         self.pending_tasks =
             compute_next_tasks(&result.task_outputs, &self.trigger_table, &self.state).await?;
+
+        // Check interrupt_after after computing next tasks
+        if let Some(ref interrupt_after_nodes) = self.runnable_config.interrupt_after {
+            let interrupt_after_set: HashSet<String> =
+                interrupt_after_nodes.iter().cloned().collect();
+
+            // Build channel versions map for should_interrupt
+            let channel_versions: HashMap<String, u64> = self
+                .field_versions
+                .versions()
+                .iter()
+                .enumerate()
+                .map(|(idx, ver)| (format!("field_{idx}"), *ver))
+                .collect();
+
+            // Build versions_seen map for should_interrupt
+            let versions_seen_map: HashMap<String, Vec<u64>> = self
+                .nodes
+                .keys()
+                .map(|node_name| {
+                    let versions = self.versions_seen.get_versions(node_name);
+                    (node_name.clone(), versions.to_vec())
+                })
+                .collect();
+
+            if let Some(signals) = should_interrupt(
+                &self.pending_tasks,
+                &HashSet::new(), // interrupt_before not checked here
+                &interrupt_after_set,
+                &channel_versions,
+                &versions_seen_map,
+            ) {
+                self.status = LoopStatus::InterruptAfter(signals);
+                return Ok(());
+            }
+        }
+
+        // Call finish() on all channels if no more tasks (execution complete)
+        // This is critical for LastValueAfterFinishChannel which only makes
+        // its value available after finish() is called.
+        if self.pending_tasks.is_empty() {
+            self.finish_all_channels();
+        }
 
         // Increment step
         self.step += 1;
@@ -589,6 +663,32 @@ impl<S: State> PregelLoop<S> {
             durability: self.runnable_config.durability.clone().unwrap_or_default(),
             retry_policies: std::collections::HashMap::new(),
             timeout_policies: std::collections::HashMap::new(),
+        }
+    }
+
+    /// Finish all channels in the state
+    ///
+    /// Called when graph execution completes (no more pending tasks).
+    /// This allows channels like `LastValueAfterFinishChannel` to finalize
+    /// their state and make values available to consumers.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// use juncture_core::pregel::loop_::PregelLoop;
+    ///
+    /// let mut loop = PregelLoop::new(...)?;
+    /// // ... execution ...
+    /// if loop.pending_tasks.is_empty() {
+    ///     loop.finish_all_channels();
+    /// }
+    /// ```
+    fn finish_all_channels(&mut self) {
+        // Finish all fields by index
+        // The number of fields is tracked by field_versions
+        let field_count = self.field_versions.len();
+        for field_idx in 0..field_count {
+            self.state.finish_field(field_idx);
         }
     }
 }

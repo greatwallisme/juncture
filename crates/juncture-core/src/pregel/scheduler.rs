@@ -131,6 +131,27 @@ impl FieldVersionTracker {
         &self.versions
     }
 
+    /// Get the number of fields being tracked
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// use juncture_core::pregel::scheduler::FieldVersionTracker;
+    ///
+    /// let tracker = FieldVersionTracker::new(5);
+    /// assert_eq!(tracker.len(), 5);
+    /// ```
+    #[must_use]
+    pub const fn len(&self) -> usize {
+        self.versions.len()
+    }
+
+    /// Check if no fields are being tracked
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.versions.is_empty()
+    }
+
     /// Get all field versions as a slice (alias for `versions()`)
     ///
     /// # Examples
@@ -264,6 +285,14 @@ impl VersionsSeen {
     #[must_use]
     pub fn get_seen(&self, node_name: &str) -> &[u64] {
         self.seen.get(node_name).map_or(&[], Vec::as_slice)
+    }
+
+    /// Get the versions a node has seen (alias for `get_seen`)
+    ///
+    /// Returns an empty slice if the node is not tracked.
+    #[must_use]
+    pub fn get_versions(&self, node_name: &str) -> &[u64] {
+        self.get_seen(node_name)
     }
 }
 
