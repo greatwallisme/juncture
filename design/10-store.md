@@ -127,6 +127,11 @@ pub struct Item {
     pub updated_at: DateTime<Utc>,
 }
 
+/// 搜索结果项
+
+> **Implementation Note**: `Item::is_expired()` method provides TTL checking helper.
+> Returns true if current time exceeds the optional `expires_at` timestamp, enabling efficient expired item filtering.
+
 /// 搜索结果项（带相似度分数）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SearchItem {
@@ -388,6 +393,9 @@ pub enum FilterExpr {
 }
 ```
 
+
+> **Implementation Note**: Complete `FilterExpr::matches()` method with full evaluation engine.
+> Supports dot-notation path access (e.g., "metadata.status") and type-aware JSON comparison logic.
 **使用示例**：
 
 ```rust
@@ -588,6 +596,10 @@ impl Default for TTLConfig {
     }
 }
 ```
+
+> **Implementation Note**: TTL sweep task automation fully integrated into MemoryStore.
+> Background cleanup with configurable intervals via `start_sweep_task()`, respecting `sweep_max_items` to avoid blocking.
+
 
 ### 9.2 Item 扩展
 

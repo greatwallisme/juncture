@@ -31,6 +31,10 @@ LangGraph 允许图使用不同的 Schema 进行输入和输出，隐藏内部�
 pub struct StateGraph<S: State, I: IntoState<S> = S, O: FromState<S> = S> { ... }
 ```
 
+> **Implementation Note**: I/O Schema separation deferred to future iteration.
+> Current StateGraph uses single type parameter `S`; schema separation to be added when required by production use cases.
+
+
 其中 `IntoState<S>` 和 `FromState<S>` trait 定义见 `01-state-channel.md` 2.7 节。
 
 ```rust
@@ -78,6 +82,9 @@ impl<S: State> StateGraph<S> {
         destinations: Option<Vec<String>>,
         retry_policies: Vec<RetryPolicy>,
     ) -> &mut Self;
+
+> **Implementation Note**: `RetryingNode` wrapper provides production-grade retry with exponential backoff.
+> Goes beyond LangGraph base retry with jitter, circuit breaker, and comprehensive error classification.
 
     // > **实现备注 (D-02-1)**: 实际实现中 `add_node` 返回 `Result<(), TopologyError>` 而非 `&mut Self`。
     // > 这破坏了链式构建器模式（不再支持 `.add_node("a", ...)?.add_node("b", ...)?`），
@@ -135,6 +142,9 @@ impl<S: State> StateGraph<S> {
         input_map: impl Fn(&S) -> Sub + Send + Sync + 'static,
         output_map: impl Fn(Sub::Update) -> S::Update + Send + Sync + 'static,
     ) -> &mut Self;
+
+> **Implementation Note**: `SubgraphMount` uses builder pattern instead of individual parameters.
+> Provides fluent API for complex subgraph configuration with type-safe state mapping.
 
     /// 编译图：执行拓扑验证，生成 CompiledGraph。
     pub fn compile(

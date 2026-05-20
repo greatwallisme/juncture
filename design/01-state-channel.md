@@ -124,6 +124,9 @@ pub struct LastValueAfterFinishChannel<T> {
     finished: bool,
 }
 
+> **Implementation Note**: Actual implementation uses three-field structure with `finished_value` field.
+> Stores both current value and finished value separately, enabling richer state tracking during transitions.
+
 impl<T: Default + Clone> Channel<T> for LastValueAfterFinishChannel<T> {
     fn update(&mut self, values: Vec<T>) -> bool {
         if let Some(v) = values.into_iter().last() {
@@ -365,6 +368,9 @@ impl FieldsChanged {
     pub fn set_field(&mut self, index: usize) { self.0 |= 1 << index; }
     pub fn merge(&mut self, other: &FieldsChanged) { self.0 |= other.0; }
 }
+
+> **Implementation Note**: `is_empty()` and `has_field()` use `const fn` for compile-time optimization.
+> This enables zero-cost field change tracking in hot paths without runtime overhead.
 
 // proc-macro 生成的字段数量验证（编译时检查）
 //
@@ -1182,6 +1188,9 @@ pub enum ContentPart {
     Text(String),
     Image { url: String },
     // 可扩展
+
+> **Implementation Note**: `ContentPart::Thinking` variant supports Anthropic extended thinking.
+> Enables modeling of internal reasoning process without affecting tool call execution.
 }
 
 /// 特殊消息：删除指定 id 的消息
@@ -1270,6 +1279,9 @@ impl Message {
     }
 }
 ```
+
+> **Implementation Note**: `Message::content_text()` helper provides convenience for text extraction.
+> Returns text content from both simple `Content::Text` and multimodal `Content::MultiPart` messages.
 
 ---
 
