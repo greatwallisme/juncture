@@ -167,6 +167,9 @@ pub struct PregelLoop<S: State> {
     /// Interrupt signals captured during execution for checkpoint persistence
     pending_interrupts: Vec<crate::interrupt::InterruptSignal>,
 
+    /// Scratchpad for tracking processed interrupts and transient data
+    scratchpad: crate::interrupt::Scratchpad,
+
     /// Superstep start time for duration tracking
     ///
     /// Set at the beginning of [`execute_superstep`], read in [`after_tick`].
@@ -193,6 +196,7 @@ impl<S: State> std::fmt::Debug for PregelLoop<S> {
             .field("run_id", &self.run_id)
             .field("interrupt_rx", &self.interrupt_rx.is_some())
             .field("pending_interrupts", &self.pending_interrupts.len())
+            .field("scratchpad", &self.scratchpad)
             .field("superstep_start", &self.superstep_start.is_some())
             .finish()
     }
@@ -263,6 +267,7 @@ impl<S: State> PregelLoop<S> {
             run_id,
             interrupt_rx: None,
             pending_interrupts: Vec::new(),
+            scratchpad: crate::interrupt::Scratchpad::new(),
             superstep_start: None,
         })
     }
@@ -491,6 +496,8 @@ impl<S: State> PregelLoop<S> {
             &self.runnable_config,
             &self.cancellation_token,
             self.checkpointer.as_ref(),
+            &self.pending_interrupts,
+            &self.scratchpad,
         )
         .await?;
 
@@ -768,6 +775,17 @@ impl<S: State> PregelLoop<S> {
     #[must_use]
     pub fn pending_interrupts(&self) -> &[crate::interrupt::InterruptSignal] {
         &self.pending_interrupts
+    }
+
+    /// Get a reference to the scratchpad for interrupt tracking
+    #[must_use]
+    pub const fn scratchpad(&self) -> &crate::interrupt::Scratchpad {
+        &self.scratchpad
+    }
+
+    /// Get a mutable reference to the scratchpad for interrupt tracking
+    pub const fn scratchpad_mut(&mut self) -> &mut crate::interrupt::Scratchpad {
+        &mut self.scratchpad
     }
 
     /// Check if the loop is still running

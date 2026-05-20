@@ -6,7 +6,7 @@
 use crate::{
     JunctureError, Node, State,
     config::RunnableConfig,
-    interrupt::{InterruptContext, ResumeValue},
+    interrupt::{InterruptContext, InterruptSignal, ResumeValue, Scratchpad},
     pregel::types::{PendingTask, SuperstepResult, TaskOutput},
 };
 use std::{sync::Arc, time::Instant};
@@ -32,6 +32,8 @@ use tracing::{Level, event};
 /// * `config` - Execution configuration
 /// * `cancellation_token` - Token for cooperative cancellation
 /// * `checkpointer` - Optional checkpointer for immediate write persistence
+/// * `pending_interrupts` - Interrupt signals from prior supersteps (for multi-interrupt matching)
+/// * `scratchpad` - Scratchpad tracking processed interrupts (for null-resume detection)
 ///
 /// # Returns
 ///
@@ -55,6 +57,7 @@ use tracing::{Level, event};
 ///
 /// ```ignore
 /// use juncture_core::pregel::runner::execute_superstep;
+/// use juncture_core::interrupt::Scratchpad;
 /// use tokio_util::sync::CancellationToken;
 ///
 /// # let pending_tasks = vec![];
@@ -62,18 +65,26 @@ use tracing::{Level, event};
 /// # let nodes = IndexMap::new();
 /// # let config = RunnableConfig::new();
 /// # let token = CancellationToken::new();
+/// # let pending_interrupts = vec![];
+/// # let scratchpad = Scratchpad::new();
 /// let (result, _interrupt_rx) = execute_superstep(
 ///     &pending_tasks,
 ///     &state,
 ///     &nodes,
 ///     &config,
 ///     &token,
-///     None::<Arc<dyn CheckpointSaver>>
+///     None::<Arc<dyn CheckpointSaver>>,
+///     &pending_interrupts,
+///     &scratchpad,
 /// ).await?;
 /// ```
 #[expect(
     clippy::too_many_lines,
     reason = "execute_superstep requires: early return, semaphore creation, interrupt context setup, task spawning with span creation, and result collection. The length is justified by the complexity of parallel execution with proper error handling and observability."
+)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "execute_superstep requires: tasks, state, nodes, config, cancellation token, checkpointer, pending interrupts, and scratchpad. All are necessary for the multi-interrupt matching algorithm."
 )]
 pub async fn execute_superstep<S: State>(
     pending_tasks: &[PendingTask<S>],
@@ -82,6 +93,8 @@ pub async fn execute_superstep<S: State>(
     config: &RunnableConfig,
     cancellation_token: &CancellationToken,
     checkpointer: Option<&Arc<dyn crate::checkpoint::CheckpointSaver>>,
+    pending_interrupts: &[InterruptSignal],
+    scratchpad: &Scratchpad,
 ) -> Result<
     (
         SuperstepResult<S>,
@@ -96,8 +109,10 @@ pub async fn execute_superstep<S: State>(
     }
 
     // Create interrupt context for HITL support
-    // Convert ResumeValue to Vec<Option<serde_json::Value>> for InterruptContext
-    let resume_values = convert_resume_value_to_vec(&config.resume_value);
+    // Use multi-interrupt matching algorithm that consults the scratchpad
+    // for processed interrupts when resolving resume values
+    let resume_values =
+        match_resume_to_interrupts(&config.resume_value, pending_interrupts, scratchpad);
 
     let (interrupt_tx, interrupt_rx) = mpsc::unbounded_channel();
     let interrupt_context = Arc::new(InterruptContext::new(resume_values, interrupt_tx));
@@ -240,14 +255,27 @@ pub async fn execute_superstep<S: State>(
     Ok((SuperstepResult { task_outputs }, interrupt_rx))
 }
 
-/// Convert `ResumeValue` to `Vec<Option<serde_json::Value>>` for `InterruptContext`
+/// Match resume values against pending interrupts using the design-specified algorithm.
 ///
-/// This helper function converts the high-level `ResumeValue` enum into the
-/// position-indexed vector that `InterruptContext` expects.
+/// The matching follows three strategies depending on the `ResumeValue` variant:
+///
+/// 1. **Single (global matching)**: A single value is applied to all pending interrupts.
+///    When no pending interrupts exist, returns a single-element vector for the
+///    first interrupt position.
+///
+/// 2. **`ById` (ID-based matching)**: Maps values by interrupt ID. If an interrupt has
+///    been processed (tracked in the scratchpad), it receives a `Null` resume value
+///    so the node skips re-execution of that interrupt point.
+///
+/// 3. **`ByNamespace` (index-based matching)**: Parses numeric keys as positional indices.
+///    Processed interrupts in the scratchpad that have no explicit mapping receive
+///    a `Null` resume value.
 ///
 /// # Arguments
 ///
 /// * `resume_value` - Optional resume value from config
+/// * `pending_interrupts` - Interrupt signals from prior supersteps
+/// * `scratchpad` - Scratchpad tracking processed interrupts
 ///
 /// # Returns
 ///
@@ -256,30 +284,53 @@ pub async fn execute_superstep<S: State>(
     clippy::ref_option,
     reason = "config stores Option<ResumeValue> and we need to pass it by reference"
 )]
-fn convert_resume_value_to_vec(
+#[must_use]
+fn match_resume_to_interrupts(
     resume_value: &Option<ResumeValue>,
+    pending_interrupts: &[InterruptSignal],
+    scratchpad: &Scratchpad,
 ) -> Vec<Option<serde_json::Value>> {
-    match resume_value {
-        None => Vec::new(),
-        Some(ResumeValue::Single(value)) => vec![Some(value.clone())],
-        Some(ResumeValue::ById(_map)) => {
-            // For ID-based resume, we can't easily map to positions
-            // without knowing the interrupt IDs. Return empty and let
-            // the interrupt context handle ID-based lookups separately.
-            // ID-based resume will be supported when interrupt metadata
-            // is persisted in checkpoints.
-            Vec::new()
+    let Some(rv) = resume_value else {
+        return Vec::new();
+    };
+
+    match rv {
+        ResumeValue::Single(value) => {
+            // Global matching: single value for all pending interrupts
+            if pending_interrupts.is_empty() {
+                vec![Some(value.clone())]
+            } else {
+                vec![Some(value.clone()); pending_interrupts.len()]
+            }
         }
-        Some(ResumeValue::ByNamespace(map)) => {
-            // For namespace-based resume, convert to position-based
-            // by parsing numeric indices from namespace keys
+        ResumeValue::ById(map) => {
+            // ID-based matching: check scratchpad for processed -> null-resume
+            pending_interrupts
+                .iter()
+                .map(|signal| {
+                    if let Some(ref id) = signal.id {
+                        if let Some(value) = map.get(id) {
+                            return Some(value.clone());
+                        }
+                        if scratchpad.get_null_resume(id) {
+                            return Some(serde_json::Value::Null);
+                        }
+                    }
+                    None
+                })
+                .collect()
+        }
+        ResumeValue::ByNamespace(map) => {
+            // Index-based matching: parse numeric keys, skip processed
             let max_index = map
                 .keys()
                 .filter_map(|k| k.parse::<usize>().ok())
                 .max()
                 .unwrap_or(0);
 
-            let mut values = vec![None; max_index + 1];
+            let size = pending_interrupts.len().max(max_index + 1);
+            let mut values = vec![None; size];
+
             for (key, value) in map {
                 if let Ok(index) = key.parse::<usize>()
                     && index < values.len()
@@ -287,6 +338,17 @@ fn convert_resume_value_to_vec(
                     values[index] = Some(value.clone());
                 }
             }
+
+            // Fill processed interrupts with null-resume
+            for (i, signal) in pending_interrupts.iter().enumerate() {
+                if values[i].is_none()
+                    && let Some(ref id) = signal.id
+                    && scratchpad.get_null_resume(id)
+                {
+                    values[i] = Some(serde_json::Value::Null);
+                }
+            }
+
             values
         }
     }
@@ -303,10 +365,21 @@ mod tests {
         let nodes = indexmap::IndexMap::new();
         let config = RunnableConfig::new();
         let token = CancellationToken::new();
+        let pending_interrupts = vec![];
+        let scratchpad = Scratchpad::new();
 
-        let (result, _rx) = execute_superstep(&[], &state, &nodes, &config, &token, None)
-            .await
-            .unwrap();
+        let (result, _rx) = execute_superstep(
+            &[],
+            &state,
+            &nodes,
+            &config,
+            &token,
+            None,
+            &pending_interrupts,
+            &scratchpad,
+        )
+        .await
+        .unwrap();
         assert!(result.is_empty());
     }
 
@@ -322,15 +395,26 @@ mod tests {
 
         let config = RunnableConfig::new();
         let token = CancellationToken::new();
+        let pending_interrupts = vec![];
+        let scratchpad = Scratchpad::new();
 
         let tasks = vec![PendingTask::pull(
             uuid::Uuid::new_v4().to_string(),
             "test_node".to_string(),
         )];
 
-        let (result, _rx) = execute_superstep(&tasks, &state, &nodes, &config, &token, None)
-            .await
-            .unwrap();
+        let (result, _rx) = execute_superstep(
+            &tasks,
+            &state,
+            &nodes,
+            &config,
+            &token,
+            None,
+            &pending_interrupts,
+            &scratchpad,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(result.len(), 1);
         assert_eq!(result.task_outputs[0].node_name, "test_node");
@@ -351,14 +435,25 @@ mod tests {
 
         let config = RunnableConfig::new();
         let token = CancellationToken::new();
+        let pending_interrupts = vec![];
+        let scratchpad = Scratchpad::new();
 
         let tasks: Vec<PendingTask<TestState>> = (0..3)
             .map(|i| PendingTask::pull(uuid::Uuid::new_v4().to_string(), format!("node_{i}")))
             .collect();
 
-        let (result, _rx) = execute_superstep(&tasks, &state, &nodes, &config, &token, None)
-            .await
-            .unwrap();
+        let (result, _rx) = execute_superstep(
+            &tasks,
+            &state,
+            &nodes,
+            &config,
+            &token,
+            None,
+            &pending_interrupts,
+            &scratchpad,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(result.len(), 3);
     }
@@ -379,6 +474,8 @@ mod tests {
 
         let config = RunnableConfig::new();
         let token = CancellationToken::new();
+        let pending_interrupts = vec![];
+        let scratchpad = Scratchpad::new();
 
         let tasks = vec![PendingTask::pull(
             uuid::Uuid::new_v4().to_string(),
@@ -388,7 +485,17 @@ mod tests {
         // Cancel immediately
         token.cancel();
 
-        let result = execute_superstep(&tasks, &state, &nodes, &config, &token, None).await;
+        let result = execute_superstep(
+            &tasks,
+            &state,
+            &nodes,
+            &config,
+            &token,
+            None,
+            &pending_interrupts,
+            &scratchpad,
+        )
+        .await;
 
         assert!(result.is_err());
         assert!(result.unwrap_err().is_execution());
@@ -400,16 +507,256 @@ mod tests {
         let nodes = indexmap::IndexMap::new();
         let config = RunnableConfig::new();
         let token = CancellationToken::new();
+        let pending_interrupts = vec![];
+        let scratchpad = Scratchpad::new();
 
         let tasks = vec![PendingTask::pull(
             uuid::Uuid::new_v4().to_string(),
             "nonexistent".to_string(),
         )];
 
-        let result = execute_superstep(&tasks, &state, &nodes, &config, &token, None).await;
+        let result = execute_superstep(
+            &tasks,
+            &state,
+            &nodes,
+            &config,
+            &token,
+            None,
+            &pending_interrupts,
+            &scratchpad,
+        )
+        .await;
 
         assert!(result.is_err());
         assert!(result.unwrap_err().is_execution());
+    }
+
+    // --- match_resume_to_interrupts tests ---
+
+    #[test]
+    fn test_match_resume_none_returns_empty() {
+        let scratchpad = Scratchpad::new();
+        let result = match_resume_to_interrupts(&None, &[], &scratchpad);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_match_single_value_no_pending_interrupts() {
+        let scratchpad = Scratchpad::new();
+        let resume = Some(ResumeValue::Single(serde_json::json!("yes")));
+        let result = match_resume_to_interrupts(&resume, &[], &scratchpad);
+        assert_eq!(result, vec![Some(serde_json::json!("yes"))]);
+    }
+
+    #[test]
+    fn test_match_single_value_with_pending_interrupts() {
+        let scratchpad = Scratchpad::new();
+        let resume = Some(ResumeValue::Single(serde_json::json!("approve")));
+        let interrupts = vec![
+            InterruptSignal {
+                index: 0,
+                id: Some("id-0".to_string()),
+                payload: serde_json::Value::Null,
+            },
+            InterruptSignal {
+                index: 1,
+                id: Some("id-1".to_string()),
+                payload: serde_json::Value::Null,
+            },
+        ];
+        let result = match_resume_to_interrupts(&resume, &interrupts, &scratchpad);
+        assert_eq!(
+            result,
+            vec![
+                Some(serde_json::json!("approve")),
+                Some(serde_json::json!("approve")),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_match_by_id_with_matching_ids() {
+        let scratchpad = Scratchpad::new();
+        let mut map = std::collections::HashMap::new();
+        map.insert("id-0".to_string(), serde_json::json!("value-0"));
+        map.insert("id-1".to_string(), serde_json::json!("value-1"));
+        let resume = Some(ResumeValue::ById(map));
+
+        let interrupts = vec![
+            InterruptSignal {
+                index: 0,
+                id: Some("id-0".to_string()),
+                payload: serde_json::Value::Null,
+            },
+            InterruptSignal {
+                index: 1,
+                id: Some("id-1".to_string()),
+                payload: serde_json::Value::Null,
+            },
+        ];
+        let result = match_resume_to_interrupts(&resume, &interrupts, &scratchpad);
+        assert_eq!(
+            result,
+            vec![
+                Some(serde_json::json!("value-0")),
+                Some(serde_json::json!("value-1")),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_match_by_id_with_scratchpad_null_resume() {
+        let mut scratchpad = Scratchpad::new();
+        scratchpad.mark_interrupt_processed("id-0");
+
+        let mut map = std::collections::HashMap::new();
+        map.insert("id-1".to_string(), serde_json::json!("value-1"));
+        let resume = Some(ResumeValue::ById(map));
+
+        let interrupts = vec![
+            InterruptSignal {
+                index: 0,
+                id: Some("id-0".to_string()),
+                payload: serde_json::Value::Null,
+            },
+            InterruptSignal {
+                index: 1,
+                id: Some("id-1".to_string()),
+                payload: serde_json::Value::Null,
+            },
+            InterruptSignal {
+                index: 2,
+                id: Some("id-2".to_string()),
+                payload: serde_json::Value::Null,
+            },
+        ];
+        let result = match_resume_to_interrupts(&resume, &interrupts, &scratchpad);
+        assert_eq!(
+            result,
+            vec![
+                Some(serde_json::Value::Null),      // processed -> null-resume
+                Some(serde_json::json!("value-1")), // explicit match
+                None,                               // no match, not processed
+            ]
+        );
+    }
+
+    #[test]
+    fn test_match_by_id_no_match_returns_none() {
+        let scratchpad = Scratchpad::new();
+        let mut map = std::collections::HashMap::new();
+        map.insert("other-id".to_string(), serde_json::json!("value"));
+        let resume = Some(ResumeValue::ById(map));
+
+        let interrupts = vec![InterruptSignal {
+            index: 0,
+            id: Some("id-0".to_string()),
+            payload: serde_json::Value::Null,
+        }];
+        let result = match_resume_to_interrupts(&resume, &interrupts, &scratchpad);
+        assert_eq!(result, vec![None]);
+    }
+
+    #[test]
+    fn test_match_by_namespace_index_mapping() {
+        let scratchpad = Scratchpad::new();
+        let mut map = std::collections::HashMap::new();
+        map.insert("0".to_string(), serde_json::json!("first"));
+        map.insert("2".to_string(), serde_json::json!("third"));
+        let resume = Some(ResumeValue::ByNamespace(map));
+
+        let interrupts = vec![
+            InterruptSignal {
+                index: 0,
+                id: Some("id-0".to_string()),
+                payload: serde_json::Value::Null,
+            },
+            InterruptSignal {
+                index: 1,
+                id: Some("id-1".to_string()),
+                payload: serde_json::Value::Null,
+            },
+            InterruptSignal {
+                index: 2,
+                id: Some("id-2".to_string()),
+                payload: serde_json::Value::Null,
+            },
+        ];
+        let result = match_resume_to_interrupts(&resume, &interrupts, &scratchpad);
+        assert_eq!(
+            result,
+            vec![
+                Some(serde_json::json!("first")),
+                None,
+                Some(serde_json::json!("third")),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_match_by_namespace_with_scratchpad_fill() {
+        let mut scratchpad = Scratchpad::new();
+        scratchpad.mark_interrupt_processed("id-1");
+
+        let mut map = std::collections::HashMap::new();
+        map.insert("0".to_string(), serde_json::json!("first"));
+        let resume = Some(ResumeValue::ByNamespace(map));
+
+        let interrupts = vec![
+            InterruptSignal {
+                index: 0,
+                id: Some("id-0".to_string()),
+                payload: serde_json::Value::Null,
+            },
+            InterruptSignal {
+                index: 1,
+                id: Some("id-1".to_string()),
+                payload: serde_json::Value::Null,
+            },
+        ];
+        let result = match_resume_to_interrupts(&resume, &interrupts, &scratchpad);
+        assert_eq!(
+            result,
+            vec![
+                Some(serde_json::json!("first")),
+                Some(serde_json::Value::Null), // processed -> null-resume
+            ]
+        );
+    }
+
+    #[test]
+    fn test_match_by_namespace_no_pending_interrupts() {
+        let scratchpad = Scratchpad::new();
+        let mut map = std::collections::HashMap::new();
+        map.insert("0".to_string(), serde_json::json!("first"));
+        map.insert("2".to_string(), serde_json::json!("third"));
+        let resume = Some(ResumeValue::ByNamespace(map));
+
+        let result = match_resume_to_interrupts(&resume, &[], &scratchpad);
+        assert_eq!(
+            result,
+            vec![
+                Some(serde_json::json!("first")),
+                None,
+                Some(serde_json::json!("third")),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_match_by_id_signal_without_id() {
+        let scratchpad = Scratchpad::new();
+        let mut map = std::collections::HashMap::new();
+        map.insert("id-0".to_string(), serde_json::json!("value"));
+        let resume = Some(ResumeValue::ById(map));
+
+        let interrupts = vec![InterruptSignal {
+            index: 0,
+            id: None,
+            payload: serde_json::Value::Null,
+        }];
+        let result = match_resume_to_interrupts(&resume, &interrupts, &scratchpad);
+        assert_eq!(result, vec![None]);
     }
 
     #[derive(Clone, Debug)]
@@ -430,4 +777,4 @@ mod tests {
     struct TestUpdate;
 }
 
-// Rust guideline compliant 2026-05-19
+// Rust guideline compliant 2026-05-20
