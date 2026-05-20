@@ -496,7 +496,57 @@ impl<S: State> std::fmt::Debug for StreamWriter<S> {
     }
 }
 
-/// Configuration for streaming
+/// Configuration for batching LLM streaming chunks.
+///
+/// Controls how token chunks are accumulated before forwarding to stream
+/// consumers. Batching reduces overhead for high-volume token streaming
+/// by coalescing small chunks into fewer, larger deliveries.
+#[derive(Clone, Debug)]
+pub struct MessageBatchConfig {
+    /// Maximum number of chunks to accumulate before flushing.
+    ///
+    /// When this many chunks are collected, they are flushed immediately
+    /// regardless of the time threshold.
+    pub max_chunks: usize,
+
+    /// Maximum time in milliseconds to wait before flushing.
+    ///
+    /// If this duration elapses without reaching `max_chunks`, the
+    /// accumulated chunks are flushed. A value of `None` disables
+    /// time-based flushing.
+    pub flush_interval_ms: Option<u64>,
+}
+
+impl Default for MessageBatchConfig {
+    fn default() -> Self {
+        Self {
+            max_chunks: 10,
+            flush_interval_ms: Some(100),
+        }
+    }
+}
+
+impl MessageBatchConfig {
+    /// Create a new batch config with the specified parameters.
+    #[must_use]
+    pub const fn new(max_chunks: usize, flush_interval_ms: Option<u64>) -> Self {
+        Self {
+            max_chunks,
+            flush_interval_ms,
+        }
+    }
+
+    /// Create config with no batching (flush every chunk immediately).
+    #[must_use]
+    pub const fn no_batching() -> Self {
+        Self {
+            max_chunks: 1,
+            flush_interval_ms: None,
+        }
+    }
+}
+
+/// Configuration for streaming.
 #[derive(Clone, Debug, Default)]
 pub struct StreamConfig {
     pub mode: StreamMode,
@@ -504,6 +554,8 @@ pub struct StreamConfig {
     pub subgraph_filter: Option<Vec<String>>,
     /// Optional field names to filter in Values/Updates events
     pub output_keys: Option<Vec<String>>,
+    /// Batching configuration for Messages mode streaming.
+    pub message_batch_config: MessageBatchConfig,
 }
 
 impl StreamConfig {
@@ -514,6 +566,10 @@ impl StreamConfig {
             include_subgraphs: false,
             subgraph_filter: None,
             output_keys: None,
+            message_batch_config: MessageBatchConfig {
+                max_chunks: 10,
+                flush_interval_ms: Some(100),
+            },
         }
     }
 
@@ -529,10 +585,17 @@ impl StreamConfig {
         self
     }
 
-    /// Filter output to only include specified fields in Values/Updates events
+    /// Filter output to only include specified fields in Values/Updates events.
     #[must_use]
     pub fn with_output_keys(mut self, keys: Vec<String>) -> Self {
         self.output_keys = Some(keys);
+        self
+    }
+
+    /// Set the batching configuration for Messages mode streaming.
+    #[must_use]
+    pub const fn with_message_batch_config(mut self, config: MessageBatchConfig) -> Self {
+        self.message_batch_config = config;
         self
     }
 }
@@ -644,3 +707,29 @@ impl StreamTransformer for BatchTransformer {
 }
 
 // Rust guideline compliant 2026-05-20
+
+#[cfg(test)]
+mod tests {
+    use super::MessageBatchConfig;
+
+    #[test]
+    fn message_batch_config_default() {
+        let config = MessageBatchConfig::default();
+        assert_eq!(config.max_chunks, 10);
+        assert_eq!(config.flush_interval_ms, Some(100));
+    }
+
+    #[test]
+    fn message_batch_config_no_batching() {
+        let config = MessageBatchConfig::no_batching();
+        assert_eq!(config.max_chunks, 1);
+        assert_eq!(config.flush_interval_ms, None);
+    }
+
+    #[test]
+    fn message_batch_config_new_custom() {
+        let config = MessageBatchConfig::new(50, Some(200));
+        assert_eq!(config.max_chunks, 50);
+        assert_eq!(config.flush_interval_ms, Some(200));
+    }
+}
