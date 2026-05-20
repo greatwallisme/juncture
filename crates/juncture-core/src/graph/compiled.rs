@@ -319,6 +319,113 @@ impl<S: State> CompiledGraph<S> {
         })))
     }
 
+    /// Execute the graph with an externally-provided event emitter
+    ///
+    /// Unlike [`stream`](Self::stream) which creates internal channels,
+    /// this method accepts a pre-configured [`EventEmitter`] for subgraph
+    /// execution and custom streaming pipelines. The caller retains control
+    /// over the receiver end of the channel.
+    ///
+    /// # Arguments
+    ///
+    /// * `input` - Initial state for execution
+    /// * `config` - Execution configuration
+    /// * `emitter` - Pre-configured event emitter for streaming events
+    ///
+    /// # Returns
+    ///
+    /// The final state `S` after graph execution completes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`JunctureError`] if the graph cannot be initialized
+    /// or if execution fails during a superstep.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// use juncture_core::{StateGraph, State, StreamMode, stream::EventEmitter};
+    /// use tokio::sync::mpsc;
+    ///
+    /// let (tx, mut rx) = mpsc::channel(256);
+    /// let emitter = EventEmitter::new(tx, StreamMode::Values);
+    ///
+    /// // Spawn a task to consume events
+    /// tokio::spawn(async move {
+    ///     while let Some(event) = rx.recv().await {
+    ///         println!("{event:?}");
+    ///     }
+    /// });
+    ///
+    /// let final_state = compiled.execute_with_emitter(input, &config, emitter).await?;
+    /// # Ok::<(), juncture_core::JunctureError>(())
+    /// ```
+    pub async fn execute_with_emitter(
+        &self,
+        input: S,
+        config: &RunnableConfig,
+        emitter: EventEmitter<S>,
+    ) -> Result<S, JunctureError>
+    where
+        S: Clone + Send + 'static,
+    {
+        let num_fields = 64;
+
+        let mut pregel = PregelLoop::new(
+            input,
+            self.inner.nodes.clone(),
+            self.inner.trigger_table.clone(),
+            config.clone(),
+            num_fields,
+        )?;
+
+        if let Some(cp) = self.inner.checkpointer.clone() {
+            pregel.set_checkpointer(cp);
+        }
+
+        let mode = emitter.mode().clone();
+
+        // Create a separate channel for PregelLoop's internal stream events
+        let (pregel_tx, mut pregel_rx) = mpsc::unbounded_channel();
+        pregel.set_stream_sender(pregel_tx);
+
+        // Spawn task to forward PregelLoop events through the emitter
+        let emitter_clone = emitter.clone();
+        tokio::spawn(async move {
+            while let Some(event) = pregel_rx.recv().await {
+                if emitter_clone.should_emit(&event) {
+                    let _ = emitter_clone.emit(event).await;
+                }
+            }
+        });
+
+        // Execute the Pregel loop, emitting Values events at each tick
+        while pregel.tick()? {
+            let step = pregel.step();
+
+            if matches!(mode, StreamMode::Values) {
+                let event = StreamEvent::Values {
+                    state: pregel.snapshot_state(),
+                    step,
+                };
+                let _ = emitter.emit(event).await;
+            }
+
+            let result = pregel.execute_superstep().await?;
+            pregel.after_tick(result).await?;
+        }
+
+        // Emit End event with the final state
+        let final_state = pregel.into_state();
+        let _ = emitter
+            .emit(StreamEvent::End {
+                output: final_state.clone(),
+            })
+            .await;
+
+        Ok(final_state)
+    }
+
     /// Resume execution from an interrupt point
     ///
     /// Continues graph execution from where it was interrupted by a

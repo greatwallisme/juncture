@@ -273,6 +273,7 @@ pub trait StreamTransformer: Send + Sync + 'static {
 }
 
 /// Event emitter for streaming
+#[derive(Clone)]
 pub struct EventEmitter<S: State> {
     pub tx: tokio::sync::mpsc::Sender<StreamEvent<S>>,
     pub mode: StreamMode,
@@ -321,6 +322,12 @@ impl<S: State> EventEmitter<S> {
     #[must_use]
     pub fn ns(&self) -> &[String] {
         &self.ns
+    }
+
+    /// Return the stream mode for this emitter.
+    #[must_use]
+    pub const fn mode(&self) -> &StreamMode {
+        &self.mode
     }
 
     /// Emit an event to the stream
