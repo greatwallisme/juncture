@@ -224,18 +224,48 @@ impl<S: State, Sub: State> Node<S> for SubgraphNode<S, Sub> {
         Box<dyn std::future::Future<Output = Result<Command<S>, JunctureError>> + Send + '_>,
     > {
         let config = config.clone();
+        let subgraph = Arc::clone(&self.subgraph);
+        let input_map = Arc::clone(&self.input_map);
+        let output_map = Arc::clone(&self.output_map);
+        let name = self.name.clone();
+
         Box::pin(async move {
             // Transform parent state to subgraph input
-            let sub_input = (self.input_map)(&state);
+            let sub_input = (input_map)(&state);
 
-            // Execute subgraph
-            let sub_output = self
-                .subgraph
-                .invoke(sub_input, &config)
-                .map_err(|e| JunctureError::subgraph(format!("{}: {}", self.name, e)))?;
+            // Create child graph config with proper namespace and resume values
+            // Generate unique invocation ID for this subgraph execution
+            let invocation_id = uuid::Uuid::new_v4().to_string();
+
+            // Build child namespace: parent_ns + "|" + node_name + ":" + invocation_id
+            let child_ns = config.checkpoint_ns.as_ref().map_or_else(
+                || format!("{name}:{invocation_id}"),
+                |parent_ns| format!("{parent_ns}|{name}:{invocation_id}"),
+            );
+
+            // Create child config with updated namespace and resume values from parent
+            let mut child_config = config.clone();
+            child_config.checkpoint_ns = Some(child_ns);
+
+            // Note: child_config already has resume_value from parent config
+            // (via clone above), so resume values flow automatically from parent to child
+
+            // Execute subgraph asynchronously, catching interrupted errors to propagate as interrupt signals
+            let sub_output = match subgraph.invoke_async(sub_input, &child_config).await {
+                Ok(output) => output,
+                Err(e) if e.is_interrupt() => {
+                    // Child subgraph was interrupted - propagate as interrupt signal to parent
+                    // instead of as a generic subgraph error
+                    return Err(e);
+                }
+                Err(e) => {
+                    // Other errors - wrap as subgraph error with context
+                    return Err(JunctureError::subgraph(format!("{name}: {e}")));
+                }
+            };
 
             // Transform subgraph output back to parent state update
-            let update = (self.output_map)(&sub_output.value);
+            let update = (output_map)(&sub_output.value);
 
             Ok(Command::update(update))
         })
@@ -275,6 +305,21 @@ mod tests {
 
         assert_eq!(mount.name, "subgraph_test");
         assert_eq!(mount.config.persistence, SubgraphPersistence::Inherit);
+    }
+
+    #[test]
+    fn test_checkpoint_namespace_separator() {
+        // Test that namespace separator uses | instead of :
+        let ns = crate::checkpoint::CheckpointNamespace::root();
+        let child = ns.child("node1");
+        let grandchild = child.child("node2");
+
+        assert_eq!(child.as_str(), "node1");
+        assert_eq!(grandchild.as_str(), "node1|node2");
+
+        // Test parsing
+        let parsed = crate::checkpoint::CheckpointNamespace::parse("node1|node2");
+        assert_eq!(parsed.as_str(), "node1|node2");
     }
 
     fn mock_node(name: &str) -> Arc<dyn crate::Node<StateDummy>> {

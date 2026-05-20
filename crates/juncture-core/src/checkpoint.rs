@@ -117,9 +117,12 @@ impl CheckpointNamespace {
     }
 
     /// Convert to string representation
+    ///
+    /// Uses `|` as the separator between namespace segments as per
+    /// design specification 07-026.
     #[must_use]
     pub fn as_str(&self) -> String {
-        self.segments.join(":")
+        self.segments.join("|")
     }
 
     /// Convert to string representation (alias for `as_str`)
@@ -143,7 +146,7 @@ impl CheckpointNamespace {
             Self::root()
         } else {
             Self {
-                segments: s.split(':').map(String::from).collect(),
+                segments: s.split('|').map(String::from).collect(),
             }
         }
     }
