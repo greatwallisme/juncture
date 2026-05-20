@@ -166,6 +166,7 @@ pub use stream::{
     BatchTransformer, DebugEvent, EventEmitter, FilterFieldsTransformer, JsonParseTransformer,
     MessageBatchConfig, StreamChannel, StreamConfig, StreamEvent, StreamMode, StreamPart,
     StreamResumption, StreamTransformer, StreamWriter, TaskEventType, ToolsEvent,
+    call_llm_streaming,
 };
 pub use subgraph::{
     StateSubset, SubgraphConfig, SubgraphMount, SubgraphNode, SubgraphPersistence,

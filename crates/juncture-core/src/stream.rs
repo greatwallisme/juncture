@@ -1,4 +1,5 @@
 use crate::state::State;
+use futures::StreamExt;
 use std::collections::HashMap;
 
 /// Stream mode for graph execution
@@ -501,6 +502,117 @@ impl<S: State> std::fmt::Debug for StreamWriter<S> {
             .field("ns", &self.ns)
             .finish()
     }
+}
+
+/// Call an LLM with streaming, forwarding chunks to the event emitter.
+///
+/// Accumulates the full LLM response while simultaneously forwarding
+/// each chunk as a [`StreamEvent::Messages`] event through the emitter.
+/// Tool call arguments are accumulated from delta chunks and parsed as
+/// JSON values in the final message.
+///
+/// # Errors
+///
+/// Returns [`crate::llm::LlmError`] if the model fails to start streaming,
+/// a chunk contains an error, or tool call arguments are not valid JSON.
+pub async fn call_llm_streaming<S: State, M: crate::llm::ChatModel>(
+    model: &M,
+    messages: &[crate::state::Message],
+    options: Option<&crate::llm::CallOptions>,
+    emitter: &EventEmitter<S>,
+    node_name: &str,
+) -> Result<crate::state::Message, crate::llm::LlmError> {
+    let mut stream = model.stream(messages, options).await?;
+    let mut full_content = String::new();
+    let mut tool_calls: Vec<crate::state::ToolCall> = Vec::new();
+    let mut total_usage = crate::state::TokenUsage::default();
+
+    while let Some(chunk_result) = stream.next().await {
+        let chunk = chunk_result?;
+
+        full_content.push_str(&chunk.content);
+
+        for tc_chunk in &chunk.tool_call_chunks {
+            while tool_calls.len() <= tc_chunk.index {
+                tool_calls.push(crate::state::ToolCall {
+                    id: String::new(),
+                    name: String::new(),
+                    arguments: serde_json::Value::Null,
+                });
+            }
+            let tc = &mut tool_calls[tc_chunk.index];
+            if let Some(ref id) = tc_chunk.id {
+                id.clone_into(&mut tc.id);
+            }
+            if let Some(ref name) = tc_chunk.name {
+                name.clone_into(&mut tc.name);
+            }
+            if !tc_chunk.args_delta.is_empty() {
+                match &mut tc.arguments {
+                    serde_json::Value::String(s) => s.push_str(&tc_chunk.args_delta),
+                    serde_json::Value::Null => {
+                        tc.arguments =
+                            serde_json::Value::String(tc_chunk.args_delta.clone());
+                    }
+                    other => {
+                        let mut s = match std::mem::replace(other, serde_json::Value::Null) {
+                            serde_json::Value::String(existing) => existing,
+                            _ => String::new(),
+                        };
+                        s.push_str(&tc_chunk.args_delta);
+                        *other = serde_json::Value::String(s);
+                    }
+                }
+            }
+        }
+
+        if let Some(ref usage) = chunk.usage {
+            total_usage.input_tokens += usage.input_tokens;
+            total_usage.output_tokens += usage.output_tokens;
+            total_usage.total_tokens += usage.total_tokens;
+        }
+
+        let stream_chunk = MessageChunk {
+            content: chunk.content,
+            tool_call_chunks: chunk.tool_call_chunks,
+            usage_delta: chunk.usage,
+        };
+
+        let event = StreamEvent::Messages {
+            chunk: stream_chunk,
+            metadata: MessageStreamMetadata {
+                node: node_name.to_string(),
+                model: model.model_name().to_string(),
+                tags: vec![],
+                ns: emitter.ns().to_vec(),
+            },
+        };
+
+        if emitter.should_emit(&event) {
+            let _ = emitter.emit(event).await;
+        }
+    }
+
+    // Parse accumulated argument strings into JSON values
+    for tc in &mut tool_calls {
+        if let serde_json::Value::String(s) = &tc.arguments {
+            tc.arguments = serde_json::from_str(s).unwrap_or_else(|_| {
+                serde_json::Value::String(std::mem::take(&mut tc.arguments).to_string())
+            });
+        }
+    }
+
+    total_usage.total_tokens = total_usage.input_tokens + total_usage.output_tokens;
+
+    Ok(crate::state::Message {
+        id: uuid::Uuid::new_v4().to_string(),
+        role: crate::state::Role::Ai,
+        content: crate::state::Content::Text(full_content),
+        tool_calls,
+        tool_call_id: None,
+        name: None,
+        usage: Some(total_usage),
+    })
 }
 
 /// Configuration for batching LLM streaming chunks.
