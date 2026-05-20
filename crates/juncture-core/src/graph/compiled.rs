@@ -256,27 +256,80 @@ impl<S: State> CompiledGraph<S> {
     ///
     /// Returns [`JunctureError::Checkpoint`] if no checkpointer is configured
     /// or if the checkpoint cannot be found.
-    #[expect(
-        clippy::unused_async,
-        reason = "async API consistency for checkpoint operations"
-    )]
+    ///
+    /// # Notes
+    ///
+    /// This method requires `S: DeserializeOwned` to deserialize the state
+    /// from the checkpoint. This is a requirement of checkpoint-based recovery.
     pub async fn resume(
         &self,
-        _config: &RunnableConfig,
-        _resume_value: serde_json::Value,
-    ) -> Result<GraphOutput<S>, JunctureError> {
+        config: &RunnableConfig,
+        resume_value: serde_json::Value,
+    ) -> Result<GraphOutput<S>, JunctureError>
+    where
+        S: for<'de> serde::Deserialize<'de>,
+    {
         let checkpointer =
             self.inner.checkpointer.as_ref().ok_or_else(|| {
                 JunctureError::checkpoint("no checkpointer configured for resume")
             })?;
 
-        let _ = checkpointer;
+        // Load checkpoint
+        let tuple = checkpointer
+            .get_tuple(config)
+            .await
+            .map_err(|e| JunctureError::checkpoint(format!("failed to load checkpoint: {e}")))?
+            .ok_or_else(|| {
+                JunctureError::checkpoint(format!(
+                    "checkpoint not found: thread_id={:?}, checkpoint_id={:?}",
+                    config.thread_id, config.checkpoint_id
+                ))
+            })?;
 
-        // Full implementation requires checkpoint state recovery, which will
-        // be completed in Phase 6 (checkpoint integration).
-        Err(JunctureError::checkpoint(
-            "resume not yet implemented: requires checkpoint state recovery",
-        ))
+        // Deserialize state from checkpoint
+        let state: S = serde_json::from_value(tuple.checkpoint.channel_values)
+            .map_err(|e| JunctureError::checkpoint(format!("failed to deserialize state: {e}")))?;
+
+        // Create a new config with resume value
+        let mut resume_config = config.clone();
+        resume_config.resume_value = Some(resume_value);
+
+        // Create Pregel loop with restored state
+        let num_fields = 64; // Maximum number of fields
+        let mut pregel = crate::pregel::PregelLoop::new(
+            state,
+            self.inner.nodes.clone(),
+            self.inner.trigger_table.clone(),
+            resume_config,
+            num_fields,
+        )?;
+
+        // Set checkpointer
+        if let Some(cp) = self.inner.checkpointer.clone() {
+            pregel.set_checkpointer(cp);
+        }
+
+        // Execute the loop from the restored state
+        while pregel.tick()? {
+            let result = pregel.execute_superstep().await?;
+            pregel.after_tick(result).await?;
+        }
+
+        // Extract step before consuming pregel
+        let steps = pregel.step();
+
+        // Return final state
+        let final_state = pregel.into_state();
+
+        Ok(GraphOutput {
+            value: final_state,
+            interrupts: Vec::new(),
+            metadata: GraphOutputMetadata {
+                steps,
+                checkpoint_id: config.checkpoint_id.clone(),
+                budget_usage: None,
+            },
+        })
     }
 
     /// Get the current state snapshot for a thread
@@ -1039,7 +1092,8 @@ mod tests {
         NodeFnUpdate(|_s: StateDummy| async move { Ok(StateDummyUpdate) }).into_node(name)
     }
 
-    #[derive(Clone, Debug)]
+    #[derive(Clone, Debug, serde::Deserialize)]
+    #[serde(crate = "serde")]
     struct StateDummy;
 
     impl crate::State for StateDummy {

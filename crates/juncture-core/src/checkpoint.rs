@@ -375,6 +375,9 @@ pub enum CheckpointSource {
 
     /// Fork from a historical checkpoint
     Fork,
+
+    /// Interrupt triggered by human-in-the-loop interaction
+    Interrupt { node: String },
 }
 
 /// Complete checkpoint tuple with all context

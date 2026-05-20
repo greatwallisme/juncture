@@ -155,6 +155,10 @@ pub struct PregelLoop<S: State> {
 
     /// Run control for graceful shutdown
     run_control: RunControl,
+
+    /// Interrupt signal receiver from the last superstep
+    /// This is stored here so `after_tick` can drain it
+    interrupt_rx: Option<mpsc::UnboundedReceiver<crate::interrupt::InterruptSignal>>,
 }
 
 impl<S: State> std::fmt::Debug for PregelLoop<S> {
@@ -174,6 +178,7 @@ impl<S: State> std::fmt::Debug for PregelLoop<S> {
             .field("pending_tasks", &self.pending_tasks)
             .field("budget_tracker", &self.budget_tracker.is_some())
             .field("run_control", &self.run_control)
+            .field("interrupt_rx", &self.interrupt_rx.is_some())
             .finish()
     }
 }
@@ -237,6 +242,7 @@ impl<S: State> PregelLoop<S> {
             pending_tasks,
             budget_tracker: None,
             run_control: RunControl::new(),
+            interrupt_rx: None,
         })
     }
 
@@ -418,9 +424,9 @@ impl<S: State> PregelLoop<S> {
         )
         .await?;
 
-        // Drop the interrupt receiver to signal completion
-        // Any pending interrupt signals will be discarded
-        drop(interrupt_rx);
+        // Store the interrupt receiver for after_tick to drain
+        // We use Option to allow moving it into after_tick
+        self.interrupt_rx = Some(interrupt_rx);
 
         Ok(result)
     }
@@ -441,6 +447,10 @@ impl<S: State> PregelLoop<S> {
     /// ```ignore
     /// loop.after_tick(result).await?;
     /// ```
+    #[expect(
+        clippy::too_many_lines,
+        reason = "after_tick requires multiple steps: apply writes, bump versions, emit events, compute tasks, drain interrupts, check interrupts, finish channels, increment step"
+    )]
     pub async fn after_tick(&mut self, result: SuperstepResult<S>) -> Result<(), JunctureError> {
         // Apply writes from completed tasks
         let mut total_changed = crate::FieldsChanged(0);
@@ -483,6 +493,41 @@ impl<S: State> PregelLoop<S> {
         self.pending_tasks =
             compute_next_tasks(&result.task_outputs, &self.trigger_table, &self.state).await?;
 
+        // Drain interrupt signals from the channel
+        // These are signals sent by the interrupt!() macro during node execution
+        let mut node_interrupts = Vec::new();
+        if let Some(mut rx) = self.interrupt_rx.take() {
+            // Collect all pending interrupt signals
+            while let Ok(signal) = rx.try_recv() {
+                node_interrupts.push(signal);
+            }
+        }
+
+        // If we received any interrupt signals from nodes, handle them
+        if !node_interrupts.is_empty() {
+            self.status = LoopStatus::InterruptAfter(node_interrupts.clone());
+
+            // Emit interrupt events to stream
+            if let Some(ref tx) = self.stream_tx {
+                for signal in &node_interrupts {
+                    let event = StreamEvent::Interrupt {
+                        node: signal
+                            .payload
+                            .get("node")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("unknown")
+                            .to_string(),
+                        payload: signal.payload.clone(),
+                        resumable: true,
+                        ns: Vec::new(),
+                    };
+                    let _ = tx.send(event);
+                }
+            }
+
+            return Ok(());
+        }
+
         // Check interrupt_after after computing next tasks
         if let Some(ref interrupt_after_nodes) = self.runnable_config.interrupt_after {
             let interrupt_after_set: HashSet<String> =
@@ -514,7 +559,26 @@ impl<S: State> PregelLoop<S> {
                 &channel_versions,
                 &versions_seen_map,
             ) {
-                self.status = LoopStatus::InterruptAfter(signals);
+                self.status = LoopStatus::InterruptAfter(signals.clone());
+
+                // Emit interrupt events to stream
+                if let Some(ref tx) = self.stream_tx {
+                    for signal in &signals {
+                        let event = StreamEvent::Interrupt {
+                            node: signal
+                                .payload
+                                .get("node")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("unknown")
+                                .to_string(),
+                            payload: signal.payload.clone(),
+                            resumable: true,
+                            ns: Vec::new(),
+                        };
+                        let _ = tx.send(event);
+                    }
+                }
+
                 return Ok(());
             }
         }
@@ -661,8 +725,16 @@ impl<S: State> PregelLoop<S> {
     pub fn as_config(&self) -> crate::pregel::context::ExecutionConfig {
         crate::pregel::context::ExecutionConfig {
             recursion_limit: self.runnable_config.recursion_limit,
-            interrupt_before: HashSet::new(),
-            interrupt_after: HashSet::new(),
+            interrupt_before: self
+                .runnable_config
+                .interrupt_before
+                .as_ref()
+                .map_or_else(HashSet::new, |v| v.iter().cloned().collect()),
+            interrupt_after: self
+                .runnable_config
+                .interrupt_after
+                .as_ref()
+                .map_or_else(HashSet::new, |v| v.iter().cloned().collect()),
             budget: self.runnable_config.budget.clone(),
             durability: self.runnable_config.durability.clone().unwrap_or_default(),
             retry_policies: std::collections::HashMap::new(),
