@@ -243,6 +243,12 @@ pub enum FilterExpr {
         /// Sub-expressions
         expressions: Vec<FilterExpr>,
     },
+    /// Logical NOT
+    #[serde(rename = "$not")]
+    Not {
+        /// Negated expression
+        expr: Box<FilterExpr>,
+    },
 }
 
 /// Store operation type
@@ -588,6 +594,7 @@ fn evaluate_filter(filter: &FilterExpr, value: &serde_json::Value) -> bool {
         FilterExpr::Or { expressions } => {
             expressions.iter().any(|expr| evaluate_filter(expr, value))
         }
+        FilterExpr::Not { expr } => !evaluate_filter(expr, value),
     }
 }
 
@@ -1183,4 +1190,110 @@ impl Store for PostgresStore {
     }
 }
 
-// Rust guideline compliant 2026-05-20
+// Rust guideline compliant 2026-05-21
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn active_value() -> serde_json::Value {
+        json!({ "status": "active" })
+    }
+
+    fn inactive_value() -> serde_json::Value {
+        json!({ "status": "inactive" })
+    }
+
+    #[test]
+    fn test_filter_not_negates_match() {
+        // Not(Eq{status=active}) on {status=inactive} => true
+        let filter = FilterExpr::Not {
+            expr: Box::new(FilterExpr::Eq {
+                field: "status".to_string(),
+                value: json!("active"),
+            }),
+        };
+        assert!(evaluate_filter(&filter, &inactive_value()));
+    }
+
+    #[test]
+    fn test_filter_not_inverts_true_to_false() {
+        // Not(Eq{status=active}) on {status=active} => false
+        let filter = FilterExpr::Not {
+            expr: Box::new(FilterExpr::Eq {
+                field: "status".to_string(),
+                value: json!("active"),
+            }),
+        };
+        assert!(!evaluate_filter(&filter, &active_value()));
+    }
+
+    #[test]
+    fn test_filter_not_combined_with_and() {
+        // And([Gte{age>=18}, Not(Eq{status=banned})]) on {age:25, status:active} => true
+        let value = json!({ "age": 25, "status": "active" });
+        let filter = FilterExpr::And {
+            expressions: vec![
+                FilterExpr::Gte {
+                    field: "age".to_string(),
+                    value: json!(18),
+                },
+                FilterExpr::Not {
+                    expr: Box::new(FilterExpr::Eq {
+                        field: "status".to_string(),
+                        value: json!("banned"),
+                    }),
+                },
+            ],
+        };
+        assert!(evaluate_filter(&filter, &value));
+
+        // And([Gte{age>=18}, Not(Eq{status=banned})]) on {age:25, status:banned} => false
+        let banned_value = json!({ "age": 25, "status": "banned" });
+        assert!(!evaluate_filter(&filter, &banned_value));
+
+        // And([Gte{age>=18}, Not(Eq{status=banned})]) on {age:17, status:active} => false
+        let young_value = json!({ "age": 17, "status": "active" });
+        assert!(!evaluate_filter(&filter, &young_value));
+    }
+
+    #[test]
+    fn test_filter_not_serialization_roundtrip() {
+        let filter = FilterExpr::Not {
+            expr: Box::new(FilterExpr::Eq {
+                field: "status".to_string(),
+                value: json!("active"),
+            }),
+        };
+
+        let serialized = serde_json::to_string(&filter).expect("serialization failed");
+        assert!(serialized.contains("\"$not\""), "serialized form must contain $not tag");
+
+        let deserialized: FilterExpr =
+            serde_json::from_str(&serialized).expect("deserialization failed");
+
+        // Verify roundtrip correctness by evaluating both against the same value
+        let value = active_value();
+        assert_eq!(
+            evaluate_filter(&filter, &value),
+            evaluate_filter(&deserialized, &value),
+            "roundtrip filter must produce the same result"
+        );
+    }
+
+    #[test]
+    fn test_filter_nested_not() {
+        // Not(Not(Eq{status=active})) is equivalent to Eq{status=active}
+        let filter = FilterExpr::Not {
+            expr: Box::new(FilterExpr::Not {
+                expr: Box::new(FilterExpr::Eq {
+                    field: "status".to_string(),
+                    value: json!("active"),
+                }),
+            }),
+        };
+        assert!(evaluate_filter(&filter, &active_value()));
+        assert!(!evaluate_filter(&filter, &inactive_value()));
+    }
+}
