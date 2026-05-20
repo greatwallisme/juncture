@@ -272,58 +272,161 @@ impl<S: State + Clone> crate::Node<S> for RetryingNode<S> {
                 + '_,
         >,
     > {
-        let max_attempts = self.policy.max_attempts;
-        let initial_interval = self.policy.initial_interval;
-        let backoff_factor = self.policy.backoff_factor;
-        let retry_on = self.policy.retry_on.clone();
+        let policy = self.policy.clone();
         let inner = Arc::clone(&self.inner);
         let config = config.clone();
+        let node_name = self.name.clone();
 
         Box::pin(async move {
-            let mut last_error: Option<crate::JunctureError> = None;
-            let mut attempt: u32 = 0;
-
-            while attempt < max_attempts {
-                attempt += 1;
-
-                let state_for_attempt = state.clone();
-
-                match inner.call(state_for_attempt, &config).await {
-                    Ok(command) => return Ok(command),
-                    Err(error) => {
-                        // Check if error is retryable
-                        if let Some(ref predicate) = retry_on
-                            && !predicate(&error)
-                        {
-                            return Err(error);
-                        }
-
-                        last_error = Some(error);
-
-                        // Don't sleep after the last attempt
-                        if attempt < max_attempts {
-                            #[allow(
-                                clippy::cast_precision_loss,
-                                reason = "attempt count fits in f64 for delay calculation"
-                            )]
-                            let delay = initial_interval.as_secs_f64()
-                                * backoff_factor
-                                    .powi(i32::try_from(attempt - 1).unwrap_or(i32::MAX));
-                            let delay = std::time::Duration::from_secs_f64(delay);
-                            tokio::time::sleep(delay).await;
-                        }
-                    }
-                }
-            }
-
-            Err(last_error.unwrap_or_else(|| {
-                crate::JunctureError::execution("retry policy exhausted with no error recorded")
-            }))
+            execute_with_retry(
+                &node_name,
+                &policy,
+                |s, cfg| inner.call(s, cfg),
+                state,
+                &config,
+            )
+            .await
         })
     }
 
     fn name(&self) -> &str {
         &self.name
+    }
+}
+
+/// Execute an async operation with retry according to the given policy.
+///
+/// Implements exponential backoff with optional jitter, configurable max interval
+/// capping, and a predicate-based retry filter. When `retry_on` is `None`, all
+/// errors except cancellation and interrupt are retried.
+///
+/// # Arguments
+///
+/// * `node_name` - Name of the node for error reporting
+/// * `policy` - Retry policy governing backoff, jitter, and attempt limits
+/// * `operation` - The async operation to execute; receives state and config
+/// * `state` - The input state, cloned for each attempt
+/// * `config` - Execution configuration passed through to the operation
+///
+/// # Errors
+///
+/// Returns the last error when all attempts are exhausted, or immediately
+/// returns if the error is not retryable (per `retry_on` predicate or default
+/// cancellation/interrupt filter).
+///
+/// # Examples
+///
+/// ```ignore
+/// use juncture_core::graph::builder::{RetryPolicy, execute_with_retry};
+///
+/// let policy = RetryPolicy::default();
+/// let result = execute_with_retry(
+///     "my_node",
+///     &policy,
+///     |state, config| my_node.call(state, config),
+///     state,
+///     &config,
+/// ).await?;
+/// ```
+pub async fn execute_with_retry<S, F, Fut>(
+    node_name: &str,
+    policy: &RetryPolicy,
+    operation: F,
+    state: S,
+    config: &crate::RunnableConfig,
+) -> Result<crate::Command<S>, crate::JunctureError>
+where
+    S: State + Clone,
+    F: Fn(S, &crate::RunnableConfig) -> Fut,
+    Fut: std::future::Future<Output = Result<crate::Command<S>, crate::JunctureError>>,
+{
+    let mut last_error: Option<crate::JunctureError> = None;
+    let mut delay = policy.initial_interval;
+
+    for attempt in 0..policy.max_attempts {
+        let state_for_attempt = state.clone();
+
+        match operation(state_for_attempt, config).await {
+            Ok(command) => {
+                if attempt > 0 {
+                    tracing::debug!(
+                        node_name = node_name,
+                        attempt = attempt + 1,
+                        "node succeeded after retry"
+                    );
+                }
+                return Ok(command);
+            }
+            Err(error) => {
+                let should_retry = policy.should_retry(&error);
+
+                if !should_retry || attempt + 1 >= policy.max_attempts {
+                    return Err(error);
+                }
+
+                tracing::warn!(
+                    node_name = node_name,
+                    attempt = attempt + 1,
+                    max_attempts = policy.max_attempts,
+                    error = %error,
+                    "node failed, will retry"
+                );
+
+                last_error = Some(error);
+
+                let actual_delay = compute_delay(delay, policy.jitter, policy.max_interval);
+                tokio::time::sleep(actual_delay).await;
+
+                delay = cap_delay(delay.mul_f64(policy.backoff_factor), policy.max_interval);
+            }
+        }
+    }
+
+    Err(last_error.unwrap_or_else(|| {
+        crate::JunctureError::execution(format!(
+            "node '{node_name}': retry policy exhausted with no error recorded"
+        ))
+    }))
+}
+
+/// Compute the actual sleep duration with optional jitter and max interval capping.
+///
+/// When jitter is enabled, applies +/- 25% random variation to the base delay
+/// to prevent thundering herd effects across concurrent retries.
+/// The result is then capped at `max_interval`.
+fn compute_delay(
+    base: std::time::Duration,
+    jitter: bool,
+    max_interval: std::time::Duration,
+) -> std::time::Duration {
+    let capped = cap_delay(base, max_interval);
+
+    if !jitter {
+        return capped;
+    }
+
+    // Apply +/- 25% jitter: random value in [0.75, 1.25] * capped
+    let jitter_fraction: f64 = rand::random_range(0.75..=1.25);
+    let jittered = capped.mul_f64(jitter_fraction);
+    cap_delay(jittered, max_interval)
+}
+
+/// Cap a duration at the configured maximum interval.
+fn cap_delay(delay: std::time::Duration, max: std::time::Duration) -> std::time::Duration {
+    delay.min(max)
+}
+
+impl RetryPolicy {
+    /// Determine whether the given error should trigger a retry.
+    ///
+    /// When a `retry_on` predicate is configured, delegates to it.
+    /// Otherwise uses the default policy: retry everything except
+    /// cancellation and interrupt errors.
+    fn should_retry(&self, error: &crate::JunctureError) -> bool {
+        self.retry_on.as_ref().map_or_else(
+            || !error.is_cancelled() && !error.is_interrupt(),
+            |predicate| predicate(error),
+        )
     }
 }
 
@@ -1031,6 +1134,7 @@ impl<S: State> Default for StateGraph<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Node;
     use crate::node::NodeFnUpdate;
 
     #[test]
@@ -1332,6 +1436,491 @@ mod tests {
 
     #[derive(Clone, Debug, Default)]
     struct StateDummyUpdate;
+
+    // --- Retry tests ---
+
+    #[tokio::test]
+    async fn test_execute_with_retry_succeeds_first_attempt() {
+        let policy = RetryPolicy {
+            max_attempts: 3,
+            initial_interval: std::time::Duration::from_millis(1),
+            backoff_factor: 2.0,
+            max_interval: std::time::Duration::from_secs(1),
+            jitter: false,
+            retry_on: None,
+        };
+        let config = crate::RunnableConfig::new();
+
+        let result = execute_with_retry(
+            "test_node",
+            &policy,
+            |_s: StateDummy, _cfg: &crate::RunnableConfig| async { Ok(crate::Command::end()) },
+            StateDummy,
+            &config,
+        )
+        .await;
+
+        result.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_execute_with_retry_succeeds_after_retries() {
+        let policy = RetryPolicy {
+            max_attempts: 3,
+            initial_interval: std::time::Duration::from_millis(1),
+            backoff_factor: 2.0,
+            max_interval: std::time::Duration::from_secs(1),
+            jitter: false,
+            retry_on: None,
+        };
+        let config = crate::RunnableConfig::new();
+
+        let attempt_count = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let attempt_clone = Arc::clone(&attempt_count);
+
+        let result = execute_with_retry(
+            "test_node",
+            &policy,
+            move |_s: StateDummy, _cfg: &crate::RunnableConfig| {
+                let counter = Arc::clone(&attempt_clone);
+                async move {
+                    let n = counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    if n < 2 {
+                        Err(crate::JunctureError::execution("transient failure"))
+                    } else {
+                        Ok(crate::Command::end())
+                    }
+                }
+            },
+            StateDummy,
+            &config,
+        )
+        .await;
+
+        result.unwrap();
+        assert_eq!(attempt_count.load(std::sync::atomic::Ordering::Relaxed), 3);
+    }
+
+    #[tokio::test]
+    async fn test_execute_with_retry_exhausts_attempts() {
+        let policy = RetryPolicy {
+            max_attempts: 3,
+            initial_interval: std::time::Duration::from_millis(1),
+            backoff_factor: 2.0,
+            max_interval: std::time::Duration::from_secs(1),
+            jitter: false,
+            retry_on: None,
+        };
+        let config = crate::RunnableConfig::new();
+
+        let result = execute_with_retry(
+            "test_node",
+            &policy,
+            |_s: StateDummy, _cfg: &crate::RunnableConfig| async {
+                Err(crate::JunctureError::execution("always fails"))
+            },
+            StateDummy,
+            &config,
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().is_execution());
+    }
+
+    #[tokio::test]
+    async fn test_execute_with_retry_does_not_retry_cancelled() {
+        let policy = RetryPolicy {
+            max_attempts: 3,
+            initial_interval: std::time::Duration::from_millis(1),
+            backoff_factor: 2.0,
+            max_interval: std::time::Duration::from_secs(1),
+            jitter: false,
+            retry_on: None,
+        };
+        let config = crate::RunnableConfig::new();
+
+        let attempt_count = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let attempt_clone = Arc::clone(&attempt_count);
+
+        let result = execute_with_retry(
+            "test_node",
+            &policy,
+            move |_s: StateDummy, _cfg: &crate::RunnableConfig| {
+                let counter = Arc::clone(&attempt_clone);
+                async move {
+                    counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    Err(crate::JunctureError::cancelled())
+                }
+            },
+            StateDummy,
+            &config,
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().is_cancelled());
+        // Should only be called once (no retry on Cancelled)
+        assert_eq!(attempt_count.load(std::sync::atomic::Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn test_execute_with_retry_does_not_retry_interrupt() {
+        let policy = RetryPolicy {
+            max_attempts: 3,
+            initial_interval: std::time::Duration::from_millis(1),
+            backoff_factor: 2.0,
+            max_interval: std::time::Duration::from_secs(1),
+            jitter: false,
+            retry_on: None,
+        };
+        let config = crate::RunnableConfig::new();
+
+        let attempt_count = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let attempt_clone = Arc::clone(&attempt_count);
+
+        let result = execute_with_retry(
+            "test_node",
+            &policy,
+            move |_s: StateDummy, _cfg: &crate::RunnableConfig| {
+                let counter = Arc::clone(&attempt_clone);
+                async move {
+                    counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    Err(crate::JunctureError::interrupt("user input needed"))
+                }
+            },
+            StateDummy,
+            &config,
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().is_interrupt());
+        assert_eq!(attempt_count.load(std::sync::atomic::Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn test_execute_with_retry_custom_retry_on_predicate() {
+        // Only retry on timeout errors
+        let policy = RetryPolicy {
+            max_attempts: 3,
+            initial_interval: std::time::Duration::from_millis(1),
+            backoff_factor: 2.0,
+            max_interval: std::time::Duration::from_secs(1),
+            jitter: false,
+            retry_on: Some(Arc::new(|e: &crate::JunctureError| e.is_timeout())),
+        };
+        let config = crate::RunnableConfig::new();
+
+        let attempt_count = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let attempt_clone = Arc::clone(&attempt_count);
+
+        let result = execute_with_retry(
+            "test_node",
+            &policy,
+            move |_s: StateDummy, _cfg: &crate::RunnableConfig| {
+                let counter = Arc::clone(&attempt_clone);
+                async move {
+                    counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    // Return execution error (not timeout), should NOT be retried
+                    Err(crate::JunctureError::execution("not a timeout"))
+                }
+            },
+            StateDummy,
+            &config,
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().is_execution());
+        // Only called once (execution errors are not retryable per custom predicate)
+        assert_eq!(attempt_count.load(std::sync::atomic::Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn test_execute_with_retry_custom_predicate_allows_retry() {
+        // Only retry on timeout errors
+        let policy = RetryPolicy {
+            max_attempts: 3,
+            initial_interval: std::time::Duration::from_millis(1),
+            backoff_factor: 2.0,
+            max_interval: std::time::Duration::from_secs(1),
+            jitter: false,
+            retry_on: Some(Arc::new(|e: &crate::JunctureError| e.is_timeout())),
+        };
+        let config = crate::RunnableConfig::new();
+
+        let attempt_count = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let attempt_clone = Arc::clone(&attempt_count);
+
+        let result = execute_with_retry(
+            "test_node",
+            &policy,
+            move |_s: StateDummy, _cfg: &crate::RunnableConfig| {
+                let counter = Arc::clone(&attempt_clone);
+                async move {
+                    let n = counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    if n < 2 {
+                        Err(crate::JunctureError::timeout("timed out"))
+                    } else {
+                        Ok(crate::Command::end())
+                    }
+                }
+            },
+            StateDummy,
+            &config,
+        )
+        .await;
+
+        result.unwrap();
+        assert_eq!(attempt_count.load(std::sync::atomic::Ordering::Relaxed), 3);
+    }
+
+    #[test]
+    fn test_compute_delay_no_jitter() {
+        let base = std::time::Duration::from_millis(100);
+        let max = std::time::Duration::from_secs(10);
+        let result = compute_delay(base, false, max);
+        assert_eq!(result, std::time::Duration::from_millis(100));
+    }
+
+    #[test]
+    fn test_compute_delay_caps_at_max() {
+        let base = std::time::Duration::from_secs(20);
+        let max = std::time::Duration::from_secs(10);
+        let result = compute_delay(base, false, max);
+        assert_eq!(result, std::time::Duration::from_secs(10));
+    }
+
+    #[test]
+    fn test_compute_delay_with_jitter_stays_within_range() {
+        let base = std::time::Duration::from_millis(100);
+        let max = std::time::Duration::from_secs(10);
+        // Run multiple times to verify jitter stays within +/- 25%
+        for _ in 0..100 {
+            let result = compute_delay(base, true, max);
+            let millis = result.as_secs_f64() * 1000.0;
+            // 100ms * 0.75 = 75ms, 100ms * 1.25 = 125ms
+            assert!(
+                (75.0..=125.0).contains(&millis),
+                "jittered delay {millis}ms outside expected range [75, 125]"
+            );
+        }
+    }
+
+    #[test]
+    fn test_compute_delay_jitter_capped_by_max() {
+        let base = std::time::Duration::from_millis(100);
+        // Set max very low to force capping even with jitter
+        let max = std::time::Duration::from_millis(50);
+        for _ in 0..100 {
+            let result = compute_delay(base, true, max);
+            assert!(
+                result <= max,
+                "jittered delay {result:?} exceeded max {max:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn test_cap_delay_returns_min() {
+        let delay = std::time::Duration::from_secs(5);
+        let max = std::time::Duration::from_secs(10);
+        assert_eq!(cap_delay(delay, max), delay);
+
+        let delay_large = std::time::Duration::from_secs(15);
+        assert_eq!(cap_delay(delay_large, max), max);
+    }
+
+    #[test]
+    fn test_retry_policy_should_retry_default_allows_execution_errors() {
+        let policy = RetryPolicy::default();
+        let error = crate::JunctureError::execution("something went wrong");
+        assert!(policy.should_retry(&error));
+    }
+
+    #[test]
+    fn test_retry_policy_should_retry_default_blocks_cancelled() {
+        let policy = RetryPolicy::default();
+        let error = crate::JunctureError::cancelled();
+        assert!(!policy.should_retry(&error));
+    }
+
+    #[test]
+    fn test_retry_policy_should_retry_default_blocks_interrupt() {
+        let policy = RetryPolicy::default();
+        let error = crate::JunctureError::interrupt("waiting for user");
+        assert!(!policy.should_retry(&error));
+    }
+
+    #[test]
+    fn test_retry_policy_should_retry_custom_predicate() {
+        let policy = RetryPolicy {
+            max_attempts: 3,
+            initial_interval: std::time::Duration::from_millis(100),
+            backoff_factor: 2.0,
+            max_interval: std::time::Duration::from_secs(10),
+            jitter: false,
+            retry_on: Some(Arc::new(|e: &crate::JunctureError| e.is_timeout())),
+        };
+
+        assert!(policy.should_retry(&crate::JunctureError::timeout("slow")));
+        assert!(!policy.should_retry(&crate::JunctureError::execution("not timeout")));
+    }
+
+    #[tokio::test]
+    async fn test_retrying_node_delegates_to_execute_with_retry() {
+        use crate::node::NodeFnCommand;
+
+        let call_count = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let count_clone = Arc::clone(&call_count);
+
+        let inner: Arc<dyn crate::Node<StateDummy>> = NodeFnCommand(move |_s: StateDummy| {
+            let counter = Arc::clone(&count_clone);
+            async move {
+                let n = counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if n == 0 {
+                    Err(crate::JunctureError::execution("first try fails"))
+                } else {
+                    Ok(crate::Command::end())
+                }
+            }
+        })
+        .into_node("inner");
+
+        let policy = RetryPolicy {
+            max_attempts: 3,
+            initial_interval: std::time::Duration::from_millis(1),
+            backoff_factor: 2.0,
+            max_interval: std::time::Duration::from_secs(1),
+            jitter: false,
+            retry_on: None,
+        };
+
+        let retrying_node = RetryingNode::new(inner, policy);
+        let config = crate::RunnableConfig::new();
+
+        let result = retrying_node.call(StateDummy, &config).await;
+        result.unwrap();
+        assert_eq!(call_count.load(std::sync::atomic::Ordering::Relaxed), 2);
+    }
+
+    #[tokio::test]
+    async fn test_retrying_node_respects_max_attempts() {
+        use crate::node::NodeFnCommand;
+
+        let call_count = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let count_clone = Arc::clone(&call_count);
+
+        let inner: Arc<dyn crate::Node<StateDummy>> = NodeFnCommand(move |_s: StateDummy| {
+            let counter = Arc::clone(&count_clone);
+            async move {
+                counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                Err(crate::JunctureError::execution("always fails"))
+            }
+        })
+        .into_node("inner");
+
+        let policy = RetryPolicy {
+            max_attempts: 5,
+            initial_interval: std::time::Duration::from_millis(1),
+            backoff_factor: 2.0,
+            max_interval: std::time::Duration::from_secs(1),
+            jitter: false,
+            retry_on: None,
+        };
+
+        let retrying_node = RetryingNode::new(inner, policy);
+        let config = crate::RunnableConfig::new();
+
+        let result = retrying_node.call(StateDummy, &config).await;
+        let err = result.unwrap_err();
+        assert!(err.is_execution());
+        assert_eq!(call_count.load(std::sync::atomic::Ordering::Relaxed), 5);
+    }
+
+    #[tokio::test]
+    async fn test_retrying_node_with_jitter_enabled() {
+        use crate::node::NodeFnCommand;
+
+        let call_count = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let count_clone = Arc::clone(&call_count);
+
+        let inner: Arc<dyn crate::Node<StateDummy>> = NodeFnCommand(move |_s: StateDummy| {
+            let counter = Arc::clone(&count_clone);
+            async move {
+                let n = counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if n < 2 {
+                    Err(crate::JunctureError::execution("retry me"))
+                } else {
+                    Ok(crate::Command::end())
+                }
+            }
+        })
+        .into_node("inner");
+
+        let policy = RetryPolicy {
+            max_attempts: 3,
+            initial_interval: std::time::Duration::from_millis(1),
+            backoff_factor: 2.0,
+            max_interval: std::time::Duration::from_secs(1),
+            jitter: true,
+            retry_on: None,
+        };
+
+        let retrying_node = RetryingNode::new(inner, policy);
+        let config = crate::RunnableConfig::new();
+
+        let result = retrying_node.call(StateDummy, &config).await;
+        result.unwrap();
+        assert_eq!(call_count.load(std::sync::atomic::Ordering::Relaxed), 3);
+    }
+
+    #[tokio::test]
+    async fn test_execute_with_retry_max_interval_capping() {
+        // Use a very high backoff_factor but low max_interval to verify capping
+        let policy = RetryPolicy {
+            max_attempts: 3,
+            initial_interval: std::time::Duration::from_millis(50),
+            backoff_factor: 100.0,
+            max_interval: std::time::Duration::from_millis(80),
+            jitter: false,
+            retry_on: None,
+        };
+        let config = crate::RunnableConfig::new();
+
+        let start = std::time::Instant::now();
+        let attempt_count = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let attempt_clone = Arc::clone(&attempt_count);
+
+        let result = execute_with_retry(
+            "test_node",
+            &policy,
+            move |_s: StateDummy, _cfg: &crate::RunnableConfig| {
+                let counter = Arc::clone(&attempt_clone);
+                async move {
+                    let n = counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    if n < 2 {
+                        Err(crate::JunctureError::execution("fail"))
+                    } else {
+                        Ok(crate::Command::end())
+                    }
+                }
+            },
+            StateDummy,
+            &config,
+        )
+        .await;
+
+        let elapsed = start.elapsed();
+        result.unwrap();
+        // Without max_interval cap: 50ms + 5000ms = 5050ms
+        // With max_interval cap: 50ms + 80ms = 130ms (plus some overhead)
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "max_interval capping should prevent very long waits, elapsed: {elapsed:?}"
+        );
+    }
 }
 
 // Rust guideline compliant 2026-05-20
