@@ -394,7 +394,7 @@ impl<S: State> CompiledGraph<S> {
         tokio::spawn(async move {
             while let Some(event) = pregel_rx.recv().await {
                 if emitter_clone.should_emit(&event) {
-                    let _ = emitter_clone.emit(event).await;
+                    emitter_clone.emit(event).await;
                 }
             }
         });
@@ -408,7 +408,7 @@ impl<S: State> CompiledGraph<S> {
                     state: pregel.snapshot_state(),
                     step,
                 };
-                let _ = emitter.emit(event).await;
+                emitter.emit(event).await;
             }
 
             let result = pregel.execute_superstep().await?;
@@ -417,7 +417,7 @@ impl<S: State> CompiledGraph<S> {
 
         // Emit End event with the final state
         let final_state = pregel.into_state();
-        let _ = emitter
+        emitter
             .emit(StreamEvent::End {
                 output: final_state.clone(),
             })

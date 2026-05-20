@@ -331,16 +331,13 @@ impl<S: State> EventEmitter<S> {
         &self.mode
     }
 
-    /// Emit an event to the stream
+    /// Emit an event to the stream.
     ///
-    /// # Errors
-    ///
-    /// Returns an error if the channel is closed
-    pub async fn emit(
-        &self,
-        event: StreamEvent<S>,
-    ) -> Result<(), tokio::sync::mpsc::error::SendError<StreamEvent<S>>> {
-        self.tx.send(event).await
+    /// Silently drops the event if the receiver has been closed,
+    /// matching the design intent that stream consumers may disconnect
+    /// at any time without disrupting execution.
+    pub async fn emit(&self, event: StreamEvent<S>) {
+        let _ = self.tx.send(event).await;
     }
 
     #[must_use]
@@ -589,7 +586,7 @@ pub async fn call_llm_streaming<S: State, M: crate::llm::ChatModel>(
         };
 
         if emitter.should_emit(&event) {
-            let _ = emitter.emit(event).await;
+            emitter.emit(event).await;
         }
     }
 
