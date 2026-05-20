@@ -124,16 +124,4 @@ fn test_heartbeat_default() {
     assert_eq!(result, Ok(()));
 }
 
-#[test]
-fn test_stream_writer_new() {
-    let writer = juncture_core::StreamWriter::new();
-    let _ = writer;
-}
-
-#[test]
-fn test_stream_writer_default() {
-    let writer = juncture_core::StreamWriter::default();
-    let _ = writer;
-}
-
 // Rust guideline compliant 2026-05-18

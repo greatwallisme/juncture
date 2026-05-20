@@ -311,8 +311,8 @@ impl<S: State> EventEmitter<S> {
     }
 
     #[must_use]
-    pub fn stream_writer(&self, node: String) -> StreamEventWriter<S> {
-        StreamEventWriter::new(self.tx.clone(), node, self.mode.clone())
+    pub fn stream_writer(&self, node: String) -> StreamWriter<S> {
+        StreamWriter::new(self.tx.clone(), node, self.mode.clone())
     }
 
     #[must_use]
@@ -389,14 +389,14 @@ impl<S: State> EventEmitter<S> {
 /// The writer carries a sender channel, the current node name, stream mode,
 /// and namespace stack for subgraph isolation.
 #[derive(Clone)]
-pub struct StreamEventWriter<S: State> {
+pub struct StreamWriter<S: State> {
     tx: Option<tokio::sync::mpsc::Sender<StreamEvent<S>>>,
     node: String,
     mode: StreamMode,
     ns: Vec<String>,
 }
 
-impl<S: State> StreamEventWriter<S> {
+impl<S: State> StreamWriter<S> {
     /// Create a new writer backed by a real channel
     #[must_use]
     pub const fn new(
@@ -460,9 +460,9 @@ impl<S: State> StreamEventWriter<S> {
     }
 }
 
-impl<S: State> std::fmt::Debug for StreamEventWriter<S> {
+impl<S: State> std::fmt::Debug for StreamWriter<S> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("StreamEventWriter")
+        f.debug_struct("StreamWriter")
             .field("tx", &self.tx.is_some())
             .field("node", &self.node)
             .field("mode", &self.mode)

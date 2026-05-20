@@ -35,9 +35,6 @@ pub struct Runtime<C: Clone + Send + Sync + 'static = ()> {
     /// Optional cross-thread persistent storage
     pub store: Option<Arc<dyn RuntimeStore>>,
 
-    /// Stream writer for events
-    pub stream_writer: StreamWriter,
-
     /// Heartbeat mechanism for long-running nodes
     pub heartbeat: Heartbeat,
 
@@ -59,7 +56,6 @@ where
         f.debug_struct("Runtime")
             .field("context", &self.context)
             .field("store", &self.store)
-            .field("stream_writer", &self.stream_writer)
             .field("heartbeat", &self.heartbeat)
             .field("previous", &self.previous)
             .field("execution_info", &self.execution_info)
@@ -79,7 +75,6 @@ impl<C: Clone + Send + Sync + 'static> Runtime<C> {
         Self {
             context: C::default(),
             store: None,
-            stream_writer: StreamWriter::new(),
             heartbeat: Heartbeat::new(heartbeat_tx),
             previous: None,
             execution_info: None,
@@ -94,7 +89,6 @@ impl<C: Clone + Send + Sync + 'static> Runtime<C> {
         Self {
             context,
             store: None,
-            stream_writer: StreamWriter::new(),
             heartbeat: Heartbeat::new(heartbeat_tx),
             previous: None,
             execution_info: None,
@@ -144,28 +138,6 @@ where
 /// `RuntimeStore` operations will be implemented in Phase 8 according to
 /// the design document at `design/10-store.md`.
 pub trait RuntimeStore: Send + Sync + 'static + std::fmt::Debug {}
-
-/// Stream writer for graph events
-///
-/// Handles streaming events to consumers during graph execution.
-#[derive(Clone, Debug)]
-pub struct StreamWriter {
-    _private: (),
-}
-
-impl StreamWriter {
-    /// Create a new stream writer
-    #[must_use]
-    pub const fn new() -> Self {
-        Self { _private: () }
-    }
-}
-
-impl Default for StreamWriter {
-    fn default() -> Self {
-        Self::new()
-    }
-}
 
 /// Heartbeat mechanism for long-running nodes
 ///

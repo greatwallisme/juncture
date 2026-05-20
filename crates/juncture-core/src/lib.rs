@@ -148,7 +148,7 @@ pub use pregel::{
     TimeoutPolicy, TriggerToNodes, apply_writes, compute_next_tasks, execute_superstep,
 };
 pub use runtime::{
-    ExecutionInfo, Heartbeat, ManagedValues, RunControl, Runtime, RuntimeStore, StreamWriter,
+    ExecutionInfo, Heartbeat, ManagedValues, RunControl, Runtime, RuntimeStore,
 };
 pub use send::Send;
 pub use state::{
@@ -164,8 +164,8 @@ pub use store::{
 };
 pub use stream::{
     BatchTransformer, DebugEvent, EventEmitter, FilterFieldsTransformer, JsonParseTransformer,
-    StreamChannel, StreamConfig, StreamEvent, StreamEventWriter, StreamMode, StreamPart,
-    StreamResumption, StreamTransformer, TaskEventType, ToolsEvent,
+    StreamChannel, StreamConfig, StreamEvent, StreamMode, StreamPart, StreamResumption,
+    StreamTransformer, StreamWriter, TaskEventType, ToolsEvent,
 };
 pub use subgraph::{
     StateSubset, SubgraphConfig, SubgraphMount, SubgraphNode, SubgraphPersistence,
