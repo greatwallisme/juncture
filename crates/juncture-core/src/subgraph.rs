@@ -3,7 +3,14 @@
 //! Provides types and utilities for embedding graphs as nodes within other graphs.
 //! Subgraphs enable modular composition and reusable graph components.
 
-use crate::{State, command::Command, config::RunnableConfig, error::JunctureError, node::Node};
+use crate::{
+    State,
+    checkpoint::CHECKPOINT_NS_SEPARATOR,
+    command::Command,
+    config::RunnableConfig,
+    error::JunctureError,
+    node::Node,
+};
 use std::sync::Arc;
 
 /// Compile-time constraint for shared-state subgraph mode
@@ -237,10 +244,14 @@ impl<S: State, Sub: State> Node<S> for SubgraphNode<S, Sub> {
             // Generate unique invocation ID for this subgraph execution
             let invocation_id = uuid::Uuid::new_v4().to_string();
 
-            // Build child namespace: parent_ns + "|" + node_name + ":" + invocation_id
+            // Build child namespace using CHECKPOINT_NS_SEPARATOR between nesting levels
             let child_ns = config.checkpoint_ns.as_ref().map_or_else(
                 || format!("{name}:{invocation_id}"),
-                |parent_ns| format!("{parent_ns}|{name}:{invocation_id}"),
+                |parent_ns| {
+                    format!(
+                        "{parent_ns}{CHECKPOINT_NS_SEPARATOR}{name}:{invocation_id}"
+                    )
+                },
             );
 
             // Create child config with updated namespace and resume values from parent

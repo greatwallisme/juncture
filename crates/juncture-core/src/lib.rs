@@ -117,7 +117,8 @@ macro_rules! interrupt_with_ctx {
 
 pub use chat::{ChatAnthropic, ChatOllama, ChatOpenAI};
 pub use checkpoint::{
-    CheckpointNamespace, CheckpointSaver, NamespaceSegment, generate_checkpoint_id,
+    CHECKPOINT_NS_SEPARATOR, CheckpointNamespace, CheckpointSaver, NamespaceSegment,
+    generate_checkpoint_id,
 };
 pub use client::{
     AuthConfig, ClientError, GraphClient, InvokeConfig, JunctureClient, StateSnapshot, Thread,

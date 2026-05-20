@@ -12,6 +12,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::RunnableConfig;
 
+/// Separator used between namespace segments in checkpoint namespace strings.
+///
+/// The pipe character `|` is used instead of colon `:` to avoid ambiguity
+/// with UUID v6 string representation which already contains colons.
+/// See design doc 04-checkpoint.md, Implementation Note C-04-5.
+pub const CHECKPOINT_NS_SEPARATOR: &str = "|";
+
 /// Checkpoint operation errors
 ///
 /// Represents all possible errors that can occur during checkpoint operations.
@@ -68,7 +75,7 @@ impl From<serde_json::Error> for CheckpointError {
 ///
 /// assert_eq!(root_ns.as_str(), "");
 /// assert_eq!(child_ns.as_str(), "agent_a");
-/// assert_eq!(grandchild_ns.as_str(), "agent_a:step_1");
+/// assert_eq!(grandchild_ns.as_str(), "agent_a|step_1");
 /// ```
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub struct CheckpointNamespace {
@@ -118,11 +125,11 @@ impl CheckpointNamespace {
 
     /// Convert to string representation
     ///
-    /// Uses `|` as the separator between namespace segments as per
-    /// design specification 07-026.
+    /// Uses [`CHECKPOINT_NS_SEPARATOR`] as the separator between namespace segments
+    /// as per design doc 04-checkpoint.md, Implementation Note C-04-5.
     #[must_use]
     pub fn as_str(&self) -> String {
-        self.segments.join("|")
+        self.segments.join(CHECKPOINT_NS_SEPARATOR)
     }
 
     /// Convert to string representation (alias for `as_str`)
@@ -140,13 +147,18 @@ impl CheckpointNamespace {
     }
 
     /// Parse from string representation
+    ///
+    /// Splits on [`CHECKPOINT_NS_SEPARATOR`] to reconstruct namespace segments.
     #[must_use]
     pub fn parse(s: &str) -> Self {
         if s.is_empty() {
             Self::root()
         } else {
             Self {
-                segments: s.split('|').map(String::from).collect(),
+                segments: s
+                    .split(CHECKPOINT_NS_SEPARATOR)
+                    .map(String::from)
+                    .collect(),
             }
         }
     }
