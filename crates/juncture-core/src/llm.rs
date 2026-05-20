@@ -345,13 +345,10 @@ where
 
     async fn stream(
         &self,
-        _messages: &[Message],
-        _options: Option<&CallOptions>,
+        messages: &[Message],
+        options: Option<&CallOptions>,
     ) -> Result<BoxStream<'_, Result<MessageChunk, LlmError>>, LlmError> {
-        // Streaming not yet supported for structured output
-        Err(LlmError::InvalidResponse(
-            "Streaming not supported for structured output".to_string(),
-        ))
+        self.inner.stream(messages, options).await
     }
 
     fn bind_tools(&self, tools: Vec<ToolDefinition>) -> Self {
