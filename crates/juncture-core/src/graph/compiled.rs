@@ -21,6 +21,35 @@ use indexmap::IndexMap;
 use std::{pin::Pin, sync::Arc};
 use tokio::sync::mpsc;
 
+/// Bounded channel capacity for Messages streaming mode.
+///
+/// Messages mode handles high-throughput LLM token chunks that arrive rapidly,
+/// so it needs a larger buffer to avoid unnecessary backpressure stalls.
+/// Per design doc 05-streaming section 7.3.
+const CHANNEL_CAPACITY_MESSAGES: usize = 256;
+
+/// Default bounded channel capacity for all non-Messages streaming modes.
+///
+/// Modes like Values, Updates, Debug, etc. produce far fewer events per
+/// superstep than Messages mode, so a smaller buffer suffices while still
+/// providing backpressure against runaway producers.
+const CHANNEL_CAPACITY_DEFAULT: usize = 32;
+
+/// Determine the channel capacity based on the stream mode.
+///
+/// Returns [`CHANNEL_CAPACITY_MESSAGES`] (256) for Messages mode and
+/// [`CHANNEL_CAPACITY_DEFAULT`] (32) for all other modes. Multi mode uses
+/// the larger capacity if any sub-mode is Messages.
+fn stream_capacity(mode: &StreamMode) -> usize {
+    match mode {
+        StreamMode::Messages => CHANNEL_CAPACITY_MESSAGES,
+        StreamMode::Multi(modes) if modes.iter().any(|m| matches!(m, StreamMode::Messages)) => {
+            CHANNEL_CAPACITY_MESSAGES
+        }
+        _ => CHANNEL_CAPACITY_DEFAULT,
+    }
+}
+
 /// Compiled and validated graph ready for execution
 ///
 /// This is the output of [`StateGraph::compile`] and contains all information
@@ -232,9 +261,10 @@ impl<S: State> CompiledGraph<S> {
 
         let num_fields = 64;
 
-        // Create channel for Result<StreamEvent, JunctureError>
-        // Using unbounded channel for non-blocking sends
-        let (tx, rx) = mpsc::unbounded_channel();
+        // Sized channel provides backpressure: 256 for Messages mode (high-throughput
+        // LLM token chunks), 32 for all other modes. Per design doc 05-streaming 7.3.
+        let capacity = stream_capacity(&mode);
+        let (tx, rx) = mpsc::channel(capacity);
 
         // Create Pregel loop
         let mut pregel = PregelLoop::new(
@@ -245,7 +275,10 @@ impl<S: State> CompiledGraph<S> {
             num_fields,
         )?;
 
-        // Create a separate channel for PregelLoop's internal stream events
+        // Create a separate channel for PregelLoop's internal stream events.
+        // Unbounded is acceptable here because this is an internal relay between
+        // PregelLoop (sync send) and the forwarding task; the output channel
+        // above provides the actual backpressure.
         let (pregel_tx, mut pregel_rx) = mpsc::unbounded_channel();
         pregel.set_stream_sender(pregel_tx);
 
@@ -262,7 +295,7 @@ impl<S: State> CompiledGraph<S> {
                 while let Some(event) = pregel_rx.recv().await {
                     // Filter events based on stream mode using EventEmitter's should_emit
                     if emitter.should_emit(&event) {
-                        let _ = tx_forward.send(Ok(event));
+                        let _ = tx_forward.send(Ok(event)).await;
                     }
                 }
             });
@@ -277,7 +310,7 @@ impl<S: State> CompiledGraph<S> {
                         state: pregel.snapshot_state(),
                         step,
                     };
-                    let _ = tx.send(Ok(event));
+                    let _ = tx.send(Ok(event)).await;
                 }
 
                 // Execute superstep
@@ -286,21 +319,25 @@ impl<S: State> CompiledGraph<S> {
                         // Process results and emit events
                         if let Err(e) = pregel.after_tick(result).await {
                             // Emit final state before error
-                            let _ = tx.send(Ok(StreamEvent::End {
-                                output: pregel.snapshot_state(),
-                            }));
+                            let _ = tx
+                                .send(Ok(StreamEvent::End {
+                                    output: pregel.snapshot_state(),
+                                }))
+                                .await;
                             // Send error through channel
-                            let _ = tx.send(Err(e));
+                            let _ = tx.send(Err(e)).await;
                             return;
                         }
                     }
                     Err(e) => {
                         // Emit final state before error
-                        let _ = tx.send(Ok(StreamEvent::End {
-                            output: pregel.snapshot_state(),
-                        }));
+                        let _ = tx
+                            .send(Ok(StreamEvent::End {
+                                output: pregel.snapshot_state(),
+                            }))
+                            .await;
                         // Send error through channel
-                        let _ = tx.send(Err(e));
+                        let _ = tx.send(Err(e)).await;
                         return;
                     }
                 }
@@ -308,12 +345,14 @@ impl<S: State> CompiledGraph<S> {
 
             // Send End event with final state
             let final_state = pregel.into_state();
-            let _ = tx.send(Ok(StreamEvent::End {
-                output: final_state,
-            }));
+            let _ = tx
+                .send(Ok(StreamEvent::End {
+                    output: final_state,
+                }))
+                .await;
         });
 
-        // Return stream using futures::stream::unfold to convert UnboundedReceiver to Stream
+        // Return stream using futures::stream::unfold to convert Receiver to Stream
         Ok(Box::pin(stream::unfold(rx, |mut rx| async move {
             rx.recv().await.map(|item| (item, rx))
         })))
@@ -699,10 +738,15 @@ impl<S: State> CompiledGraph<S> {
             pregel.set_checkpointer(cp);
         }
 
-        // Create channel for Result<StreamEvent, JunctureError>
-        let (tx, rx) = mpsc::unbounded_channel();
+        // Sized channel provides backpressure: 256 for Messages mode (high-throughput
+        // LLM token chunks), 32 for all other modes. Per design doc 05-streaming 7.3.
+        let capacity = stream_capacity(&mode);
+        let (tx, rx) = mpsc::channel(capacity);
 
-        // Create a separate channel for PregelLoop's internal stream events
+        // Create a separate channel for PregelLoop's internal stream events.
+        // Unbounded is acceptable here because this is an internal relay between
+        // PregelLoop (sync send) and the forwarding task; the output channel
+        // above provides the actual backpressure.
         let (pregel_tx, mut pregel_rx) = mpsc::unbounded_channel();
         pregel.set_stream_sender(pregel_tx);
 
@@ -718,7 +762,7 @@ impl<S: State> CompiledGraph<S> {
 
                 while let Some(event) = pregel_rx.recv().await {
                     if emitter.should_emit(&event) {
-                        let _ = tx_forward.send(Ok(event));
+                        let _ = tx_forward.send(Ok(event)).await;
                     }
                 }
             });
@@ -733,7 +777,7 @@ impl<S: State> CompiledGraph<S> {
                         state: pregel.snapshot_state(),
                         step,
                     };
-                    let _ = tx.send(Ok(event));
+                    let _ = tx.send(Ok(event)).await;
                 }
 
                 // Execute superstep
@@ -741,19 +785,23 @@ impl<S: State> CompiledGraph<S> {
                     Ok(result) => {
                         if let Err(e) = pregel.after_tick(result).await {
                             // Emit final state before error
-                            let _ = tx.send(Ok(StreamEvent::End {
-                                output: pregel.snapshot_state(),
-                            }));
-                            let _ = tx.send(Err(e));
+                            let _ = tx
+                                .send(Ok(StreamEvent::End {
+                                    output: pregel.snapshot_state(),
+                                }))
+                                .await;
+                            let _ = tx.send(Err(e)).await;
                             return;
                         }
                     }
                     Err(e) => {
                         // Emit final state before error
-                        let _ = tx.send(Ok(StreamEvent::End {
-                            output: pregel.snapshot_state(),
-                        }));
-                        let _ = tx.send(Err(e));
+                        let _ = tx
+                            .send(Ok(StreamEvent::End {
+                                output: pregel.snapshot_state(),
+                            }))
+                            .await;
+                        let _ = tx.send(Err(e)).await;
                         return;
                     }
                 }
@@ -761,12 +809,14 @@ impl<S: State> CompiledGraph<S> {
 
             // Send End event with final state
             let final_state = pregel.into_state();
-            let _ = tx.send(Ok(StreamEvent::End {
-                output: final_state,
-            }));
+            let _ = tx
+                .send(Ok(StreamEvent::End {
+                    output: final_state,
+                }))
+                .await;
         });
 
-        // Return stream using futures::stream::unfold to convert UnboundedReceiver to Stream
+        // Return stream using futures::stream::unfold to convert Receiver to Stream
         Ok(Box::pin(stream::unfold(rx, |mut receiver| async move {
             receiver.recv().await.map(|item| (item, receiver))
         })))
