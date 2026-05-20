@@ -252,7 +252,13 @@ pub async fn execute_superstep<S: State>(
         }
     }
 
-    Ok((SuperstepResult { task_outputs }, interrupt_rx))
+    Ok((
+        SuperstepResult {
+            task_outputs,
+            bubble_ups: Vec::new(),
+        },
+        interrupt_rx,
+    ))
 }
 
 /// Match resume values against pending interrupts using the design-specified algorithm.

@@ -12,7 +12,7 @@ use crate::{
         context::ExecutionContext,
         runner::execute_superstep,
         scheduler::{FieldVersionTracker, VersionsSeen, compute_next_tasks},
-        types::{LoopStatus, PendingTask, SuperstepResult},
+        types::{BubbleUp, LoopStatus, PendingTask, SuperstepResult},
     },
     stream::{DebugEvent, StreamEvent},
 };
@@ -673,6 +673,11 @@ impl<S: State> PregelLoop<S> {
             return Ok(());
         }
 
+        // Handle BubbleUp events from subgraph execution.
+        if result.has_bubble_ups() && self.handle_bubble_ups(&result.bubble_ups) {
+            return Ok(());
+        }
+
         // Check interrupt_after after computing next tasks
         if let Some(ref interrupt_after_nodes) = self.runnable_config.interrupt_after {
             let interrupt_after_set: HashSet<String> =
@@ -745,6 +750,94 @@ impl<S: State> PregelLoop<S> {
         }
 
         Ok(())
+    }
+
+    /// Process `BubbleUp` events from subgraph execution
+    ///
+    /// Handles interrupt propagation, drain propagation, and parent command
+    /// routing from nested subgraph execution.
+    ///
+    /// Returns `true` if the parent loop should stop (interrupt or drain occurred),
+    /// `false` if execution should continue.
+    fn handle_bubble_ups(&mut self, bubble_ups: &[BubbleUp<S>]) -> bool {
+        let mut should_stop = false;
+
+        for bubble_up in bubble_ups {
+            match bubble_up {
+                BubbleUp::Interrupt(graph_interrupt) => {
+                    self.handle_bubble_up_interrupt(graph_interrupt);
+                    should_stop = true;
+                }
+                BubbleUp::Drained(drained) => {
+                    self.handle_bubble_up_drained(drained);
+                    should_stop = true;
+                }
+                BubbleUp::ParentCommand(cmd) => {
+                    self.handle_bubble_up_parent_command(cmd);
+                }
+            }
+        }
+
+        should_stop
+    }
+
+    /// Handle a subgraph interrupt bubbling up to the parent graph
+    fn handle_bubble_up_interrupt(
+        &mut self,
+        graph_interrupt: &crate::pregel::types::GraphInterrupt,
+    ) {
+        tracing::debug!(
+            step = self.step,
+            num_signals = graph_interrupt.interrupts.len(),
+            interrupt_step = graph_interrupt.step,
+            "Subgraph interrupt bubbling up to parent"
+        );
+
+        self.pending_interrupts
+            .clone_from(&graph_interrupt.interrupts);
+        self.status = LoopStatus::InterruptAfter(graph_interrupt.interrupts.clone());
+
+        if let Some(ref tx) = self.stream_tx {
+            for signal in &graph_interrupt.interrupts {
+                let event = StreamEvent::Interrupt {
+                    node: signal
+                        .payload
+                        .get("node")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("subgraph")
+                        .to_string(),
+                    payload: signal.payload.clone(),
+                    resumable: true,
+                    ns: Vec::new(),
+                };
+                let _ = tx.send(event);
+            }
+        }
+    }
+
+    /// Handle a subgraph drain bubbling up to the parent graph
+    fn handle_bubble_up_drained(&mut self, drained: &crate::pregel::types::GraphDrained) {
+        tracing::debug!(
+            step = self.step,
+            reason = %drained.reason,
+            "Subgraph drained bubbling up to parent"
+        );
+
+        self.status = LoopStatus::Drained;
+    }
+
+    /// Handle a subgraph parent command bubbling up to the parent graph
+    fn handle_bubble_up_parent_command(&mut self, cmd: &crate::Command<S>) {
+        tracing::debug!(
+            step = self.step,
+            goto = ?cmd.goto,
+            "Subgraph parent command bubbling up"
+        );
+
+        if let Some(ref update) = cmd.update {
+            let changed = self.state.apply(update.clone());
+            self.field_versions.bump_all(&changed);
+        }
     }
 
     /// Consume the loop and return the final state
@@ -996,6 +1089,140 @@ mod tests {
     fn test_run_control_default() {
         let rc = RunControl::default();
         assert!(!rc.is_drain_requested());
+    }
+
+    #[test]
+    fn test_handle_bubble_up_interrupt_sets_status() {
+        let state = TestState;
+        let mut nodes = IndexMap::new();
+        nodes.insert(
+            "test_node".to_string(),
+            NodeFnCommand(|_s| async move { Ok(Command::end()) }).into_node("test_node"),
+        );
+
+        let trigger_table = TriggerTable::new();
+        let config = crate::config::RunnableConfig::new();
+
+        let mut loop_ = PregelLoop::new(state, nodes, trigger_table, config, 0).unwrap();
+
+        let signals = vec![crate::interrupt::InterruptSignal {
+            index: 0,
+            id: Some("sub-int-0".to_string()),
+            payload: serde_json::json!({"node": "subgraph_node"}),
+        }];
+        let bubble_ups = vec![BubbleUp::Interrupt(crate::pregel::types::GraphInterrupt {
+            interrupts: signals,
+            step: 2,
+        })];
+
+        let should_stop = loop_.handle_bubble_ups(&bubble_ups);
+
+        assert!(should_stop);
+        assert!(loop_.status.is_interrupted());
+        assert_eq!(loop_.pending_interrupts.len(), 1);
+        assert_eq!(loop_.pending_interrupts[0].id.as_deref(), Some("sub-int-0"));
+    }
+
+    #[test]
+    fn test_handle_bubble_up_drained_sets_status() {
+        let state = TestState;
+        let mut nodes = IndexMap::new();
+        nodes.insert(
+            "test_node".to_string(),
+            NodeFnCommand(|_s| async move { Ok(Command::end()) }).into_node("test_node"),
+        );
+
+        let trigger_table = TriggerTable::new();
+        let config = crate::config::RunnableConfig::new();
+
+        let mut loop_ = PregelLoop::new(state, nodes, trigger_table, config, 0).unwrap();
+
+        let bubble_ups = vec![BubbleUp::Drained(crate::pregel::types::GraphDrained {
+            reason: "subgraph completed".to_string(),
+        })];
+
+        let should_stop = loop_.handle_bubble_ups(&bubble_ups);
+
+        assert!(should_stop);
+        assert!(loop_.status.is_terminal());
+        assert!(matches!(loop_.status, LoopStatus::Drained));
+    }
+
+    #[test]
+    fn test_handle_bubble_up_parent_command_does_not_stop() {
+        let state = TestState;
+        let mut nodes = IndexMap::new();
+        nodes.insert(
+            "test_node".to_string(),
+            NodeFnCommand(|_s| async move { Ok(Command::end()) }).into_node("test_node"),
+        );
+
+        let trigger_table = TriggerTable::new();
+        let config = crate::config::RunnableConfig::new();
+
+        let mut loop_ = PregelLoop::new(state, nodes, trigger_table, config, 0).unwrap();
+
+        let bubble_ups = vec![BubbleUp::ParentCommand(Command::end())];
+
+        let should_stop = loop_.handle_bubble_ups(&bubble_ups);
+
+        assert!(!should_stop);
+        assert!(loop_.status.is_running());
+    }
+
+    #[test]
+    fn test_handle_bubble_up_empty_does_nothing() {
+        let state = TestState;
+        let mut nodes = IndexMap::new();
+        nodes.insert(
+            "test_node".to_string(),
+            NodeFnCommand(|_s| async move { Ok(Command::end()) }).into_node("test_node"),
+        );
+
+        let trigger_table = TriggerTable::new();
+        let config = crate::config::RunnableConfig::new();
+
+        let mut loop_ = PregelLoop::new(state, nodes, trigger_table, config, 0).unwrap();
+
+        let should_stop = loop_.handle_bubble_ups(&[]);
+
+        assert!(!should_stop);
+        assert!(loop_.status.is_running());
+    }
+
+    #[test]
+    fn test_handle_bubble_up_interrupt_takes_priority_over_drain() {
+        let state = TestState;
+        let mut nodes = IndexMap::new();
+        nodes.insert(
+            "test_node".to_string(),
+            NodeFnCommand(|_s| async move { Ok(Command::end()) }).into_node("test_node"),
+        );
+
+        let trigger_table = TriggerTable::new();
+        let config = crate::config::RunnableConfig::new();
+
+        let mut loop_ = PregelLoop::new(state, nodes, trigger_table, config, 0).unwrap();
+
+        let bubble_ups = vec![
+            BubbleUp::Drained(crate::pregel::types::GraphDrained {
+                reason: "drained".to_string(),
+            }),
+            BubbleUp::Interrupt(crate::pregel::types::GraphInterrupt {
+                interrupts: vec![crate::interrupt::InterruptSignal {
+                    index: 0,
+                    id: None,
+                    payload: serde_json::Value::Null,
+                }],
+                step: 1,
+            }),
+        ];
+
+        let should_stop = loop_.handle_bubble_ups(&bubble_ups);
+
+        assert!(should_stop);
+        // Interrupt is processed last, so status reflects the interrupt
+        assert!(loop_.status.is_interrupted());
     }
 
     #[derive(Clone, Debug)]

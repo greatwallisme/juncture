@@ -80,11 +80,17 @@ pub enum TaskTrigger {
 
 /// Result of executing one superstep
 ///
-/// Contains the outputs from all tasks executed in a single superstep.
+/// Contains the outputs from all tasks executed in a single superstep,
+/// as well as any subgraph propagation events that need to be handled
+/// by the parent `PregelLoop`.
 #[derive(Clone, Debug)]
 pub struct SuperstepResult<S: State> {
     /// Outputs from each completed task
     pub task_outputs: Vec<TaskOutput<S>>,
+
+    /// Subgraph propagation events (interrupts, drains, parent commands)
+    /// that bubble up from nested subgraph execution.
+    pub bubble_ups: Vec<BubbleUp<S>>,
 }
 
 /// Output from a single completed task
@@ -139,6 +145,7 @@ where
 ///
 /// Represents various outcomes that can occur when executing a subgraph,
 /// including interrupts, draining, and normal command returns.
+#[derive(Clone)]
 pub enum BubbleUp<S: State> {
     /// Human-in-the-loop interrupt occurred
     Interrupt(GraphInterrupt),
@@ -295,19 +302,26 @@ impl<S: State> SuperstepResult<S> {
     pub const fn empty() -> Self {
         Self {
             task_outputs: Vec::new(),
+            bubble_ups: Vec::new(),
         }
     }
 
-    /// Check if this superstep had any tasks
+    /// Check if this superstep had any tasks or bubble-up events
     #[must_use]
     pub const fn is_empty(&self) -> bool {
-        self.task_outputs.is_empty()
+        self.task_outputs.is_empty() && self.bubble_ups.is_empty()
     }
 
     /// Get the number of tasks in this superstep
     #[must_use]
     pub const fn len(&self) -> usize {
         self.task_outputs.len()
+    }
+
+    /// Check if there are any bubble-up events from subgraph execution
+    #[must_use]
+    pub const fn has_bubble_ups(&self) -> bool {
+        !self.bubble_ups.is_empty()
     }
 }
 

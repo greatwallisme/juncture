@@ -861,6 +861,7 @@ mod scheduler_tests {
     fn test_check_replace_conflicts_empty() {
         let result: SuperstepResult<TestState> = SuperstepResult {
             task_outputs: Vec::new(),
+            bubble_ups: Vec::new(),
         };
         let replace_fields = vec![0, 1];
         check_replace_conflicts(&result, &replace_fields).unwrap();
@@ -881,6 +882,7 @@ mod scheduler_tests {
 
         let result: SuperstepResult<TestState> = SuperstepResult {
             task_outputs: vec![task_output_a],
+            bubble_ups: Vec::new(),
         };
         let replace_fields = vec![0, 1];
         check_replace_conflicts(&result, &replace_fields).unwrap();
