@@ -501,6 +501,18 @@ impl<S: State> PregelLoop<S> {
         )
         .await?;
 
+        // Mark previously pending interrupts as processed in the scratchpad.
+        // This is critical for multi-interrupt scenarios where a node has several
+        // interrupt points and the user resumes with values for only a subset.
+        // On subsequent re-execution, already-handled interrupt positions receive
+        // a Null resume value via match_resume_to_interrupts -> scratchpad.get_null_resume(),
+        // allowing the node to skip past those interrupt points without re-interrupting.
+        for signal in &self.pending_interrupts {
+            if let Some(ref id) = signal.id {
+                self.scratchpad.mark_interrupt_processed(id);
+            }
+        }
+
         let duration = start.elapsed().as_millis();
         tracing::Span::current().record("juncture.step.duration_ms", duration);
 
@@ -1247,7 +1259,128 @@ mod tests {
 
     #[derive(Clone, Debug, Default)]
     struct TestUpdate;
+
+    /// Verify that the scratchpad is populated with interrupt IDs after
+    /// execute_superstep processes pending interrupts. This is the core
+    /// fix for review finding B-06-006: the scratchpad must track which
+    /// interrupts have been processed so that on re-execution, already-
+    /// handled interrupt points receive null-resume values instead of
+    /// re-interrupting.
+    #[tokio::test]
+    async fn test_scratchpad_populated_after_execute_superstep() {
+        let state = TestState;
+
+        let mut nodes = IndexMap::new();
+        nodes.insert(
+            "test_node".to_string(),
+            NodeFnCommand(|_s| async move { Ok(Command::end()) }).into_node("test_node"),
+        );
+
+        let trigger_table = TriggerTable::new();
+        let config = crate::config::RunnableConfig::new();
+
+        let mut loop_ = PregelLoop::new(state, nodes, trigger_table, config, 0).unwrap();
+
+        // Simulate pending interrupts from a previous cycle
+        loop_.pending_tasks = vec![PendingTask::pull(
+            uuid::Uuid::new_v4().to_string(),
+            "test_node".to_string(),
+        )];
+        loop_.pending_interrupts = vec![
+            crate::interrupt::InterruptSignal {
+                index: 0,
+                id: Some("int-alpha".to_string()),
+                payload: serde_json::Value::Null,
+            },
+            crate::interrupt::InterruptSignal {
+                index: 1,
+                id: Some("int-beta".to_string()),
+                payload: serde_json::Value::Null,
+            },
+        ];
+
+        // Before execute_superstep, scratchpad is empty
+        assert!(
+            !loop_.scratchpad.is_interrupt_processed("int-alpha"),
+            "scratchpad should be empty before superstep"
+        );
+        assert!(
+            !loop_.scratchpad.is_interrupt_processed("int-beta"),
+            "scratchpad should be empty before superstep"
+        );
+
+        let result = loop_.execute_superstep().await;
+        assert!(result.is_ok(), "execute_superstep should succeed");
+
+        // After execute_superstep, pending interrupts are marked as processed
+        assert!(
+            loop_.scratchpad.is_interrupt_processed("int-alpha"),
+            "int-alpha should be marked as processed after superstep"
+        );
+        assert!(
+            loop_.scratchpad.is_interrupt_processed("int-beta"),
+            "int-beta should be marked as processed after superstep"
+        );
+        assert!(
+            !loop_.scratchpad.is_interrupt_processed("int-gamma"),
+            "unrelated interrupt should not be marked as processed"
+        );
+    }
+
+    /// Verify that the scratchpad accumulates across multiple supersteps,
+    /// so interrupts from different cycles are all tracked.
+    #[tokio::test]
+    async fn test_scratchpad_accumulates_across_supersteps() {
+        let state = TestState;
+
+        let mut nodes = IndexMap::new();
+        nodes.insert(
+            "test_node".to_string(),
+            NodeFnCommand(|_s| async move { Ok(Command::end()) }).into_node("test_node"),
+        );
+
+        let trigger_table = TriggerTable::new();
+        let config = crate::config::RunnableConfig::new();
+
+        let mut loop_ = PregelLoop::new(state, nodes, trigger_table, config, 0).unwrap();
+
+        // First superstep with interrupt "int-1"
+        loop_.pending_tasks = vec![PendingTask::pull(
+            uuid::Uuid::new_v4().to_string(),
+            "test_node".to_string(),
+        )];
+        loop_.pending_interrupts = vec![crate::interrupt::InterruptSignal {
+            index: 0,
+            id: Some("int-1".to_string()),
+            payload: serde_json::Value::Null,
+        }];
+
+        let _ = loop_.execute_superstep().await;
+        let _ = loop_.after_tick(SuperstepResult::empty()).await;
+
+        // Second superstep with interrupt "int-2"
+        loop_.pending_tasks = vec![PendingTask::pull(
+            uuid::Uuid::new_v4().to_string(),
+            "test_node".to_string(),
+        )];
+        loop_.pending_interrupts = vec![crate::interrupt::InterruptSignal {
+            index: 0,
+            id: Some("int-2".to_string()),
+            payload: serde_json::Value::Null,
+        }];
+
+        let _ = loop_.execute_superstep().await;
+
+        // Both interrupt IDs should be tracked
+        assert!(
+            loop_.scratchpad.is_interrupt_processed("int-1"),
+            "int-1 from first superstep should still be tracked"
+        );
+        assert!(
+            loop_.scratchpad.is_interrupt_processed("int-2"),
+            "int-2 from second superstep should be tracked"
+        );
+    }
 }
 
-// Rust guideline compliant 2026-05-20
-// Rust guideline compliant 2026-05-20
+// Rust guideline compliant 2026-05-21
