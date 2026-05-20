@@ -281,7 +281,7 @@ pub trait CheckpointSaver: Send + Sync + 'static {
 /// including channel values, versions, pending tasks, and metadata.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Checkpoint {
-    /// Unique checkpoint identifier (UUID v4)
+    /// Unique checkpoint identifier (UUID v6, time-ordered)
     pub id: String,
 
     /// Serialized channel values (JSON or `MessagePack`)
@@ -548,4 +548,26 @@ pub struct PregelTaskInfo {
     pub interrupts: Vec<serde_json::Value>,
 }
 
-// Rust guideline compliant 2026-05-20
+/// Generate a new time-ordered checkpoint ID using UUID v6.
+///
+/// UUID v6 reorders the timestamp bits from UUID v1 for lexicographic
+/// sortability, making checkpoint IDs suitable for range queries and
+/// time-ordered iteration without a separate timestamp column.
+///
+/// The node ID is derived from random bytes to ensure uniqueness across
+/// processes without requiring a persistent MAC address.
+///
+/// # Panics
+///
+/// Will not panic under normal circumstances. The uuid crate handles
+/// timestamp generation internally using a shared atomic context.
+#[must_use]
+pub fn generate_checkpoint_id() -> String {
+    // Random 6-byte node ID avoids the need for a persistent IEEE 802
+    // MAC address while still guaranteeing global uniqueness when
+    // combined with the timestamp and monotonic counter.
+    let node_id: [u8; 6] = rand::random();
+    uuid::Uuid::now_v6(&node_id).to_string()
+}
+
+// Rust guideline compliant 2026-05-21
