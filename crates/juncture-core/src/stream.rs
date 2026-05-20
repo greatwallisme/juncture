@@ -276,6 +276,7 @@ pub trait StreamTransformer: Send + Sync + 'static {
 pub struct EventEmitter<S: State> {
     pub tx: tokio::sync::mpsc::Sender<StreamEvent<S>>,
     pub mode: StreamMode,
+    ns: Vec<String>,
     _phantom: std::marker::PhantomData<S>,
 }
 
@@ -284,6 +285,7 @@ impl<S: State> std::fmt::Debug for EventEmitter<S> {
         f.debug_struct("EventEmitter")
             .field("tx", &"<mpsc::Sender>")
             .field("mode", &self.mode)
+            .field("ns", &self.ns)
             .finish()
     }
 }
@@ -294,8 +296,31 @@ impl<S: State> EventEmitter<S> {
         Self {
             tx,
             mode,
+            ns: Vec::new(),
             _phantom: std::marker::PhantomData,
         }
+    }
+
+    /// Create a child emitter with an additional subgraph namespace segment.
+    ///
+    /// Used by subgraph execution to namespace streaming events,
+    /// allowing consumers to distinguish events from nested subgraphs.
+    #[must_use]
+    pub fn with_subgraph_ns(&self, ns_segment: String) -> Self {
+        let mut new_ns = self.ns.clone();
+        new_ns.push(ns_segment);
+        Self {
+            tx: self.tx.clone(),
+            mode: self.mode.clone(),
+            ns: new_ns,
+            _phantom: std::marker::PhantomData,
+        }
+    }
+
+    /// Return the current namespace stack.
+    #[must_use]
+    pub fn ns(&self) -> &[String] {
+        &self.ns
     }
 
     /// Emit an event to the stream
