@@ -858,6 +858,12 @@ impl<S: State> PregelLoop<S> {
         self.step
     }
 
+    /// Get the unique run ID for this execution
+    #[must_use]
+    pub fn run_id(&self) -> &str {
+        &self.run_id
+    }
+
     /// Get the current status
     #[must_use]
     pub const fn status(&self) -> &LoopStatus {

@@ -184,8 +184,9 @@ impl<S: State> CompiledGraph<S> {
             pregel.after_tick(result).await?;
         }
 
-        // Extract step before consuming pregel
+        // Extract step and run_id before consuming pregel
         let steps = pregel.step();
+        let run_id = pregel.run_id().to_string();
 
         // Return final state
         let final_state = pregel.into_state();
@@ -195,6 +196,7 @@ impl<S: State> CompiledGraph<S> {
             interrupts: Vec::new(),
             metadata: GraphOutputMetadata {
                 steps,
+                run_id,
                 checkpoint_id: config.checkpoint_id.clone(),
                 budget_usage: None,
             },
@@ -410,11 +412,17 @@ impl<S: State> CompiledGraph<S> {
     {
         let num_fields = 64;
 
+        // Ensure run_id is populated; generate one if not provided.
+        let mut exec_config = config.clone();
+        if exec_config.run_id.is_none() {
+            exec_config.run_id = Some(uuid::Uuid::new_v4().to_string());
+        }
+
         let mut pregel = PregelLoop::new(
             input,
             self.inner.nodes.clone(),
             self.inner.trigger_table.clone(),
-            config.clone(),
+            exec_config,
             num_fields,
         )?;
 
@@ -547,9 +555,12 @@ impl<S: State> CompiledGraph<S> {
         let state: S = serde_json::from_value(tuple.checkpoint.channel_values)
             .map_err(|e| JunctureError::checkpoint(format!("failed to deserialize state: {e}")))?;
 
-        // Create a new config with resume value
+        // Create a new config with resume value and ensure run_id is populated.
         let mut resume_config = config.clone();
         resume_config.resume_value = Some(resume_value);
+        if resume_config.run_id.is_none() {
+            resume_config.run_id = Some(uuid::Uuid::new_v4().to_string());
+        }
 
         // Create Pregel loop with restored state
         let num_fields = 64; // Maximum number of fields
@@ -572,8 +583,9 @@ impl<S: State> CompiledGraph<S> {
             pregel.after_tick(result).await?;
         }
 
-        // Extract step before consuming pregel
+        // Extract step and run_id before consuming pregel
         let steps = pregel.step();
+        let run_id = pregel.run_id().to_string();
 
         // Return final state
         let final_state = pregel.into_state();
@@ -583,6 +595,7 @@ impl<S: State> CompiledGraph<S> {
             interrupts: Vec::new(),
             metadata: GraphOutputMetadata {
                 steps,
+                run_id,
                 checkpoint_id: config.checkpoint_id.clone(),
                 budget_usage: None,
             },
@@ -719,9 +732,12 @@ impl<S: State> CompiledGraph<S> {
         let state: S = serde_json::from_value(tuple.checkpoint.channel_values)
             .map_err(|e| JunctureError::checkpoint(format!("failed to deserialize state: {e}")))?;
 
-        // Create resume config
+        // Create resume config with run_id populated
         let mut resume_config = config.clone();
         resume_config.resume_value = Some(resume_value);
+        if resume_config.run_id.is_none() {
+            resume_config.run_id = Some(uuid::Uuid::new_v4().to_string());
+        }
 
         // Create Pregel loop with restored state
         let num_fields = 64;
@@ -1333,6 +1349,9 @@ pub struct InterruptInfo {
 pub struct GraphOutputMetadata {
     /// Number of supersteps executed
     pub steps: usize,
+
+    /// Unique run ID for this execution
+    pub run_id: String,
 
     /// Checkpoint ID if checkpointing was enabled
     pub checkpoint_id: Option<String>,

@@ -35,6 +35,14 @@ pub struct RunnableConfig {
     /// Graph name for observability (specified at graph construction time)
     pub graph_name: Option<String>,
 
+    /// Unique run identifier for logging, stream resumption, and cancellation.
+    ///
+    /// When `None`, the execution layer (`CompiledGraph::stream`, `invoke`, etc.)
+    /// generates a new `UUIDv4` automatically before creating the Pregel loop.
+    /// Callers may set this explicitly to correlate multiple operations with
+    /// the same run ID (e.g., for stream resumption or distributed tracing).
+    pub run_id: Option<String>,
+
     /// Checkpoint namespace (for subgraph isolation)
     pub checkpoint_ns: Option<String>,
 
@@ -85,6 +93,7 @@ impl std::fmt::Debug for RunnableConfig {
             .field("max_parallel_tasks", &self.max_parallel_tasks)
             .field("run_name", &self.run_name)
             .field("graph_name", &self.graph_name)
+            .field("run_id", &self.run_id)
             .field("checkpoint_ns", &self.checkpoint_ns)
             .field("cache", &self.cache)
             .field("tags", &self.tags)
