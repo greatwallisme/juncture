@@ -8,12 +8,12 @@ use std::pin::Pin;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use futures::{Stream, stream};
+use futures::{Stream, StreamExt, stream};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
 use crate::llm::{
-    CallOptions, ChatModel, Content, ContentPart, LlmError, Message, MessageChunk, Role,
+    CallOptions, ChatModel, Content, ContentPart, LlmError, Message, Role,
     TokenUsage, ToolCall, ToolChoice, ToolDefinition,
 };
 
@@ -312,16 +312,165 @@ impl ChatModel for ChatAnthropic {
         Ok(convert_api_response(api_response))
     }
 
+    #[allow(clippy::too_many_lines, clippy::redundant_clone, clippy::uninlined_format_args, reason = "Complex SSE stream parsing logic")]
     fn stream(
         &self,
-        _messages: &[Message],
-        _options: Option<&CallOptions>,
-    ) -> Pin<Box<dyn Stream<Item = Result<MessageChunk, LlmError>> + Send + '_>> {
-        Box::pin(stream::once(async {
-            Err(LlmError::Other(
-                "SSE streaming implementation pending".to_string(),
-            ))
-        }))
+        messages: &[Message],
+        options: Option<&CallOptions>,
+    ) -> Pin<Box<dyn Stream<Item = Result<crate::llm::MessageChunk, LlmError>> + Send + '_>> {
+        let model = options
+            .and_then(|o| o.model_override.as_ref())
+            .unwrap_or(&self.model);
+
+        let (system_msg, api_messages): (Vec<_>, Vec<_>) = messages
+            .iter()
+            .partition(|m| matches!(m.role, Role::System));
+
+        let system = system_msg
+            .first()
+            .and_then(|m| match &m.content {
+                Content::Text(text) => Some(text.clone()),
+                Content::MultiPart(_) => None,
+            })
+            .or_else(|| {
+                if system_msg.is_empty() {
+                    None
+                } else {
+                    Some(String::new())
+                }
+            });
+
+        let mut converted_messages = Vec::new();
+        let conversion_result: Result<(), LlmError> = (|| {
+            for m in &api_messages {
+                let content = convert_content(&m.content, &m.tool_calls)?;
+                converted_messages.push(AnthropicMessage {
+                    role: convert_role_to_anthropic(&m.role).to_string(),
+                    content,
+                });
+            }
+            Ok(())
+        })();
+
+        // If conversion failed, return a stream with the error
+        if let Err(e) = conversion_result {
+            return Box::pin(stream::once(async move { Err(e) }));
+        }
+
+        let request = AnthropicRequest {
+            model: model.clone(),
+            messages: converted_messages,
+            system,
+            max_tokens: options
+                .and_then(|o| o.max_tokens)
+                .unwrap_or(self.max_tokens),
+            temperature: options.and_then(|o| o.temperature).or(self.temperature),
+            top_p: options.and_then(|o| o.top_p).or(self.top_p),
+            stop_sequences: options.and_then(|o| o.stop_sequences.clone()),
+            tools: if self.tools.is_empty() {
+                None
+            } else {
+                Some(
+                    self.tools
+                        .iter()
+                        .map(|t| AnthropicTool {
+                            name: t.name.clone(),
+                            description: t.description.clone(),
+                            input_schema: t.parameters.clone(),
+                        })
+                        .collect(),
+                )
+            },
+            tool_choice: options
+                .and_then(|o| o.tool_choice.as_ref())
+                .map(Self::convert_tool_choice),
+            stream: true,
+        };
+
+        let api_key = self.api_key.clone();
+        let base_url = self.base_url.clone();
+        let client = self.client.clone();
+
+        Box::pin(stream::unfold(
+            (client, api_key, base_url, request, false, Vec::new()),
+            |(client, api_key, base_url, request, done, mut buffer)| async move {
+                if done {
+                    return None;
+                }
+
+                let response = match client
+                    .post(format!("{}/v1/messages", base_url))
+                    .header("x-api-key", &api_key)
+                    .header("anthropic-version", API_VERSION)
+                    .header("content-type", "application/json")
+                    .json(&request)
+                    .send()
+                    .await
+                {
+                    Ok(r) => r,
+                    Err(e) => return Some((Err(LlmError::NetworkError(e)), (client, api_key, base_url, request, true, buffer))),
+                };
+
+                let status = response.status();
+
+                if !status.is_success() {
+                    let response_text = match response.text().await {
+                        Ok(t) => t,
+                        Err(e) => return Some((Err(LlmError::NetworkError(e)), (client, api_key, base_url, request, true, buffer))),
+                    };
+
+                    let error = match parse_anthropic_error(&response_text, status) {
+                        Ok(_) => crate::llm::MessageChunk {
+                            content: String::new(),
+                            tool_call_chunks: Vec::new(),
+                            usage_delta: None,
+                        },
+                        Err(e) => return Some((Err(e), (client, api_key, base_url, request, true, buffer))),
+                    };
+
+                    return Some((Ok(error), (client, api_key, base_url, request, true, buffer)));
+                }
+
+                let mut byte_stream = response.bytes_stream();
+
+                while let Some(chunk_result) = byte_stream.next().await {
+                    let chunk = match chunk_result {
+                        Ok(c) => c,
+                        Err(e) => return Some((Err(LlmError::NetworkError(e)), (client, api_key, base_url, request, true, buffer))),
+                    };
+
+                    buffer.extend_from_slice(&chunk);
+
+                    while let Some(newline_pos) = buffer.iter().position(|&b| b == b'\n') {
+                        let line_bytes = buffer.drain(..=newline_pos).collect::<Vec<_>>();
+                        let line = String::from_utf8_lossy(&line_bytes[..line_bytes.len() - 1]);
+
+                        // Skip empty lines and comments
+                        let line = line.trim();
+                        if line.is_empty() || line.starts_with(':') {
+                            continue;
+                        }
+
+                        // Parse SSE line format: "event: type" or "data: {...}"
+                        if let Some(data_str) = line.strip_prefix("data: ") {
+                            // Parse the JSON data
+                            if let Ok(sse_event) = serde_json::from_str::<AnthropicSSEEvent>(data_str) {
+                                match convert_sse_event(sse_event) {
+                                    Ok(chunk) => {
+                                        if !chunk.content.is_empty() || !chunk.tool_call_chunks.is_empty() || chunk.usage_delta.is_some() {
+                                            return Some((Ok(chunk), (client, api_key, base_url, request, false, buffer)));
+                                        }
+                                    }
+                                    Err(e) => return Some((Err(e), (client, api_key, base_url, request, true, buffer))),
+                                }
+                            }
+                        }
+                    }
+                }
+
+                None
+            },
+        ))
     }
 
     fn bind_tools(&self, tools: Vec<ToolDefinition>) -> Self {
@@ -575,6 +724,95 @@ fn convert_role_to_anthropic(role: &Role) -> &'static str {
         Role::Ai => "assistant",
         Role::Tool => "user",
         Role::System => "user",
+    }
+}
+
+/// Anthropic SSE event type during streaming.
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type")]
+#[allow(dead_code, reason = "SSE event fields for future use")]
+enum AnthropicSSEEvent {
+    #[serde(rename = "message_start")]
+    MessageStart,
+    #[serde(rename = "content_block_start")]
+    ContentBlockStart {
+        index: usize,
+        content_block: Option<serde_json::Value>,
+    },
+    #[serde(rename = "content_block_delta")]
+    ContentBlockDelta {
+        index: usize,
+        delta: DeltaContent,
+    },
+    #[serde(rename = "content_block_stop")]
+    ContentBlockStop { index: usize },
+    #[serde(rename = "message_delta")]
+    MessageDelta {
+        delta: DeltaMessage,
+        usage: Option<TokenUsage>,
+    },
+    #[serde(rename = "message_stop")]
+    MessageStop,
+    #[serde(rename = "error")]
+    Error { error: AnthropicStreamError },
+}
+
+/// Delta content in SSE events.
+#[derive(Debug, Deserialize)]
+struct DeltaContent {
+    type_: String,
+    text: Option<String>,
+    partial_json: Option<String>,
+}
+
+/// Delta message in SSE events.
+#[derive(Debug, Deserialize)]
+#[allow(dead_code, reason = "Delta message fields for future use")]
+struct DeltaMessage {
+    stop_reason: Option<String>,
+    stop_sequence: Option<String>,
+}
+
+/// Anthropic stream error.
+#[derive(Debug, Deserialize)]
+struct AnthropicStreamError {
+    #[serde(rename = "type")]
+    type_: String,
+    message: String,
+}
+
+/// Convert Anthropic SSE event to `MessageChunk`.
+fn convert_sse_event(event: AnthropicSSEEvent) -> Result<crate::llm::MessageChunk, LlmError> {
+    match event {
+        AnthropicSSEEvent::ContentBlockDelta { delta, .. } => {
+            let content = if delta.type_ == "text" {
+                delta.text.unwrap_or_default()
+            } else if delta.type_ == "tool_use" {
+                delta.partial_json.unwrap_or_default()
+            } else {
+                String::new()
+            };
+
+            Ok(crate::llm::MessageChunk {
+                content,
+                tool_call_chunks: Vec::new(),
+                usage_delta: None,
+            })
+        }
+        AnthropicSSEEvent::MessageDelta { usage, .. } => Ok(crate::llm::MessageChunk {
+            content: String::new(),
+            tool_call_chunks: Vec::new(),
+            usage_delta: usage,
+        }),
+        AnthropicSSEEvent::Error { error } => Err(LlmError::InvalidResponse(format!(
+            "Anthropic stream error: {} - {}",
+            error.type_, error.message
+        ))),
+        _ => Ok(crate::llm::MessageChunk {
+            content: String::new(),
+            tool_call_chunks: Vec::new(),
+            usage_delta: None,
+        }),
     }
 }
 

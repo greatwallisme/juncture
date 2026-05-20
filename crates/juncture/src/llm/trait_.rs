@@ -285,6 +285,47 @@ pub trait ChatModel: Send + Sync + Clone + 'static {
     ///
     /// Returns the identifier of the model being used (e.g., "gpt-4", "claude-3-opus").
     fn model_name(&self) -> &str;
+
+    /// Wrap this model to extract structured output.
+    ///
+    /// Returns a [`StructuredOutputModel`] that forces the LLM to output
+    /// JSON matching the schema of type `T`, which is then deserialized
+    /// into the target type.
+    ///
+    /// This method is only available when the `structured-output` feature is enabled.
+    ///
+    /// # Type Parameters
+    ///
+    /// * `T` - The target type for structured output (must implement [`DeserializeOwned`], [`JsonSchema`], [`Clone`], [`Send`], and [`Sync`])
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use juncture::llm::{ChatModel, MockChatModel};
+    /// use serde::Deserialize;
+    /// use schemars::JsonSchema;
+    ///
+    /// #[derive(Debug, Clone, Deserialize, JsonSchema)]
+    /// struct WeatherReport {
+    ///     temperature: f64,
+    ///     conditions: String,
+    /// }
+    ///
+    /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let base_model = MockChatModel::new("gpt-4");
+    /// let model = base_model.with_structured_output::<WeatherReport>();
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[must_use]
+    #[cfg(feature = "structured-output")]
+    fn with_structured_output<T>(self) -> crate::llm::StructuredOutputModel<Self, T>
+    where
+        Self: Sized,
+        T: serde::de::DeserializeOwned + schemars::JsonSchema + Clone + Send + Sync + 'static,
+    {
+        crate::llm::StructuredOutputModel::new(self)
+    }
 }
 
 // Rust guideline compliant 2026-05-19

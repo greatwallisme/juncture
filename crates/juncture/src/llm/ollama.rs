@@ -7,12 +7,12 @@ use std::pin::Pin;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use futures::{Stream, stream};
+use futures::{Stream, StreamExt, stream};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
 use crate::llm::{
-    CallOptions, ChatModel, Content, ContentPart, LlmError, Message, MessageChunk, Role,
+    CallOptions, ChatModel, Content, ContentPart, LlmError, Message, Role,
     ToolDefinition,
 };
 
@@ -198,16 +198,119 @@ impl ChatModel for ChatOllama {
         ))
     }
 
+    #[allow(clippy::redundant_clone, clippy::uninlined_format_args, reason = "Complex SSE stream parsing logic")]
     fn stream(
         &self,
-        _messages: &[Message],
-        _options: Option<&CallOptions>,
-    ) -> Pin<Box<dyn Stream<Item = Result<MessageChunk, LlmError>> + Send + '_>> {
-        Box::pin(stream::once(async {
-            Err(LlmError::Other(
-                "SSE streaming implementation pending".to_string(),
-            ))
-        }))
+        messages: &[Message],
+        options: Option<&CallOptions>,
+    ) -> Pin<Box<dyn Stream<Item = Result<crate::llm::MessageChunk, LlmError>> + Send + '_>> {
+        let model = options
+            .and_then(|o| o.model_override.as_ref())
+            .unwrap_or(&self.model);
+
+        let api_messages: Vec<_> = messages
+            .iter()
+            .map(|m| OllamaMessage {
+                role: match m.role {
+                    Role::System => "system",
+                    Role::Human => "user",
+                    Role::Ai => "assistant",
+                    Role::Tool => "tool",
+                }
+                .to_string(),
+                content: extract_text_content(&m.content),
+                images: extract_images(&m.content),
+            })
+            .collect();
+
+        let request = OllamaRequest {
+            model: model.clone(),
+            messages: api_messages,
+            stream: true,
+            options: Some(OllamaOptions {
+                temperature: options.and_then(|o| o.temperature).or(self.temperature),
+                top_p: options.and_then(|o| o.top_p).or(self.top_p),
+            }),
+        };
+
+        let base_url = self.base_url.clone();
+        let client = self.client.clone();
+
+        Box::pin(stream::unfold(
+            (client, base_url, request, false, Vec::new()),
+            |(client, base_url, request, done, mut buffer)| async move {
+                if done {
+                    return None;
+                }
+
+                let response = match client
+                    .post(format!("{}/api/chat", base_url))
+                    .header("content-type", "application/json")
+                    .json(&request)
+                    .send()
+                    .await
+                {
+                    Ok(r) => r,
+                    Err(e) => return Some((Err(LlmError::NetworkError(e)), (client, base_url, request, true, buffer))),
+                };
+
+                let status = response.status();
+
+                if !status.is_success() {
+                    let response_text = match response.text().await {
+                        Ok(t) => t,
+                        Err(e) => return Some((Err(LlmError::NetworkError(e)), (client, base_url, request, true, buffer))),
+                    };
+
+                    return Some((
+                        Err(LlmError::InvalidResponse(format!("HTTP {}: {}", status.as_u16(), response_text))),
+                        (client, base_url, request, true, buffer),
+                    ));
+                }
+
+                let mut byte_stream = response.bytes_stream();
+
+                while let Some(chunk_result) = byte_stream.next().await {
+                    let chunk = match chunk_result {
+                        Ok(c) => c,
+                        Err(e) => return Some((Err(LlmError::NetworkError(e)), (client, base_url, request, true, buffer))),
+                    };
+
+                    buffer.extend_from_slice(&chunk);
+
+                    while let Some(newline_pos) = buffer.iter().position(|&b| b == b'\n') {
+                        let line_bytes = buffer.drain(..=newline_pos).collect::<Vec<_>>();
+                        let line = String::from_utf8_lossy(&line_bytes[..line_bytes.len() - 1]);
+
+                        // Skip empty lines
+                        let line = line.trim();
+                        if line.is_empty() {
+                            continue;
+                        }
+
+                        // Parse JSON line
+                        if let Ok(ollama_response) = serde_json::from_str::<OllamaStreamResponse>(line) {
+                            let chunk = crate::llm::MessageChunk {
+                                content: ollama_response.message.content,
+                                tool_call_chunks: Vec::new(),
+                                usage_delta: None,
+                            };
+
+                            if ollama_response.done {
+                                // Stream is complete
+                                return None;
+                            }
+
+                            if !chunk.content.is_empty() {
+                                return Some((Ok(chunk), (client, base_url, request, false, buffer)));
+                            }
+                        }
+                    }
+                }
+
+                None
+            },
+        ))
     }
 
     fn bind_tools(&self, _tools: Vec<ToolDefinition>) -> Self {
@@ -301,6 +404,14 @@ struct OllamaResponseMessage {
     #[allow(dead_code, reason = "API response field for future use")]
     role: String,
     content: String,
+}
+
+/// Ollama API streaming response format.
+#[derive(Debug, Deserialize)]
+struct OllamaStreamResponse {
+    message: OllamaResponseMessage,
+    #[serde(default)]
+    done: bool,
 }
 
 // Rust guideline compliant 2026-05-19

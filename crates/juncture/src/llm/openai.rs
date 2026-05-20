@@ -8,12 +8,12 @@ use std::pin::Pin;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use futures::{Stream, stream};
+use futures::{Stream, StreamExt, stream};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
 use crate::llm::{
-    CallOptions, ChatModel, Content, ContentPart, LlmError, Message, MessageChunk, Role,
+    CallOptions, ChatModel, Content, ContentPart, LlmError, Message, Role,
     TokenUsage, ToolCall, ToolChoice, ToolDefinition,
 };
 
@@ -283,16 +283,134 @@ impl ChatModel for ChatOpenAI {
         convert_api_response(&api_response)
     }
 
+    #[allow(clippy::too_many_lines, clippy::redundant_clone, clippy::uninlined_format_args, reason = "Complex SSE stream parsing logic")]
     fn stream(
         &self,
-        _messages: &[Message],
-        _options: Option<&CallOptions>,
-    ) -> Pin<Box<dyn Stream<Item = Result<MessageChunk, LlmError>> + Send + '_>> {
-        Box::pin(stream::once(async {
-            Err(LlmError::Other(
-                "SSE streaming implementation pending".to_string(),
-            ))
-        }))
+        messages: &[Message],
+        options: Option<&CallOptions>,
+    ) -> Pin<Box<dyn Stream<Item = Result<crate::llm::MessageChunk, LlmError>> + Send + '_>> {
+        let model = options
+            .and_then(|o| o.model_override.as_ref())
+            .unwrap_or(&self.model);
+
+        let api_messages: Vec<_> = messages.iter().map(convert_message).collect();
+
+        let request = OpenAIRequest {
+            model: model.clone(),
+            messages: api_messages,
+            temperature: options.and_then(|o| o.temperature).or(self.temperature),
+            max_tokens: options.and_then(|o| o.max_tokens).or(self.max_tokens),
+            top_p: options.and_then(|o| o.top_p).or(self.top_p),
+            stop: options.and_then(|o| o.stop_sequences.clone()),
+            tools: if self.tools.is_empty() {
+                None
+            } else {
+                Some(
+                    self.tools
+                        .iter()
+                        .map(|t| OpenAITool {
+                            r#type: "function".to_string(),
+                            function: OpenAIFunction {
+                                name: t.name.clone(),
+                                description: t.description.clone(),
+                                parameters: t.parameters.clone(),
+                            },
+                        })
+                        .collect(),
+                )
+            },
+            tool_choice: options
+                .and_then(|o| o.tool_choice.as_ref())
+                .map(Self::convert_tool_choice),
+            stream: true,
+        };
+
+        let api_key = self.api_key.clone();
+        let base_url = self.base_url.clone();
+        let client = self.client.clone();
+
+        Box::pin(stream::unfold(
+            (client, api_key, base_url, request, false, Vec::new()),
+            |(client, api_key, base_url, request, done, mut buffer)| async move {
+                if done {
+                    return None;
+                }
+
+                let response = match client
+                    .post(format!("{}/chat/completions", base_url))
+                    .header("authorization", format!("Bearer {}", api_key))
+                    .header("content-type", "application/json")
+                    .json(&request)
+                    .send()
+                    .await
+                {
+                    Ok(r) => r,
+                    Err(e) => return Some((Err(LlmError::NetworkError(e)), (client, api_key, base_url, request, true, buffer))),
+                };
+
+                let status = response.status();
+
+                if !status.is_success() {
+                    let response_text = match response.text().await {
+                        Ok(t) => t,
+                        Err(e) => return Some((Err(LlmError::NetworkError(e)), (client, api_key, base_url, request, true, buffer))),
+                    };
+
+                    let error = match parse_openai_error(&response_text, status) {
+                        Ok(_) => crate::llm::MessageChunk {
+                            content: String::new(),
+                            tool_call_chunks: Vec::new(),
+                            usage_delta: None,
+                        },
+                        Err(e) => return Some((Err(e), (client, api_key, base_url, request, true, buffer))),
+                    };
+
+                    return Some((Ok(error), (client, api_key, base_url, request, true, buffer)));
+                }
+
+                let mut byte_stream = response.bytes_stream();
+
+                while let Some(chunk_result) = byte_stream.next().await {
+                    let chunk = match chunk_result {
+                        Ok(c) => c,
+                        Err(e) => return Some((Err(LlmError::NetworkError(e)), (client, api_key, base_url, request, true, buffer))),
+                    };
+
+                    buffer.extend_from_slice(&chunk);
+
+                    while let Some(newline_pos) = buffer.iter().position(|&b| b == b'\n') {
+                        let line_bytes = buffer.drain(..=newline_pos).collect::<Vec<_>>();
+                        let line = String::from_utf8_lossy(&line_bytes[..line_bytes.len() - 1]);
+
+                        // Skip empty lines and comments
+                        let line = line.trim();
+                        if line.is_empty() || line.starts_with(':') {
+                            continue;
+                        }
+
+                        // Parse SSE line format: "data: {...}" or "data: [DONE]"
+                        if let Some(data_str) = line.strip_prefix("data: ") {
+                            if data_str == "[DONE]" {
+                                return None;
+                            }
+
+                            if let Ok(sse_chunk) = serde_json::from_str::<OpenAISSEChunk>(data_str) {
+                                match convert_openai_sse_chunk(sse_chunk) {
+                                    Ok(chunk) => {
+                                        if !chunk.content.is_empty() || !chunk.tool_call_chunks.is_empty() || chunk.usage_delta.is_some() {
+                                            return Some((Ok(chunk), (client, api_key, base_url, request, false, buffer)));
+                                        }
+                                    }
+                                    Err(e) => return Some((Err(e), (client, api_key, base_url, request, true, buffer))),
+                                }
+                            }
+                        }
+                    }
+                }
+
+                None
+            },
+        ))
     }
 
     fn bind_tools(&self, tools: Vec<ToolDefinition>) -> Self {
@@ -577,6 +695,91 @@ fn convert_api_response(response: &OpenAIResponse) -> Result<Message, LlmError> 
     };
 
     Ok(Message::ai_with_tool_calls(content, tool_calls))
+}
+
+/// `OpenAI` SSE chunk format.
+#[derive(Debug, Deserialize)]
+#[allow(dead_code, reason = "SSE response fields for future use")]
+struct OpenAISSEChunk {
+    id: String,
+    object: String,
+    created: u64,
+    model: String,
+    choices: Vec<OpenAIChoiceChunk>,
+    usage: Option<TokenUsage>,
+}
+
+/// `OpenAI` SSE choice chunk.
+#[derive(Debug, Deserialize)]
+#[allow(dead_code, reason = "SSE choice fields for future use")]
+struct OpenAIChoiceChunk {
+    index: usize,
+    delta: OpenAIDelta,
+    finish_reason: Option<String>,
+}
+
+/// `OpenAI` SSE delta.
+#[derive(Debug, Deserialize)]
+#[allow(dead_code, reason = "SSE delta fields for future use")]
+struct OpenAIDelta {
+    role: Option<String>,
+    content: Option<String>,
+    tool_calls: Option<Vec<OpenAIToolCallChunk>>,
+}
+
+/// `OpenAI` SSE tool call chunk.
+#[derive(Debug, Deserialize)]
+#[allow(dead_code, reason = "SSE tool call fields for future use")]
+struct OpenAIToolCallChunk {
+    index: usize,
+    id: Option<String>,
+    r#type: Option<String>,
+    function: Option<OpenAIFunctionChunk>,
+}
+
+/// `OpenAI` SSE function chunk.
+#[derive(Debug, Deserialize)]
+struct OpenAIFunctionChunk {
+    name: Option<String>,
+    arguments: Option<String>,
+}
+
+/// Convert `OpenAI` SSE chunk to `MessageChunk`.
+fn convert_openai_sse_chunk(chunk: OpenAISSEChunk) -> Result<crate::llm::MessageChunk, LlmError> {
+    let choice = chunk
+        .choices
+        .first()
+        .ok_or_else(|| LlmError::InvalidResponse("No choices in SSE chunk".to_string()))?;
+
+    let content = choice.delta.content.clone().unwrap_or_default();
+
+    let tool_call_chunks = if let Some(tool_calls) = &choice.delta.tool_calls {
+        tool_calls
+            .iter()
+            .map(|tc| {
+                let args_delta = tc
+                    .function
+                    .as_ref()
+                    .and_then(|f| f.arguments.clone())
+                    .unwrap_or_default();
+
+                Ok(crate::llm::ToolCallChunk {
+                    id: tc.id.clone(),
+                    name: tc.function.as_ref().and_then(|f| f.name.clone()),
+                    args_delta,
+                    index: tc.index,
+                })
+            })
+            .collect::<Result<Vec<_>, LlmError>>()?
+    } else {
+        Vec::new()
+    };
+
+    Ok(crate::llm::MessageChunk {
+        content,
+        tool_call_chunks,
+        usage_delta: chunk.usage,
+    })
 }
 
 // Rust guideline compliant 2026-05-19

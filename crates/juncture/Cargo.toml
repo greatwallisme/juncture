@@ -24,13 +24,12 @@ uuid = { version = "1", features = ["v4"] }
 
 # Provider dependencies (feature-gated)
 reqwest = { version = "0.12", features = ["json", "stream"], optional = true }
-eventsource-stream = { version = "0.2", optional = true }
 schemars = { version = "0.8", optional = true }
 
 [features]
 default = []
-anthropic = ["reqwest", "eventsource-stream"]
-openai = ["reqwest", "eventsource-stream"]
+anthropic = ["reqwest"]
+openai = ["reqwest"]
 ollama = ["reqwest"]
 structured-output = ["schemars"]
 store = ["juncture-store"]
