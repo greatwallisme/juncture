@@ -481,6 +481,13 @@ async fn test_token_metrics_reported() {
 }
 ```
 
+> **Implementation Note (C-09-3)**: The `TestMetricsCollector` is more comprehensive than the design
+> suggests. It provides dedicated methods for all three metric types: `get_counter(name) -> u64`,
+> `get_histogram_samples(name) -> Vec<f64>`, and `get_gauge_value(name) -> Option<f64>`. It also
+> tracks metric attributes/labels, allowing tests to assert on labeled metrics (e.g.,
+> `get_counter_with_labels("juncture.llm.calls", &[("model", "gpt-4")])`). The collector uses
+> `Arc<Mutex<HashMap>>` internally for thread-safe metric accumulation during async tests.
+
 ---
 
 ## 8. 与 Budget 系统的协同
@@ -622,6 +629,13 @@ pub trait GraphCallbackHandler: Send + Sync + 'static {
     fn on_graph_end(&self, result: &Result<(), JunctureError>) {}
 }
 
+// > **Implementation Note (C-09-4)**: The implementation provides a blanket `impl GraphCallbackHandler
+// > for Arc<T> where T: GraphCallbackHandler` which forwards all method calls to the inner type.
+// > This is critical because the Pregel engine stores callback handlers as `Arc<dyn GraphCallbackHandler>`,
+// > and users commonly wrap their handlers in `Arc` for sharing across threads. Without the blanket impl,
+// > `Arc<MyHandler>` would not satisfy the trait bound. The blanket impl also covers `Box<T>` for
+// > heap-allocated handlers.
+
 /// 中断事件 payload
 #[derive(Debug, Clone)]
 pub struct GraphInterruptEvent {
@@ -693,6 +707,13 @@ pub struct ServerInfo {
     /// 实例 ID
     pub instance_id: Option<String>,
 }
+
+// > **Implementation Note (C-09-1)**: `ServerInfo` provides a full builder pattern API with methods
+// > like `with_assistant_id()`, `with_graph_id()`, `with_user()`, `with_deployment()`,
+// > `with_version()`, and `with_instance_id()`, each returning `Self` for fluent chaining.
+// > This exceeds the design's plain struct definition, enabling ergonomic configuration in
+// > deployment setups. Additionally, `ServerInfo` implements `From<HashMap<String, String>>` for
+// > integration with environment-derived configuration maps.
 ```
 
 #### CachePolicy key_func
@@ -712,6 +733,13 @@ pub struct CachePolicy {
 // > 以避免与 `RunnableConfig` 中已有的通用 `CachePolicy` 类型产生命名冲突。
 // > `LlmCachePolicy` 专门用于 LLM 调用级别的缓存控制，
 // > 而通用 `CachePolicy` 用于节点级别的缓存配置。
+//
+// > **Implementation Note (C-09-2)**: `LlmCachePolicy` in the implementation includes a complete
+// > `key_func: Option<Arc<dyn Fn(&CacheKeyInput) -> String + Send + Sync>>` field with a builder
+// > method `with_key_func()` for custom cache key generation. The default key function uses
+// > `(model, messages_hash)` as the cache key, but users can supply custom functions for
+// > context-aware caching (e.g., including tool definitions or temperature in the key).
+// > The `CacheKeyInput` struct is fully populated with model, messages, tools, and call options.
 
 /// 缓存键生成输入
 pub struct CacheKeyInput {

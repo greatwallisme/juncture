@@ -1122,12 +1122,14 @@ dependencies = [
  "juncture-core",
  "juncture-derive",
  "juncture-store",
+ "juncture-tracing",
  "reqwest",
  "schemars",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
+ "tracing",
  "uuid",
 ]
 
@@ -1139,6 +1141,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "juncture-core",
+ "juncture-tracing",
  "lru",
  "pbkdf2",
  "rmp-serde",
@@ -1148,6 +1151,7 @@ dependencies = [
  "sqlx",
  "thiserror 2.0.18",
  "tokio",
+ "tracing",
  "uuid",
 ]
 

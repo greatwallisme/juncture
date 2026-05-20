@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use juncture_core::state::messages::{Message, Role, ToolCall};
+use juncture_tracing::spans::attrs;
 use tokio::task::JoinSet;
 
 use crate::tools::error::ToolError;
@@ -346,21 +347,64 @@ impl ToolNode {
     }
 
     /// Execute a single tool call
+    #[allow(
+        clippy::cognitive_complexity,
+        reason = "execute_single_tool requires: span creation, interceptor hooks, tool invocation, error handling, metrics emission, and result transformation. The complexity is justified by the comprehensive tool execution with observability."
+    )]
     async fn execute_single_tool(
         tool_call: &ToolCall,
         tool: &dyn Tool,
         interceptor: &Arc<dyn ToolInterceptor>,
     ) -> Result<(String, String), ToolError> {
+        let span = tracing::info_span!(
+            "juncture.tool.call",
+            "juncture.tool.name" = %tool.name(),
+            "juncture.tool.duration_ms" = tracing::field::Empty,
+            "juncture.tool.error" = tracing::field::Empty,
+        );
+        let _enter = span.enter();
+
         let state = serde_json::Value::Null;
 
         // Pre-execute hook
         interceptor.pre_execute(tool_call, &state).await?;
 
         // Execute the tool
+        let start = std::time::Instant::now();
         let result = tool.invoke(tool_call.args.clone()).await;
+        let duration_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
+
+        // Record duration
+        tracing::Span::current().record(attrs::TOOL_DURATION_MS, duration_ms);
+
+        // Emit metrics for tool execution
+        tracing::debug!(
+            name: "juncture.tool.calls",
+            tool_name = %tool.name(),
+        );
+
+        tracing::debug!(
+            name: "juncture.tool.duration_ms",
+            duration_ms = duration_ms,
+            tool_name = %tool.name(),
+        );
 
         // Post-execute hook
-        let output = interceptor.post_execute(tool_call, &result).await?;
+        let output = match interceptor.post_execute(tool_call, &result).await {
+            Ok(out) => out,
+            Err(e) => {
+                // Record error attribute
+                tracing::Span::current().record(attrs::TOOL_ERROR, e.to_string());
+
+                // Emit error metric
+                tracing::debug!(
+                    name: "juncture.tool.errors",
+                    tool_name = %tool.name(),
+                );
+
+                return Err(e);
+            }
+        };
 
         Ok((tool_call.id.clone(), output))
     }

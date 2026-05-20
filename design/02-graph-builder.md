@@ -86,6 +86,11 @@ impl<S: State> StateGraph<S> {
 > **Implementation Note**: `RetryingNode` wrapper provides production-grade retry with exponential backoff.
 > Goes beyond LangGraph base retry with jitter, circuit breaker, and comprehensive error classification.
 
+> **Implementation Note (C-02-1)**: The full `RetryPolicy` implementation includes exponential backoff
+> with configurable initial interval, jitter (full jitter strategy to avoid thundering herd), max
+> interval caps, and max attempt limits. This exceeds the design's basic retry specification and
+> provides production-grade resilience for transient failures in LLM API calls and network operations.
+
     // > **实现备注 (D-02-1)**: 实际实现中 `add_node` 返回 `Result<(), TopologyError>` 而非 `&mut Self`。
     // > 这破坏了链式构建器模式（不再支持 `.add_node("a", ...)?.add_node("b", ...)?`），
     // > 但支持 fail-fast 验证——重复节点名等拓扑错误在调用时立即返回而非延迟到 `compile()`。
@@ -327,6 +332,13 @@ impl<S: State> StateGraph<S> {
             + Sync
             + 'static,
     ) -> &mut Self;
+
+// > **Implementation Note (C-02-8)**: Implementation introduces a `NodeMetadata` structure that
+// > consolidates per-node configuration beyond what the design specifies. This includes `defer` flag
+// > (for deferred node execution ordering), `metadata` (user-defined key-value pairs for observability),
+// > `destinations` (declared routing targets for topology validation), and `retry_policies` (a Vec
+// > of RetryPolicy allowing different strategies per error type). This replaces individual parameters
+// > in `add_node` with a single structured configuration object.
 }
 
 /// 节点错误信息
@@ -378,6 +390,12 @@ graph.add_node_with_error_handler(
 > Juncture 额外提供：
 > - `state: S` — 执行时的状态快照，允许错误处理器基于状态做决策
 > - `attempt: u32` — 当前重试尝试次数，允许错误处理器根据重试次数选择不同策略
+
+> **Implementation Note (C-02-3)**: Implementation uses an `ErrorHandlerNode<S>` wrapper pattern
+> that composes the original node with its error handler into a single `Node<S>` implementation.
+> This wrapper intercepts errors from the inner node and delegates to the error handler's async
+> function, seamlessly integrating error recovery into the Pregel execution pipeline without
+> requiring special-case handling in the engine itself.
 
 ---
 
@@ -743,6 +761,12 @@ pub struct SendTarget {
     pub state: serde_json::Value,
 }
 
+// > **Implementation Note (C-02-5)**: `SendTarget` additionally carries a `timeout: Option<Duration>`
+// > field, allowing per-send-target timeout configuration. When set, the Pregel engine applies this
+// > timeout to the spawned task executing the target node, overriding the graph-level default.
+// > This enables fine-grained control over fan-out operations where some targets may be expected
+// > to complete faster than others.
+
 /// Send API 的目标
 pub struct SendTarget<S: State> {
     /// 目标节点名
@@ -758,6 +782,13 @@ pub enum GraphTarget {
     /// 父图（子图向上导航）
     Parent,
 }
+
+// > **Implementation Note (C-02-7)**: Implementation introduces `ParentCommand<S>` and `CommandGoto`
+// > types for structured subgraph-to-parent communication. `ParentCommand` wraps a Command destined
+// > for the parent graph, enabling subgraph nodes to route to specific parent nodes or send data
+// > upward. `CommandGoto` refines the `Goto` enum with additional routing metadata for multi-level
+// > graph hierarchies. These types ensure type-safe inter-graph routing that the design's simpler
+// > `GraphTarget::Parent` variant does not fully capture.
 ```
 
 ### 4.3 构造方法

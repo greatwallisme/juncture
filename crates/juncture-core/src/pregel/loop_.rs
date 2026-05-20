@@ -14,12 +14,13 @@ use crate::{
         scheduler::{FieldVersionTracker, VersionsSeen, compute_next_tasks},
         types::{LoopStatus, PendingTask, SuperstepResult},
     },
-    stream::StreamEvent,
+    stream::{DebugEvent, StreamEvent},
 };
 use indexmap::IndexMap;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Instant;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -156,9 +157,17 @@ pub struct PregelLoop<S: State> {
     /// Run control for graceful shutdown
     run_control: RunControl,
 
+    /// Unique ID for this graph execution
+    run_id: String,
+
     /// Interrupt signal receiver from the last superstep
     /// This is stored here so `after_tick` can drain it
     interrupt_rx: Option<mpsc::UnboundedReceiver<crate::interrupt::InterruptSignal>>,
+
+    /// Superstep start time for duration tracking
+    ///
+    /// Set at the beginning of [`execute_superstep`], read in [`after_tick`].
+    superstep_start: Option<Instant>,
 }
 
 impl<S: State> std::fmt::Debug for PregelLoop<S> {
@@ -178,7 +187,9 @@ impl<S: State> std::fmt::Debug for PregelLoop<S> {
             .field("pending_tasks", &self.pending_tasks)
             .field("budget_tracker", &self.budget_tracker.is_some())
             .field("run_control", &self.run_control)
+            .field("run_id", &self.run_id)
             .field("interrupt_rx", &self.interrupt_rx.is_some())
+            .field("superstep_start", &self.superstep_start.is_some())
             .finish()
     }
 }
@@ -227,6 +238,9 @@ impl<S: State> PregelLoop<S> {
         // Initialize pending tasks from entry point
         let pending_tasks = Self::compute_initial_tasks(&trigger_table);
 
+        // Generate unique run ID for this execution
+        let run_id = uuid::Uuid::new_v4().to_string();
+
         Ok(Self {
             state,
             nodes,
@@ -242,7 +256,9 @@ impl<S: State> PregelLoop<S> {
             pending_tasks,
             budget_tracker: None,
             run_control: RunControl::new(),
+            run_id,
             interrupt_rx: None,
+            superstep_start: None,
         })
     }
 
@@ -327,6 +343,8 @@ impl<S: State> PregelLoop<S> {
             thread_id = ?std::thread::current().id(),
             step = self.step,
             recursion_limit = self.runnable_config.recursion_limit,
+            graph_name = ?self.runnable_config.graph_name,
+            run_id = %self.run_id,
         )
     )]
     pub fn tick(&mut self) -> Result<bool, JunctureError> {
@@ -422,15 +440,44 @@ impl<S: State> PregelLoop<S> {
     /// ```ignore
     /// let result = loop.execute_superstep().await?;
     /// ```
-    #[tracing::instrument(
-        name = "juncture.superstep",
-        skip(self),
-        fields(
+    pub async fn execute_superstep(&mut self) -> Result<SuperstepResult<S>, JunctureError> {
+        let node_names: Vec<_> = self
+            .pending_tasks
+            .iter()
+            .map(|t| t.node_name.as_str())
+            .collect();
+        let span = tracing::info_span!(
+            "juncture.superstep",
             step = self.step,
             num_tasks = self.pending_tasks.len(),
-        )
-    )]
-    pub async fn execute_superstep(&mut self) -> Result<SuperstepResult<S>, JunctureError> {
+            "juncture.step.nodes" = ?node_names,
+            "juncture.step.duration_ms" = tracing::field::Empty,
+        );
+        let _enter = span.enter();
+
+        // Store superstep start time for duration tracking in after_tick
+        let start = Instant::now();
+        self.superstep_start = Some(start);
+
+        // Emit SuperstepStart debug event if streaming is configured
+        if let Some(ref tx) = self.stream_tx {
+            let _ = tx.send(StreamEvent::Debug(DebugEvent::SuperstepStart {
+                step: self.step,
+                nodes: node_names
+                    .iter()
+                    .copied()
+                    .map(std::string::ToString::to_string)
+                    .collect(),
+            }));
+        }
+
+        // Emit graph invocation counter metric
+        tracing::debug!(
+            name: "juncture.graph.invocations",
+            step = self.step,
+            num_tasks = self.pending_tasks.len(),
+        );
+
         let (result, interrupt_rx) = execute_superstep(
             &self.pending_tasks,
             &self.state,
@@ -440,6 +487,16 @@ impl<S: State> PregelLoop<S> {
             self.checkpointer.as_ref(),
         )
         .await?;
+
+        let duration = start.elapsed().as_millis();
+        tracing::Span::current().record("juncture.step.duration_ms", duration);
+
+        // Emit superstep duration metric
+        tracing::debug!(
+            name: "juncture.superstep.duration_ms",
+            step = self.step,
+            duration_ms = duration,
+        );
 
         // Store the interrupt receiver for after_tick to drain
         // We use Option to allow moving it into after_tick
@@ -468,7 +525,10 @@ impl<S: State> PregelLoop<S> {
         clippy::too_many_lines,
         reason = "after_tick requires multiple steps: apply writes, bump versions, emit events, compute tasks, drain interrupts, check interrupts, finish channels, increment step"
     )]
-    pub async fn after_tick(&mut self, result: SuperstepResult<S>) -> Result<(), JunctureError> {
+    pub async fn after_tick(&mut self, result: SuperstepResult<S>) -> Result<(), JunctureError>
+    where
+        S: Clone,
+    {
         // Apply writes from completed tasks
         let mut total_changed = crate::FieldsChanged(0);
 
@@ -495,20 +555,74 @@ impl<S: State> PregelLoop<S> {
         // Emit stream events
         if let Some(ref tx) = self.stream_tx {
             for task_output in &result.task_outputs {
-                let event = StreamEvent::TaskEnd {
+                // Emit TaskStart event before TaskEnd (retroactive, but provides task_id info)
+                let start_event = StreamEvent::TaskStart {
+                    node: task_output.node_name.clone(),
+                    task_id: task_output.task_id.clone(),
+                    step: self.step,
+                };
+                let _ = tx.send(start_event);
+
+                // Emit TaskEnd event
+                let end_event = StreamEvent::TaskEnd {
                     node: task_output.node_name.clone(),
                     task_id: task_output.task_id.clone(),
                     step: self.step,
                     duration_ms: u64::try_from(task_output.duration.as_millis())
                         .expect("duration should fit in u64"),
                 };
-                let _ = tx.send(event);
+                let _ = tx.send(end_event);
+
+                // Emit Updates event if the task produced an update
+                if let Some(ref update) = task_output.command.update {
+                    let updates_event = StreamEvent::Updates {
+                        node: task_output.node_name.clone(),
+                        update: update.clone(),
+                        step: self.step,
+                    };
+                    let _ = tx.send(updates_event);
+                }
+            }
+
+            // Emit Values event after all updates applied
+            let values_event = StreamEvent::Values {
+                state: self.state.clone(),
+                step: self.step,
+            };
+            let _ = tx.send(values_event);
+
+            // Emit SuperstepEnd debug event with duration
+            if let Some(superstep_start) = self.superstep_start {
+                let duration_ms =
+                    u64::try_from(superstep_start.elapsed().as_millis()).unwrap_or(u64::MAX);
+                let end_event = StreamEvent::Debug(DebugEvent::SuperstepEnd {
+                    step: self.step,
+                    duration_ms,
+                });
+                let _ = tx.send(end_event);
             }
         }
 
         // Compute next pending tasks
         self.pending_tasks =
             compute_next_tasks(&result.task_outputs, &self.trigger_table, &self.state).await?;
+
+        // Emit RouteDecision debug event after computing next tasks
+        if let Some(ref tx) = self.stream_tx {
+            let next_node_names: Vec<String> = self
+                .pending_tasks
+                .iter()
+                .map(|t| t.node_name.clone())
+                .collect();
+            if !next_node_names.is_empty() {
+                let route_event = StreamEvent::Debug(DebugEvent::RouteDecision {
+                    from: "superstep".to_string(),
+                    to: next_node_names,
+                    step: self.step,
+                });
+                let _ = tx.send(route_event);
+            }
+        }
 
         // Drain interrupt signals from the channel
         // These are signals sent by the interrupt!() macro during node execution

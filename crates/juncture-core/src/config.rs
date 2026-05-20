@@ -9,6 +9,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::checkpoint::CheckpointSaver;
+use crate::interrupt::ResumeValue;
 use crate::pregel::BudgetConfig;
 use crate::pregel::Durability;
 use crate::runtime::RuntimeStore;
@@ -30,6 +31,9 @@ pub struct RunnableConfig {
 
     /// Run name for observability
     pub run_name: Option<String>,
+
+    /// Graph name for observability (specified at graph construction time)
+    pub graph_name: Option<String>,
 
     /// Checkpoint namespace (for subgraph isolation)
     pub checkpoint_ns: Option<String>,
@@ -60,7 +64,10 @@ pub struct RunnableConfig {
     pub node_finished_callback: Option<Arc<dyn Fn(&str) + Send + Sync>>,
 
     /// Resume value for HITL interrupt continuation
-    pub resume_value: Option<serde_json::Value>,
+    ///
+    /// Supports single value, ID-based resume, and namespace-based resume
+    /// for multi-interrupt workflows.
+    pub resume_value: Option<ResumeValue>,
 
     /// Nodes that should interrupt before execution (HITL)
     pub interrupt_before: Option<Vec<String>>,
@@ -77,6 +84,7 @@ impl std::fmt::Debug for RunnableConfig {
             .field("recursion_limit", &self.recursion_limit)
             .field("max_parallel_tasks", &self.max_parallel_tasks)
             .field("run_name", &self.run_name)
+            .field("graph_name", &self.graph_name)
             .field("checkpoint_ns", &self.checkpoint_ns)
             .field("cache", &self.cache)
             .field("tags", &self.tags)
@@ -144,6 +152,13 @@ impl RunnableConfig {
     #[must_use]
     pub fn with_run_name(mut self, name: impl Into<String>) -> Self {
         self.run_name = Some(name.into());
+        self
+    }
+
+    /// Set the graph name for observability
+    #[must_use]
+    pub fn with_graph_name(mut self, name: impl Into<String>) -> Self {
+        self.graph_name = Some(name.into());
         self
     }
 

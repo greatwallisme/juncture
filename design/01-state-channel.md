@@ -243,6 +243,12 @@ pub trait State: Clone + Send + Sync + std::fmt::Debug + 'static {
     fn migrate(from_version: u32, value: serde_json::Value) -> serde_json::Value {
         value
     }
+
+    // > **Implementation Note (C-01-8)**: Implementation adds `finish_field(field_index: usize)` method
+    // > to support `LastValueAfterFinish` channels. When the Pregel engine detects no more nodes to
+    // > execute in a superstep, it calls `finish_field()` for each field using the `replace_after_finish`
+    // > reducer, making their values visible to subscribers. This is the Rust equivalent of LangGraph's
+    // > per-channel `finish()` call on `LastValueAfterFinish` channels.
 }
 
 /// <!-- Addresses finding: R-A4-1 -->
@@ -369,8 +375,9 @@ impl FieldsChanged {
     pub fn merge(&mut self, other: &FieldsChanged) { self.0 |= other.0; }
 }
 
-> **Implementation Note**: `is_empty()` and `has_field()` use `const fn` for compile-time optimization.
-> This enables zero-cost field change tracking in hot paths without runtime overhead.
+> **Implementation Note (C-01-5)**: `is_empty()` and `has_field()` are implemented as `const fn`,
+> enabling compile-time evaluation and zero-cost field change tracking in hot paths without runtime overhead.
+> This optimization matters in the Pregel scheduler where field checks occur on every superstep iteration.
 
 // proc-macro 生成的字段数量验证（编译时检查）
 //
@@ -655,6 +662,12 @@ pub trait Channel<T> {
     // > `fn from_checkpoint(value: serde_json::Value) -> Result<Self, String>`。
     // > 这将 checkpoint 持久化逻辑混入 Channel trait，但使每个 channel 可以独立完成序列化/反序列化，
     // > 无需外部序列化器感知内部类型。
+    //
+    // > **Implementation Note (C-01-1)**: Implementation extends beyond design with `checkpoint()` and
+    // > `from_checkpoint()` methods directly on the Channel trait. These methods enable self-contained
+    // > serialization: each channel independently handles its own checkpoint serialization and
+    // > deserialization, rather than requiring an external serializer that knows about all channel types.
+    // > This design trades trait pollution for simplification of the checkpoint pipeline.
 }
 
 /// EphemeralChannel 的 consume 实现

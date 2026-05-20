@@ -13,9 +13,11 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
 use crate::llm::{
-    CallOptions, ChatModel, Content, ContentPart, LlmError, Message, Role,
-    TokenUsage, ToolCall, ToolChoice, ToolDefinition,
+    CallOptions, ChatModel, Content, ContentPart, LlmError, Message, Role, TokenUsage, ToolCall,
+    ToolChoice, ToolDefinition,
 };
+
+use juncture_tracing::spans::attrs;
 
 /// Default `OpenAI` API base URL.
 const OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
@@ -229,6 +231,17 @@ impl ChatModel for ChatOpenAI {
             .and_then(|o| o.model_override.as_ref())
             .unwrap_or(&self.model);
 
+        let span = tracing::info_span!(
+            "juncture.llm.call",
+            "juncture.llm.model" = %model,
+            "juncture.llm.provider" = "openai",
+            "juncture.tokens.input" = tracing::field::Empty,
+            "juncture.tokens.output" = tracing::field::Empty,
+            "juncture.llm.has_tool_calls" = false,
+            "juncture.llm.stop_reason" = tracing::field::Empty,
+        );
+        let _enter = span.enter();
+
         let api_messages: Vec<_> = messages.iter().map(convert_message).collect();
 
         let request = OpenAIRequest {
@@ -261,6 +274,8 @@ impl ChatModel for ChatOpenAI {
             stream: false,
         };
 
+        let start = std::time::Instant::now();
+
         let response = self
             .client
             .post(format!("{}/chat/completions", self.base_url))
@@ -280,10 +295,54 @@ impl ChatModel for ChatOpenAI {
         let api_response: OpenAIResponse = serde_json::from_str(&response_text)
             .map_err(|e| LlmError::InvalidResponse(format!("Failed to parse response: {e}")))?;
 
+        // Record span attributes
+        if let Some(usage) = &api_response.usage {
+            tracing::Span::current().record(attrs::TOKENS_INPUT, usage.input_tokens);
+            tracing::Span::current().record(attrs::TOKENS_OUTPUT, usage.output_tokens);
+        }
+
+        let has_tool_calls = api_response
+            .choices
+            .first()
+            .and_then(|choice| choice.message.tool_calls.as_ref())
+            .is_some_and(|calls| !calls.is_empty());
+        tracing::Span::current().record(attrs::LLM_HAS_TOOL_CALLS, has_tool_calls);
+
+        // Emit metrics for LLM call
+        tracing::debug!(
+            name: "juncture.llm.calls",
+            provider = "openai",
+            model = %model,
+        );
+
+        if let Some(usage) = &api_response.usage {
+            tracing::debug!(
+                name: "juncture.llm.tokens.input",
+                tokens = usage.input_tokens,
+                model = %model,
+            );
+            tracing::debug!(
+                name: "juncture.llm.tokens.output",
+                tokens = usage.output_tokens,
+                model = %model,
+            );
+        }
+
+        tracing::debug!(
+            name: "juncture.llm.duration_ms",
+            duration_ms = start.elapsed().as_millis(),
+            model = %model,
+        );
+
         convert_api_response(&api_response)
     }
 
-    #[allow(clippy::too_many_lines, clippy::redundant_clone, clippy::uninlined_format_args, reason = "Complex SSE stream parsing logic")]
+    #[allow(
+        clippy::too_many_lines,
+        clippy::redundant_clone,
+        clippy::uninlined_format_args,
+        reason = "Complex SSE stream parsing logic"
+    )]
     fn stream(
         &self,
         messages: &[Message],
@@ -292,6 +351,14 @@ impl ChatModel for ChatOpenAI {
         let model = options
             .and_then(|o| o.model_override.as_ref())
             .unwrap_or(&self.model);
+
+        // Create span for stream setup
+        let span = tracing::info_span!(
+            "juncture.llm.call",
+            "juncture.llm.model" = %model,
+            "juncture.llm.provider" = "openai",
+        );
+        let _enter = span.enter();
 
         let api_messages: Vec<_> = messages.iter().map(convert_message).collect();
 
@@ -345,7 +412,12 @@ impl ChatModel for ChatOpenAI {
                     .await
                 {
                     Ok(r) => r,
-                    Err(e) => return Some((Err(LlmError::NetworkError(e)), (client, api_key, base_url, request, true, buffer))),
+                    Err(e) => {
+                        return Some((
+                            Err(LlmError::NetworkError(e)),
+                            (client, api_key, base_url, request, true, buffer),
+                        ));
+                    }
                 };
 
                 let status = response.status();
@@ -353,7 +425,12 @@ impl ChatModel for ChatOpenAI {
                 if !status.is_success() {
                     let response_text = match response.text().await {
                         Ok(t) => t,
-                        Err(e) => return Some((Err(LlmError::NetworkError(e)), (client, api_key, base_url, request, true, buffer))),
+                        Err(e) => {
+                            return Some((
+                                Err(LlmError::NetworkError(e)),
+                                (client, api_key, base_url, request, true, buffer),
+                            ));
+                        }
                     };
 
                     let error = match parse_openai_error(&response_text, status) {
@@ -362,10 +439,18 @@ impl ChatModel for ChatOpenAI {
                             tool_call_chunks: Vec::new(),
                             usage_delta: None,
                         },
-                        Err(e) => return Some((Err(e), (client, api_key, base_url, request, true, buffer))),
+                        Err(e) => {
+                            return Some((
+                                Err(e),
+                                (client, api_key, base_url, request, true, buffer),
+                            ));
+                        }
                     };
 
-                    return Some((Ok(error), (client, api_key, base_url, request, true, buffer)));
+                    return Some((
+                        Ok(error),
+                        (client, api_key, base_url, request, true, buffer),
+                    ));
                 }
 
                 let mut byte_stream = response.bytes_stream();
@@ -373,7 +458,12 @@ impl ChatModel for ChatOpenAI {
                 while let Some(chunk_result) = byte_stream.next().await {
                     let chunk = match chunk_result {
                         Ok(c) => c,
-                        Err(e) => return Some((Err(LlmError::NetworkError(e)), (client, api_key, base_url, request, true, buffer))),
+                        Err(e) => {
+                            return Some((
+                                Err(LlmError::NetworkError(e)),
+                                (client, api_key, base_url, request, true, buffer),
+                            ));
+                        }
                     };
 
                     buffer.extend_from_slice(&chunk);
@@ -394,14 +484,26 @@ impl ChatModel for ChatOpenAI {
                                 return None;
                             }
 
-                            if let Ok(sse_chunk) = serde_json::from_str::<OpenAISSEChunk>(data_str) {
+                            if let Ok(sse_chunk) = serde_json::from_str::<OpenAISSEChunk>(data_str)
+                            {
                                 match convert_openai_sse_chunk(sse_chunk) {
                                     Ok(chunk) => {
-                                        if !chunk.content.is_empty() || !chunk.tool_call_chunks.is_empty() || chunk.usage_delta.is_some() {
-                                            return Some((Ok(chunk), (client, api_key, base_url, request, false, buffer)));
+                                        if !chunk.content.is_empty()
+                                            || !chunk.tool_call_chunks.is_empty()
+                                            || chunk.usage_delta.is_some()
+                                        {
+                                            return Some((
+                                                Ok(chunk),
+                                                (client, api_key, base_url, request, false, buffer),
+                                            ));
                                         }
                                     }
-                                    Err(e) => return Some((Err(e), (client, api_key, base_url, request, true, buffer))),
+                                    Err(e) => {
+                                        return Some((
+                                            Err(e),
+                                            (client, api_key, base_url, request, true, buffer),
+                                        ));
+                                    }
                                 }
                             }
                         }

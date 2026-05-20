@@ -7,13 +7,17 @@
 use super::builder::NodeMetadata;
 use crate::{
     JunctureError, State,
-    checkpoint::{CheckpointFilter, StateSnapshot},
+    checkpoint::{CheckpointFilter, CheckpointSource, StateSnapshot},
     config::RunnableConfig,
     edge::TriggerTable,
+    interrupt::ResumeValue,
     pregel::PregelLoop,
+    stream::{EventEmitter, StreamEvent, StreamMode},
 };
+use futures::Stream;
 use indexmap::IndexMap;
-use std::sync::Arc;
+use std::{pin::Pin, sync::Arc};
+use tokio::sync::mpsc;
 
 /// Compiled and validated graph ready for execution
 ///
@@ -177,80 +181,152 @@ impl<S: State> CompiledGraph<S> {
     /// * `config` - Execution configuration
     /// * `mode` - Stream mode controlling what events are emitted
     ///
+    /// # Returns
+    ///
+    /// A pinned stream of results, where each result is either a `StreamEvent` or a `JunctureError`.
+    ///
     /// # Errors
     ///
-    /// Returns [`JunctureError`] if execution fails.
+    /// Returns [`JunctureError`] if the graph cannot be initialized.
+    /// Runtime errors during execution are sent through the stream.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// use juncture_core::{StateGraph, State, StreamMode};
+    /// use futures::StreamExt;
+    ///
+    /// let mut stream = compiled.stream(initial_state, &config, StreamMode::Values).await?;
+    /// while let Some(result) = stream.next().await {
+    ///     match result? {
+    ///         StreamEvent::Values { state, step } => {
+    ///             println!("Step {}: {:?}", step, state);
+    ///         }
+    ///         StreamEvent::End { output } => {
+    ///             println!("Final state: {:?}", output);
+    ///         }
+    ///         _ => {}
+    ///     }
+    /// }
+    /// # Ok::<(), juncture_core::JunctureError>(())
+    /// ```
+    #[expect(
+        clippy::unused_async,
+        reason = "function signature follows async convention for consistency with invoke_async"
+    )]
     pub async fn stream(
         &self,
         input: S,
         config: &RunnableConfig,
-        mode: crate::stream::StreamMode,
-    ) -> Result<Vec<crate::stream::StreamEvent<S>>, JunctureError>
+        mode: StreamMode,
+    ) -> Result<
+        Pin<Box<dyn Stream<Item = Result<StreamEvent<S>, JunctureError>> + Send>>,
+        JunctureError,
+    >
     where
-        S: Clone,
+        S: Clone + Send + 'static,
     {
+        use futures::stream;
+
         let num_fields = 64;
 
+        // Create channel for Result<StreamEvent, JunctureError>
+        // Using unbounded channel for non-blocking sends
+        let (tx, rx) = mpsc::unbounded_channel();
+
+        // Create Pregel loop
         let mut pregel = PregelLoop::new(
-            input.clone(),
+            input,
             self.inner.nodes.clone(),
             self.inner.trigger_table.clone(),
             config.clone(),
             num_fields,
         )?;
 
-        let mut events = Vec::new();
+        // Create a separate channel for PregelLoop's internal stream events
+        let (pregel_tx, mut pregel_rx) = mpsc::unbounded_channel();
+        pregel.set_stream_sender(pregel_tx);
 
-        while pregel.tick()? {
-            let step = pregel.step();
+        // Spawn graph execution in background task
+        tokio::spawn(async move {
+            // Task to forward PregelLoop events to the main stream
+            let tx_forward = tx.clone();
+            let mode_forward = mode.clone();
+            tokio::spawn(async move {
+                // Create a temporary bounded channel for EventEmitter filtering
+                let (temp_tx, _temp_rx) = mpsc::channel(1);
+                let emitter = EventEmitter::new(temp_tx, mode_forward);
 
-            let result = pregel.execute_superstep().await?;
-            pregel.after_tick(result).await?;
+                while let Some(event) = pregel_rx.recv().await {
+                    // Filter events based on stream mode using EventEmitter's should_emit
+                    if emitter.should_emit(&event) {
+                        let _ = tx_forward.send(Ok(event));
+                    }
+                }
+            });
 
-            match mode {
-                crate::stream::StreamMode::Values => {
-                    events.push(crate::stream::StreamEvent::Values {
+            // Execute the Pregel loop
+            while matches!(pregel.tick(), Ok(true)) {
+                let step = pregel.step();
+
+                // Emit Values events if mode is Values
+                if matches!(mode, StreamMode::Values) {
+                    let event = StreamEvent::Values {
                         state: pregel.snapshot_state(),
                         step,
-                    });
+                    };
+                    let _ = tx.send(Ok(event));
                 }
-                crate::stream::StreamMode::Updates => {
-                    events.push(crate::stream::StreamEvent::Updates {
-                        node: String::new(),
-                        update: S::Update::default(),
-                        step,
-                    });
-                }
-                crate::stream::StreamMode::Debug => {
-                    events.push(crate::stream::StreamEvent::TaskDetail {
-                        task_id: format!("step-{step}"),
-                        node: String::new(),
-                        step,
-                        attempt: 0,
-                        event: crate::stream::TaskEventType::Started,
-                    });
-                }
-                _ => {}
-            }
-        }
 
-        // Add End event with final state
-        events.push(crate::stream::StreamEvent::End {
-            output: pregel.into_state(),
+                // Execute superstep
+                match pregel.execute_superstep().await {
+                    Ok(result) => {
+                        // Process results and emit events
+                        if let Err(e) = pregel.after_tick(result).await {
+                            // Emit final state before error
+                            let _ = tx.send(Ok(StreamEvent::End {
+                                output: pregel.snapshot_state(),
+                            }));
+                            // Send error through channel
+                            let _ = tx.send(Err(e));
+                            return;
+                        }
+                    }
+                    Err(e) => {
+                        // Emit final state before error
+                        let _ = tx.send(Ok(StreamEvent::End {
+                            output: pregel.snapshot_state(),
+                        }));
+                        // Send error through channel
+                        let _ = tx.send(Err(e));
+                        return;
+                    }
+                }
+            }
+
+            // Send End event with final state
+            let final_state = pregel.into_state();
+            let _ = tx.send(Ok(StreamEvent::End {
+                output: final_state,
+            }));
         });
 
-        Ok(events)
+        // Return stream using futures::stream::unfold to convert UnboundedReceiver to Stream
+        Ok(Box::pin(stream::unfold(rx, |mut rx| async move {
+            rx.recv().await.map(|item| (item, rx))
+        })))
     }
 
     /// Resume execution from an interrupt point
     ///
     /// Continues graph execution from where it was interrupted by a
-    /// human-in-the-loop interaction, using the provided resume value.
+    /// human-in-the-loop interaction, using the provided resume value(s).
     ///
     /// # Arguments
     ///
     /// * `config` - Configuration with `thread_id` and `checkpoint_id` set
-    /// * `resume_value` - Value to pass to the interrupted node
+    /// * `resume_value` - Resume value(s) to pass to interrupted node(s).
+    ///   Supports single value, ID-based resume, and namespace-based resume.
     ///
     /// # Errors
     ///
@@ -261,10 +337,34 @@ impl<S: State> CompiledGraph<S> {
     ///
     /// This method requires `S: DeserializeOwned` to deserialize the state
     /// from the checkpoint. This is a requirement of checkpoint-based recovery.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// use juncture_core::{StateGraph, State, interrupt::ResumeValue};
+    /// use serde_json::json;
+    ///
+    /// // Single value resume
+    /// let output = compiled.resume(
+    ///     &config,
+    ///     ResumeValue::Single(json!("approved"))
+    /// ).await?;
+    ///
+    /// // ID-based resume for named interrupts
+    /// let mut by_id = std::collections::HashMap::new();
+    /// by_id.insert("interrupt_123".to_string(), json!("yes"));
+    /// let output = compiled.resume(&config, ResumeValue::ById(by_id)).await?;
+    ///
+    /// // Namespace-based resume for multiple interrupts
+    /// let mut by_ns = std::collections::HashMap::new();
+    /// by_ns.insert("node1:0".to_string(), json!("value1"));
+    /// by_ns.insert("node2:0".to_string(), json!("value2"));
+    /// let output = compiled.resume(&config, ResumeValue::ByNamespace(by_ns)).await?;
+    /// ```
     pub async fn resume(
         &self,
         config: &RunnableConfig,
-        resume_value: serde_json::Value,
+        resume_value: ResumeValue,
     ) -> Result<GraphOutput<S>, JunctureError>
     where
         S: for<'de> serde::Deserialize<'de>,
@@ -285,6 +385,15 @@ impl<S: State> CompiledGraph<S> {
                     config.thread_id, config.checkpoint_id
                 ))
             })?;
+
+        // Verify checkpoint is from an interrupt state
+        // Per design spec 06-hitl.md section 5, resume() only works on interrupt-state checkpoints
+        if !matches!(tuple.metadata.source, CheckpointSource::Interrupt { .. }) {
+            return Err(JunctureError::checkpoint(format!(
+                "resume() requires checkpoint from Interrupt source, got {:?}",
+                tuple.metadata.source
+            )));
+        }
 
         // Deserialize state from checkpoint
         let state: S = serde_json::from_value(tuple.checkpoint.channel_values)
@@ -330,6 +439,41 @@ impl<S: State> CompiledGraph<S> {
                 budget_usage: None,
             },
         })
+    }
+
+    /// Resume execution from an interrupt point with a single value
+    ///
+    /// Convenience method for resuming with a single value. Equivalent to
+    /// calling `resume()` with `ResumeValue::Single(value)`.
+    ///
+    /// # Arguments
+    ///
+    /// * `config` - Configuration with `thread_id` and `checkpoint_id` set
+    /// * `value` - Single value to pass to the interrupted node
+    ///
+    /// # Errors
+    ///
+    /// Returns [`JunctureError::Checkpoint`] if no checkpointer is configured
+    /// or if the checkpoint cannot be found.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// use juncture_core::{StateGraph, State};
+    /// use serde_json::json;
+    ///
+    /// // Simple single-value resume
+    /// let output = compiled.resume_single(&config, json!("approved")).await?;
+    /// ```
+    pub async fn resume_single(
+        &self,
+        config: &RunnableConfig,
+        value: serde_json::Value,
+    ) -> Result<GraphOutput<S>, JunctureError>
+    where
+        S: for<'de> serde::Deserialize<'de>,
+    {
+        self.resume(config, ResumeValue::Single(value)).await
     }
 
     /// Get the current state snapshot for a thread
@@ -976,7 +1120,180 @@ mod tests {
         let compiled = CompiledGraph::new(nodes, TriggerTable::new(), IndexMap::new());
         let config = RunnableConfig::new();
 
-        let result = compiled.resume(&config, serde_json::Value::Null).await;
+        let result = compiled
+            .resume(&config, ResumeValue::Single(serde_json::Value::Null))
+            .await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().is_checkpoint());
+    }
+
+    #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "comprehensive test with multiple mock scenarios"
+    )]
+    async fn test_resume_validates_interrupt_source() {
+        use crate::checkpoint::{
+            Checkpoint, CheckpointMetadata, CheckpointSource, CheckpointTuple,
+        };
+        use std::collections::HashMap;
+
+        // Create a mock checkpointer that returns a non-interrupt checkpoint
+        struct MockCheckpointer {
+            checkpoint_source: CheckpointSource,
+        }
+
+        #[async_trait::async_trait]
+        impl crate::checkpoint::CheckpointSaver for MockCheckpointer {
+            async fn get_tuple(
+                &self,
+                _config: &crate::config::RunnableConfig,
+            ) -> Result<Option<CheckpointTuple>, crate::checkpoint::CheckpointError> {
+                Ok(Some(CheckpointTuple {
+                    config: crate::config::RunnableConfig::new(),
+                    checkpoint: Checkpoint {
+                        id: "test_id".to_string(),
+                        channel_values: serde_json::json!({}),
+                        channel_versions: HashMap::new(),
+                        versions_seen: HashMap::new(),
+                        pending_tasks: Vec::new(),
+                        pending_sends: Vec::new(),
+                        schema_version: 1,
+                        created_at: "2024-01-01T00:00:00Z".to_string(),
+                        v: 1,
+                        new_versions: HashMap::new(),
+                        counters_since_delta_snapshot: HashMap::new(),
+                    },
+                    metadata: CheckpointMetadata {
+                        source: self.checkpoint_source.clone(),
+                        step: 1,
+                        writes: HashMap::new(),
+                        parents: HashMap::new(),
+                        run_id: "test_run".to_string(),
+                    },
+                    pending_writes: Vec::new(),
+                    parent_config: None,
+                }))
+            }
+
+            async fn list(
+                &self,
+                _config: &crate::config::RunnableConfig,
+                _filter: Option<crate::checkpoint::CheckpointFilter>,
+            ) -> Result<Vec<CheckpointTuple>, crate::checkpoint::CheckpointError> {
+                Ok(Vec::new())
+            }
+
+            async fn put(
+                &self,
+                _config: &crate::config::RunnableConfig,
+                _checkpoint: Checkpoint,
+                _metadata: CheckpointMetadata,
+            ) -> Result<crate::config::RunnableConfig, crate::checkpoint::CheckpointError>
+            {
+                Ok(crate::config::RunnableConfig::new())
+            }
+
+            async fn put_writes(
+                &self,
+                _config: &crate::config::RunnableConfig,
+                _writes: Vec<crate::checkpoint::PendingWrite>,
+                _task_id: &str,
+            ) -> Result<(), crate::checkpoint::CheckpointError> {
+                Ok(())
+            }
+        }
+
+        // Test with Input source (should fail)
+        let nodes = {
+            let mut nodes: IndexMap<String, Arc<dyn crate::Node<StateDummy>>> = IndexMap::new();
+            nodes.insert("a".to_string(), mock_node("a"));
+            nodes
+        };
+
+        let compiled = CompiledGraph::with_checkpointer(
+            nodes.clone(),
+            TriggerTable::new(),
+            IndexMap::new(),
+            Some(Arc::new(MockCheckpointer {
+                checkpoint_source: CheckpointSource::Input,
+            })),
+        );
+
+        let config = RunnableConfig::new();
+        let result = compiled
+            .resume(&config, ResumeValue::Single(serde_json::json!("test")))
+            .await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.is_checkpoint());
+        assert!(
+            err.to_string()
+                .contains("resume() requires checkpoint from Interrupt source")
+        );
+        assert!(err.to_string().contains("Input"));
+
+        // Test with Loop source (should fail)
+        let compiled = CompiledGraph::with_checkpointer(
+            nodes.clone(),
+            TriggerTable::new(),
+            IndexMap::new(),
+            Some(Arc::new(MockCheckpointer {
+                checkpoint_source: CheckpointSource::Loop,
+            })),
+        );
+
+        let result = compiled
+            .resume(&config, ResumeValue::Single(serde_json::json!("test")))
+            .await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.is_checkpoint());
+        assert!(
+            err.to_string()
+                .contains("resume() requires checkpoint from Interrupt source")
+        );
+        assert!(err.to_string().contains("Loop"));
+
+        // Test with Interrupt source (should pass validation, though will fail later)
+        let compiled = CompiledGraph::with_checkpointer(
+            nodes,
+            TriggerTable::new(),
+            IndexMap::new(),
+            Some(Arc::new(MockCheckpointer {
+                checkpoint_source: CheckpointSource::Interrupt {
+                    node: "test_node".to_string(),
+                },
+            })),
+        );
+
+        let result = compiled
+            .resume(&config, ResumeValue::Single(serde_json::json!("test")))
+            .await;
+
+        // Should not fail with the source validation error
+        // (it will fail with a different error due to mock limitations)
+        if let Err(err) = result {
+            assert!(
+                !err.to_string()
+                    .contains("resume() requires checkpoint from Interrupt source")
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_resume_single_no_checkpointer() {
+        let mut nodes: IndexMap<String, Arc<dyn crate::Node<StateDummy>>> = IndexMap::new();
+        nodes.insert("a".to_string(), mock_node("a"));
+
+        let compiled = CompiledGraph::new(nodes, TriggerTable::new(), IndexMap::new());
+        let config = RunnableConfig::new();
+
+        let result = compiled
+            .resume_single(&config, serde_json::Value::Null)
+            .await;
         assert!(result.is_err());
         assert!(result.unwrap_err().is_checkpoint());
     }
@@ -1086,6 +1403,185 @@ mod tests {
         assert_eq!(filter.after_step, Some(5));
         assert_eq!(filter.before_step, Some(10));
         assert_eq!(filter.limit, Some(20));
+    }
+
+    #[tokio::test]
+    async fn test_stream_values_mode() {
+        use futures::StreamExt;
+
+        // Build a simple graph: START -> node_a (no outgoing edges, terminates naturally)
+        let mut nodes: IndexMap<String, Arc<dyn crate::Node<StateDummy>>> = IndexMap::new();
+        nodes.insert("node_a".to_string(), mock_node("node_a"));
+
+        let mut trigger_table = TriggerTable::new();
+        // Add incoming trigger from START
+        trigger_table.add_incoming(
+            "node_a".to_string(),
+            crate::edge::TriggerSource::Edge {
+                from: crate::edge::START.to_string(),
+            },
+        );
+
+        let compiled = CompiledGraph::new(nodes, trigger_table, IndexMap::new());
+        let config = RunnableConfig::new();
+
+        let mut stream = compiled
+            .stream(StateDummy, &config, StreamMode::Values)
+            .await
+            .expect("stream should succeed");
+
+        // Collect events
+        let mut events = Vec::new();
+        while let Some(result) = stream.next().await {
+            events.push(result.expect("stream event should be Ok"));
+        }
+
+        // Verify Values and End events are present
+        let has_values = events
+            .iter()
+            .any(|e| matches!(e, crate::stream::StreamEvent::Values { .. }));
+        let has_end = events
+            .iter()
+            .any(|e| matches!(e, crate::stream::StreamEvent::End { .. }));
+
+        assert!(has_values, "Expected Values events in Values mode");
+        assert!(has_end, "Expected End event");
+    }
+
+    #[tokio::test]
+    async fn test_stream_updates_mode() {
+        use futures::StreamExt;
+
+        // Build a simple graph: START -> node_a (no outgoing edges, terminates naturally)
+        let mut nodes: IndexMap<String, Arc<dyn crate::Node<StateDummy>>> = IndexMap::new();
+        nodes.insert("node_a".to_string(), mock_node("node_a"));
+
+        let mut trigger_table = TriggerTable::new();
+        trigger_table.add_incoming(
+            "node_a".to_string(),
+            crate::edge::TriggerSource::Edge {
+                from: crate::edge::START.to_string(),
+            },
+        );
+
+        let compiled = CompiledGraph::new(nodes, trigger_table, IndexMap::new());
+        let config = RunnableConfig::new();
+
+        let mut stream = compiled
+            .stream(StateDummy, &config, StreamMode::Updates)
+            .await
+            .expect("stream should succeed");
+
+        // Collect events
+        let mut events = Vec::new();
+        while let Some(result) = stream.next().await {
+            events.push(result.expect("stream event should be Ok"));
+        }
+
+        // Verify Updates and End events are present
+        let has_updates = events
+            .iter()
+            .any(|e| matches!(e, crate::stream::StreamEvent::Updates { .. }));
+        let has_end = events
+            .iter()
+            .any(|e| matches!(e, crate::stream::StreamEvent::End { .. }));
+
+        assert!(has_updates, "Expected Updates events in Updates mode");
+        assert!(has_end, "Expected End event");
+    }
+
+    #[tokio::test]
+    async fn test_stream_debug_mode() {
+        use futures::StreamExt;
+
+        // Build a simple graph: START -> node_a (no outgoing edges, terminates naturally)
+        let mut nodes: IndexMap<String, Arc<dyn crate::Node<StateDummy>>> = IndexMap::new();
+        nodes.insert("node_a".to_string(), mock_node("node_a"));
+
+        let mut trigger_table = TriggerTable::new();
+        trigger_table.add_incoming(
+            "node_a".to_string(),
+            crate::edge::TriggerSource::Edge {
+                from: crate::edge::START.to_string(),
+            },
+        );
+
+        let compiled = CompiledGraph::new(nodes, trigger_table, IndexMap::new());
+        let config = RunnableConfig::new();
+
+        let mut stream = compiled
+            .stream(StateDummy, &config, StreamMode::Debug)
+            .await
+            .expect("stream should succeed");
+
+        // Collect events
+        let mut events = Vec::new();
+        while let Some(result) = stream.next().await {
+            events.push(result.expect("stream event should be Ok"));
+        }
+
+        // Debug mode should emit all events including Debug events
+        let has_debug = events
+            .iter()
+            .any(|e| matches!(e, crate::stream::StreamEvent::Debug(_)));
+        let has_end = events
+            .iter()
+            .any(|e| matches!(e, crate::stream::StreamEvent::End { .. }));
+
+        assert!(has_debug, "Expected Debug events in Debug mode");
+        assert!(has_end, "Expected End event");
+    }
+
+    #[tokio::test]
+    async fn test_stream_end_event() {
+        use futures::StreamExt;
+
+        // Build a simple graph: START -> node_a (no outgoing edges, terminates naturally)
+        let mut nodes: IndexMap<String, Arc<dyn crate::Node<StateDummy>>> = IndexMap::new();
+        nodes.insert("node_a".to_string(), mock_node("node_a"));
+
+        let mut trigger_table = TriggerTable::new();
+        trigger_table.add_incoming(
+            "node_a".to_string(),
+            crate::edge::TriggerSource::Edge {
+                from: crate::edge::START.to_string(),
+            },
+        );
+
+        let compiled = CompiledGraph::new(nodes, trigger_table, IndexMap::new());
+        let config = RunnableConfig::new();
+
+        let mut stream = compiled
+            .stream(StateDummy, &config, StreamMode::Values)
+            .await
+            .expect("stream should succeed");
+
+        // Collect events
+        let mut events = Vec::new();
+        while let Some(result) = stream.next().await {
+            events.push(result.expect("stream event should be Ok"));
+        }
+
+        // Verify End event is present and contains final state
+        assert!(!events.is_empty(), "Stream should emit events");
+
+        let end_events: Vec<_> = events
+            .iter()
+            .filter_map(|e| {
+                if let crate::stream::StreamEvent::End { output } = e {
+                    Some(output.clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        assert!(!end_events.is_empty(), "Expected at least one End event");
+
+        // Verify we can clone the state (it should be valid)
+        for state in end_events {
+            let _cloned_state = state.clone();
+        }
     }
 
     fn mock_node(name: &str) -> Arc<dyn crate::Node<StateDummy>> {

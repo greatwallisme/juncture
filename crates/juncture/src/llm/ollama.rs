@@ -12,9 +12,10 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
 use crate::llm::{
-    CallOptions, ChatModel, Content, ContentPart, LlmError, Message, Role,
-    ToolDefinition,
+    CallOptions, ChatModel, Content, ContentPart, LlmError, Message, Role, ToolDefinition,
 };
+
+use juncture_tracing::spans::attrs;
 
 /// Default Ollama API base URL.
 const OLLAMA_BASE_URL: &str = "http://localhost:11434";
@@ -145,6 +146,17 @@ impl ChatModel for ChatOllama {
             .and_then(|o| o.model_override.as_ref())
             .unwrap_or(&self.model);
 
+        let span = tracing::info_span!(
+            "juncture.llm.call",
+            "juncture.llm.model" = %model,
+            "juncture.llm.provider" = "ollama",
+            "juncture.tokens.input" = tracing::field::Empty,
+            "juncture.tokens.output" = tracing::field::Empty,
+            "juncture.llm.has_tool_calls" = false,
+            "juncture.llm.stop_reason" = tracing::field::Empty,
+        );
+        let _enter = span.enter();
+
         let api_messages: Vec<_> = messages
             .iter()
             .map(|m| OllamaMessage {
@@ -170,6 +182,8 @@ impl ChatModel for ChatOllama {
             }),
         };
 
+        let start = std::time::Instant::now();
+
         let response = self
             .client
             .post(format!("{}/api/chat", self.base_url))
@@ -192,13 +206,35 @@ impl ChatModel for ChatOllama {
         let api_response: OllamaResponse = serde_json::from_str(&response_text)
             .map_err(|e| LlmError::InvalidResponse(format!("Failed to parse response: {e}")))?;
 
+        // Ollama doesn't provide token counts or detailed stop reason
+        // These fields remain Empty as specified
+        tracing::Span::current().record(attrs::LLM_HAS_TOOL_CALLS, false);
+
+        // Emit metrics for LLM call (Ollama doesn't provide token counts)
+        tracing::debug!(
+            name: "juncture.llm.calls",
+            provider = "ollama",
+            model = %model,
+        );
+
+        tracing::debug!(
+            name: "juncture.llm.duration_ms",
+            duration_ms = start.elapsed().as_millis(),
+            model = %model,
+        );
+
         Ok(Message::ai_with_tool_calls(
             api_response.message.content,
             Vec::new(),
         ))
     }
 
-    #[allow(clippy::redundant_clone, clippy::uninlined_format_args, reason = "Complex SSE stream parsing logic")]
+    #[allow(
+        clippy::redundant_clone,
+        clippy::uninlined_format_args,
+        clippy::too_many_lines,
+        reason = "Complex SSE stream parsing logic with full Ollama protocol handling"
+    )]
     fn stream(
         &self,
         messages: &[Message],
@@ -207,6 +243,14 @@ impl ChatModel for ChatOllama {
         let model = options
             .and_then(|o| o.model_override.as_ref())
             .unwrap_or(&self.model);
+
+        // Create span for stream setup
+        let span = tracing::info_span!(
+            "juncture.llm.call",
+            "juncture.llm.model" = %model,
+            "juncture.llm.provider" = "ollama",
+        );
+        let _enter = span.enter();
 
         let api_messages: Vec<_> = messages
             .iter()
@@ -251,7 +295,12 @@ impl ChatModel for ChatOllama {
                     .await
                 {
                     Ok(r) => r,
-                    Err(e) => return Some((Err(LlmError::NetworkError(e)), (client, base_url, request, true, buffer))),
+                    Err(e) => {
+                        return Some((
+                            Err(LlmError::NetworkError(e)),
+                            (client, base_url, request, true, buffer),
+                        ));
+                    }
                 };
 
                 let status = response.status();
@@ -259,11 +308,20 @@ impl ChatModel for ChatOllama {
                 if !status.is_success() {
                     let response_text = match response.text().await {
                         Ok(t) => t,
-                        Err(e) => return Some((Err(LlmError::NetworkError(e)), (client, base_url, request, true, buffer))),
+                        Err(e) => {
+                            return Some((
+                                Err(LlmError::NetworkError(e)),
+                                (client, base_url, request, true, buffer),
+                            ));
+                        }
                     };
 
                     return Some((
-                        Err(LlmError::InvalidResponse(format!("HTTP {}: {}", status.as_u16(), response_text))),
+                        Err(LlmError::InvalidResponse(format!(
+                            "HTTP {}: {}",
+                            status.as_u16(),
+                            response_text
+                        ))),
                         (client, base_url, request, true, buffer),
                     ));
                 }
@@ -273,7 +331,12 @@ impl ChatModel for ChatOllama {
                 while let Some(chunk_result) = byte_stream.next().await {
                     let chunk = match chunk_result {
                         Ok(c) => c,
-                        Err(e) => return Some((Err(LlmError::NetworkError(e)), (client, base_url, request, true, buffer))),
+                        Err(e) => {
+                            return Some((
+                                Err(LlmError::NetworkError(e)),
+                                (client, base_url, request, true, buffer),
+                            ));
+                        }
                     };
 
                     buffer.extend_from_slice(&chunk);
@@ -289,7 +352,9 @@ impl ChatModel for ChatOllama {
                         }
 
                         // Parse JSON line
-                        if let Ok(ollama_response) = serde_json::from_str::<OllamaStreamResponse>(line) {
+                        if let Ok(ollama_response) =
+                            serde_json::from_str::<OllamaStreamResponse>(line)
+                        {
                             let chunk = crate::llm::MessageChunk {
                                 content: ollama_response.message.content,
                                 tool_call_chunks: Vec::new(),
@@ -302,7 +367,10 @@ impl ChatModel for ChatOllama {
                             }
 
                             if !chunk.content.is_empty() {
-                                return Some((Ok(chunk), (client, base_url, request, false, buffer)));
+                                return Some((
+                                    Ok(chunk),
+                                    (client, base_url, request, false, buffer),
+                                ));
                             }
                         }
                     }

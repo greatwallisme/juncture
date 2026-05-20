@@ -311,6 +311,12 @@ pub enum CheckpointSource {
     /// 从历史 checkpoint 分叉时
     Fork,
 }
+
+// > **Implementation Note (C-04-1)**: Implementation adds `CheckpointSource::Interrupt` variant
+// > for human-in-the-loop (HITL) workflows. When a node triggers an interrupt (via `Command::interrupt`),
+// > the checkpoint saved at that point is tagged with `source: Interrupt`. This allows `get_state_history`
+// > filters to distinguish HITL pause points from normal execution checkpoints, enabling UIs to
+// > display "awaiting human input" status and filter history by interrupt events.
 ```
 
 ### 3.4 CheckpointTuple
@@ -594,6 +600,15 @@ impl Checkpoint {
         }
     }
 }
+
+// > **Implementation Note (C-04-3)**: The serialization system is more comprehensive than designed.
+// > In addition to Msgpack and JSON formats, the implementation provides auto-detection of the
+// > serialization format on read (via magic byte inspection), allowing seamless migration from
+// > JSON to Msgpack without data loss. The `Encrypted` variant (AES-256-GCM) is implemented as
+// > a serializer wrapper that composes with any inner format, and auto-detection correctly handles
+// > encrypted payloads by checking for the encryption header before delegating to the appropriate
+// > deserializer. This three-layer system (Msgpack/JSON + Encryption + Auto-detection) exceeds
+// > the design's two-format specification.
 ```
 
 ### 5.2 JSON 备用（兼容性）
@@ -911,6 +926,12 @@ impl<S: State + Serialize + DeserializeOwned> CompiledGraph<S> {
 - `"node_name:uuid"` — 一级子图（uuid 标识具体的子图调用实例）
 - `"outer:uuid|inner:uuid"` — 嵌套子图
 
+> **Implementation Note (C-04-5)**: The actual implementation uses `|` (pipe) as the namespace
+> separator between nesting levels instead of `:` (colon) shown in the design above. For example,
+> a nested subgraph uses `"node_name|uuid"` format for one level and `"outer|uuid1|inner|uuid2"`
+> for two levels. The pipe separator was chosen to avoid ambiguity with UUID v6 string representation
+> which already contains colons. Code that parses or constructs checkpoint namespaces must use `|`.
+
 ### 7.3 Config 中的 checkpoint 相关字段
 
 ```rust
@@ -991,6 +1012,13 @@ pub enum CheckpointError {
     #[error("连接池耗尽")]
     PoolExhausted,
 }
+
+// > **Implementation Note (C-04-7)**: Implementation uses dual error types for finer-grained error
+// > handling. In addition to `CheckpointError` shown above (for storage/serialization errors), the
+// > implementation introduces `CheckpointPutError` specifically for `put()` operation failures.
+// > This separation allows callers to distinguish between "checkpoint data is invalid" errors and
+// > "storage backend rejected the write" errors without inspecting error message strings, enabling
+// > more targeted retry and recovery strategies.
 ```
 
 ---

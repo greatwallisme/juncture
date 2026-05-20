@@ -11,6 +11,7 @@ categories.workspace = true
 
 [dependencies]
 juncture-core = { path = "../juncture-core" }
+juncture-tracing = { path = "../juncture-tracing" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
@@ -23,6 +24,7 @@ aes-gcm = { version = "0.10", optional = true }
 pbkdf2 = { version = "0.12", optional = true }
 sha2 = { version = "0.10", optional = true }
 tokio = { version = "1", features = ["sync"] }
+tracing = "0.1"
 sqlx = { version = "0.8", features = ["runtime-tokio"], optional = true }
 
 [features]

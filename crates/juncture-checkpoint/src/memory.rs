@@ -7,9 +7,11 @@ use juncture_core::checkpoint::{
     CheckpointSaver, CheckpointTuple, PendingWrite,
 };
 use juncture_core::config::RunnableConfig;
+use juncture_tracing::spans::names;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use tracing::Instrument;
 
 use crate::error::CheckpointError;
 
@@ -216,40 +218,60 @@ impl CheckpointSaver for MemorySaver {
         checkpoint: Checkpoint,
         metadata: CheckpointMetadata,
     ) -> Result<RunnableConfig, CoreCheckpointError> {
-        let thread_id = Self::get_thread_id(config).map_checkpoint()?;
-        let checkpoint_ns = Self::get_checkpoint_ns(config);
-        let checkpoint_id = checkpoint.id.clone();
+        // Create tracing span for checkpoint put operation
+        let span = tracing::info_span!(
+            target: "juncture",
+            names::CHECKPOINT_PUT,
+            "juncture.checkpoint.id" = %checkpoint.id,
+            "juncture.checkpoint.source" = ?metadata.source,
+            "juncture.checkpoint.step" = metadata.step,
+        );
 
-        // Create checkpoint tuple
-        let tuple = CheckpointTuple {
-            config: config.clone(),
-            checkpoint,
-            metadata,
-            pending_writes: Vec::new(),
-            parent_config: None,
-        };
+        async move {
+            let thread_id = Self::get_thread_id(config).map_checkpoint()?;
+            let checkpoint_ns = Self::get_checkpoint_ns(config);
+            let checkpoint_id = checkpoint.id.clone();
+            let source = metadata.source.clone();
 
-        // Store checkpoint by cloning, modifying, and replacing
-        // This approach avoids holding the write lock for too long
-        let mut storage = self.storage.write().await;
-        let thread_map = storage
-            .entry(thread_id.clone())
-            .or_insert_with(HashMap::new);
-        let namespace = thread_map
-            .entry(checkpoint_ns.clone())
-            .or_insert_with(Vec::new);
+            // Create checkpoint tuple
+            let tuple = CheckpointTuple {
+                config: config.clone(),
+                checkpoint,
+                metadata,
+                pending_writes: Vec::new(),
+                parent_config: None,
+            };
 
-        namespace.push(tuple);
+            // Store checkpoint by cloning, modifying, and replacing
+            // This approach avoids holding the write lock for too long
+            let mut storage = self.storage.write().await;
+            let thread_map = storage
+                .entry(thread_id.clone())
+                .or_insert_with(HashMap::new);
+            let namespace = thread_map
+                .entry(checkpoint_ns.clone())
+                .or_insert_with(Vec::new);
 
-        // Keep sorted by creation time descending
-        Self::sort_checkpoints(namespace);
-        drop(storage);
+            namespace.push(tuple);
 
-        // Return updated config with checkpoint_id
-        let mut result_config = config.clone();
-        result_config.checkpoint_id = Some(checkpoint_id);
+            // Keep sorted by creation time descending
+            Self::sort_checkpoints(namespace);
+            drop(storage);
 
-        Ok(result_config)
+            // Emit metrics for checkpoint write
+            tracing::debug!(
+                name: "juncture.checkpoint.writes",
+                source = ?source,
+            );
+
+            // Return updated config with checkpoint_id
+            let mut result_config = config.clone();
+            result_config.checkpoint_id = Some(checkpoint_id);
+
+            Ok(result_config)
+        }
+        .instrument(span)
+        .await
     }
 
     async fn put_writes(
@@ -258,34 +280,48 @@ impl CheckpointSaver for MemorySaver {
         writes: Vec<PendingWrite>,
         task_id: &str,
     ) -> Result<(), CoreCheckpointError> {
-        let thread_id = Self::get_thread_id(config).map_checkpoint()?;
-        let checkpoint_ns = Self::get_checkpoint_ns(config);
-        let checkpoint_id = config
-            .checkpoint_id
-            .clone()
-            .ok_or_else(|| CoreCheckpointError::Storage("checkpoint_id is required".to_string()))?;
+        let checkpoint_id_for_span = config.checkpoint_id.clone().unwrap_or_default();
 
-        let key = (thread_id, checkpoint_id, checkpoint_ns);
+        // Create tracing span for checkpoint put_writes operation
+        let span = tracing::info_span!(
+            target: "juncture",
+            "juncture.checkpoint.put_writes",
+            "juncture.checkpoint.id" = %checkpoint_id_for_span,
+            "juncture.checkpoint.task_id" = %task_id,
+            "juncture.checkpoint.writes_count" = writes.len(),
+        );
 
-        // Prepare the writes with task_id set
-        let prepared_writes: Vec<PendingWrite> = writes
-            .into_iter()
-            .map(|mut w| {
-                w.task_id = task_id.to_string();
-                w
-            })
-            .collect();
+        async move {
+            let thread_id = Self::get_thread_id(config).map_checkpoint()?;
+            let checkpoint_ns = Self::get_checkpoint_ns(config);
+            let checkpoint_id = config.checkpoint_id.clone().ok_or_else(|| {
+                CoreCheckpointError::Storage("checkpoint_id is required".to_string())
+            })?;
 
-        // Insert the prepared writes in a single statement to minimize lock time
-        // We chain the operations to avoid storing the lock guard
-        self.writes
-            .write()
-            .await
-            .entry(key)
-            .or_insert_with(Vec::new)
-            .extend(prepared_writes);
+            let key = (thread_id, checkpoint_id, checkpoint_ns);
 
-        Ok(())
+            // Prepare the writes with task_id set
+            let prepared_writes: Vec<PendingWrite> = writes
+                .into_iter()
+                .map(|mut w| {
+                    w.task_id = task_id.to_string();
+                    w
+                })
+                .collect();
+
+            // Insert the prepared writes in a single statement to minimize lock time
+            // We chain the operations to avoid storing the lock guard
+            self.writes
+                .write()
+                .await
+                .entry(key)
+                .or_insert_with(Vec::new)
+                .extend(prepared_writes);
+
+            Ok(())
+        }
+        .instrument(span)
+        .await
     }
 }
 

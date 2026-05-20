@@ -13,9 +13,11 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
 use crate::llm::{
-    CallOptions, ChatModel, Content, ContentPart, LlmError, Message, Role,
-    TokenUsage, ToolCall, ToolChoice, ToolDefinition,
+    CallOptions, ChatModel, Content, ContentPart, LlmError, Message, Role, TokenUsage, ToolCall,
+    ToolChoice, ToolDefinition,
 };
+
+use juncture_tracing::spans::attrs;
 
 /// Default Anthropic API base URL.
 const ANTHROPIC_BASE_URL: &str = "https://api.anthropic.com";
@@ -223,6 +225,10 @@ impl ChatAnthropic {
 
 #[async_trait]
 impl ChatModel for ChatAnthropic {
+    #[allow(
+        clippy::too_many_lines,
+        reason = "invoke method requires: message conversion, request building, HTTP call, response parsing, span attribute recording, and metrics emission. The length is justified by the complexity of LLM integration with proper observability."
+    )]
     async fn invoke(
         &self,
         messages: &[Message],
@@ -231,6 +237,17 @@ impl ChatModel for ChatAnthropic {
         let model = options
             .and_then(|o| o.model_override.as_ref())
             .unwrap_or(&self.model);
+
+        let span = tracing::info_span!(
+            "juncture.llm.call",
+            "juncture.llm.model" = %model,
+            "juncture.llm.provider" = "anthropic",
+            "juncture.tokens.input" = tracing::field::Empty,
+            "juncture.tokens.output" = tracing::field::Empty,
+            "juncture.llm.has_tool_calls" = false,
+            "juncture.llm.stop_reason" = tracing::field::Empty,
+        );
+        let _enter = span.enter();
 
         let (system_msg, api_messages): (Vec<_>, Vec<_>) = messages
             .iter()
@@ -289,6 +306,8 @@ impl ChatModel for ChatAnthropic {
             stream: false,
         };
 
+        let start = std::time::Instant::now();
+
         let response = self
             .client
             .post(format!("{}/v1/messages", self.base_url))
@@ -309,10 +328,57 @@ impl ChatModel for ChatAnthropic {
         let api_response: AnthropicResponse = serde_json::from_str(&response_text)
             .map_err(|e| LlmError::InvalidResponse(format!("Failed to parse response: {e}")))?;
 
+        // Record span attributes
+        if let Some(usage) = &api_response.usage {
+            tracing::Span::current().record(attrs::TOKENS_INPUT, usage.input_tokens);
+            tracing::Span::current().record(attrs::TOKENS_OUTPUT, usage.output_tokens);
+        }
+
+        let has_tool_calls = api_response
+            .content
+            .iter()
+            .any(|block| matches!(block, ResponseContentBlock::ToolUse { .. }));
+        tracing::Span::current().record(attrs::LLM_HAS_TOOL_CALLS, has_tool_calls);
+
+        if let Some(stop_reason) = api_response.stop_reason.as_deref() {
+            tracing::Span::current().record(attrs::LLM_STOP_REASON, stop_reason);
+        }
+
+        // Emit metrics for LLM call
+        tracing::debug!(
+            name: "juncture.llm.calls",
+            provider = "anthropic",
+            model = %model,
+        );
+
+        if let Some(usage) = &api_response.usage {
+            tracing::debug!(
+                name: "juncture.llm.tokens.input",
+                tokens = usage.input_tokens,
+                model = %model,
+            );
+            tracing::debug!(
+                name: "juncture.llm.tokens.output",
+                tokens = usage.output_tokens,
+                model = %model,
+            );
+        }
+
+        tracing::debug!(
+            name: "juncture.llm.duration_ms",
+            duration_ms = start.elapsed().as_millis(),
+            model = %model,
+        );
+
         Ok(convert_api_response(api_response))
     }
 
-    #[allow(clippy::too_many_lines, clippy::redundant_clone, clippy::uninlined_format_args, reason = "Complex SSE stream parsing logic")]
+    #[allow(
+        clippy::too_many_lines,
+        clippy::redundant_clone,
+        clippy::uninlined_format_args,
+        reason = "Complex SSE stream parsing logic"
+    )]
     fn stream(
         &self,
         messages: &[Message],
@@ -321,6 +387,14 @@ impl ChatModel for ChatAnthropic {
         let model = options
             .and_then(|o| o.model_override.as_ref())
             .unwrap_or(&self.model);
+
+        // Create span for stream setup
+        let span = tracing::info_span!(
+            "juncture.llm.call",
+            "juncture.llm.model" = %model,
+            "juncture.llm.provider" = "anthropic",
+        );
+        let _enter = span.enter();
 
         let (system_msg, api_messages): (Vec<_>, Vec<_>) = messages
             .iter()
@@ -408,7 +482,12 @@ impl ChatModel for ChatAnthropic {
                     .await
                 {
                     Ok(r) => r,
-                    Err(e) => return Some((Err(LlmError::NetworkError(e)), (client, api_key, base_url, request, true, buffer))),
+                    Err(e) => {
+                        return Some((
+                            Err(LlmError::NetworkError(e)),
+                            (client, api_key, base_url, request, true, buffer),
+                        ));
+                    }
                 };
 
                 let status = response.status();
@@ -416,7 +495,12 @@ impl ChatModel for ChatAnthropic {
                 if !status.is_success() {
                     let response_text = match response.text().await {
                         Ok(t) => t,
-                        Err(e) => return Some((Err(LlmError::NetworkError(e)), (client, api_key, base_url, request, true, buffer))),
+                        Err(e) => {
+                            return Some((
+                                Err(LlmError::NetworkError(e)),
+                                (client, api_key, base_url, request, true, buffer),
+                            ));
+                        }
                     };
 
                     let error = match parse_anthropic_error(&response_text, status) {
@@ -425,10 +509,18 @@ impl ChatModel for ChatAnthropic {
                             tool_call_chunks: Vec::new(),
                             usage_delta: None,
                         },
-                        Err(e) => return Some((Err(e), (client, api_key, base_url, request, true, buffer))),
+                        Err(e) => {
+                            return Some((
+                                Err(e),
+                                (client, api_key, base_url, request, true, buffer),
+                            ));
+                        }
                     };
 
-                    return Some((Ok(error), (client, api_key, base_url, request, true, buffer)));
+                    return Some((
+                        Ok(error),
+                        (client, api_key, base_url, request, true, buffer),
+                    ));
                 }
 
                 let mut byte_stream = response.bytes_stream();
@@ -436,7 +528,12 @@ impl ChatModel for ChatAnthropic {
                 while let Some(chunk_result) = byte_stream.next().await {
                     let chunk = match chunk_result {
                         Ok(c) => c,
-                        Err(e) => return Some((Err(LlmError::NetworkError(e)), (client, api_key, base_url, request, true, buffer))),
+                        Err(e) => {
+                            return Some((
+                                Err(LlmError::NetworkError(e)),
+                                (client, api_key, base_url, request, true, buffer),
+                            ));
+                        }
                     };
 
                     buffer.extend_from_slice(&chunk);
@@ -454,14 +551,27 @@ impl ChatModel for ChatAnthropic {
                         // Parse SSE line format: "event: type" or "data: {...}"
                         if let Some(data_str) = line.strip_prefix("data: ") {
                             // Parse the JSON data
-                            if let Ok(sse_event) = serde_json::from_str::<AnthropicSSEEvent>(data_str) {
+                            if let Ok(sse_event) =
+                                serde_json::from_str::<AnthropicSSEEvent>(data_str)
+                            {
                                 match convert_sse_event(sse_event) {
                                     Ok(chunk) => {
-                                        if !chunk.content.is_empty() || !chunk.tool_call_chunks.is_empty() || chunk.usage_delta.is_some() {
-                                            return Some((Ok(chunk), (client, api_key, base_url, request, false, buffer)));
+                                        if !chunk.content.is_empty()
+                                            || !chunk.tool_call_chunks.is_empty()
+                                            || chunk.usage_delta.is_some()
+                                        {
+                                            return Some((
+                                                Ok(chunk),
+                                                (client, api_key, base_url, request, false, buffer),
+                                            ));
                                         }
                                     }
-                                    Err(e) => return Some((Err(e), (client, api_key, base_url, request, true, buffer))),
+                                    Err(e) => {
+                                        return Some((
+                                            Err(e),
+                                            (client, api_key, base_url, request, true, buffer),
+                                        ));
+                                    }
                                 }
                             }
                         }
@@ -580,6 +690,8 @@ struct AnthropicResponse {
     role: String,
     content: Vec<ResponseContentBlock>,
     usage: Option<TokenUsage>,
+    #[serde(default)]
+    stop_reason: Option<String>,
 }
 
 /// Anthropic API response content block.
@@ -740,10 +852,7 @@ enum AnthropicSSEEvent {
         content_block: Option<serde_json::Value>,
     },
     #[serde(rename = "content_block_delta")]
-    ContentBlockDelta {
-        index: usize,
-        delta: DeltaContent,
-    },
+    ContentBlockDelta { index: usize, delta: DeltaContent },
     #[serde(rename = "content_block_stop")]
     ContentBlockStop { index: usize },
     #[serde(rename = "message_delta")]

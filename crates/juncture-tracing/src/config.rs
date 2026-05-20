@@ -11,7 +11,7 @@ use opentelemetry::trace::TracerProvider as _;
 #[cfg(feature = "otel")]
 use opentelemetry_otlp::WithExportConfig;
 #[cfg(feature = "otel")]
-use opentelemetry_sdk::{trace::TracerProvider, Resource};
+use opentelemetry_sdk::{Resource, trace::TracerProvider};
 #[cfg(feature = "otel")]
 use tracing_subscriber::prelude::*;
 
@@ -361,12 +361,11 @@ impl TracingConfig {
             .build();
 
         // Create OpenTelemetry layer
-        let otel_layer = tracing_opentelemetry::layer()
-            .with_tracer(tracer_provider.tracer("juncture"));
+        let otel_layer =
+            tracing_opentelemetry::layer().with_tracer(tracer_provider.tracer("juncture"));
 
         // Create fmt layer for console logging with filter
-        let fmt_layer = tracing_subscriber::fmt::layer()
-            .with_filter(env_filter);
+        let fmt_layer = tracing_subscriber::fmt::layer().with_filter(env_filter);
 
         // Build and initialize subscriber with both layers
         tracing_subscriber::registry()

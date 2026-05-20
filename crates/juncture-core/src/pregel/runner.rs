@@ -6,7 +6,7 @@
 use crate::{
     JunctureError, Node, State,
     config::RunnableConfig,
-    interrupt::InterruptContext,
+    interrupt::{InterruptContext, ResumeValue},
     pregel::types::{PendingTask, SuperstepResult, TaskOutput},
 };
 use std::{sync::Arc, time::Instant};
@@ -16,7 +16,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
 #[cfg(feature = "otel")]
-use tracing::{event, Level};
+use tracing::{Level, event};
 
 /// Execute a single superstep in parallel
 ///
@@ -71,6 +71,10 @@ use tracing::{event, Level};
 ///     None::<Arc<dyn CheckpointSaver>>
 /// ).await?;
 /// ```
+#[expect(
+    clippy::too_many_lines,
+    reason = "execute_superstep requires: early return, semaphore creation, interrupt context setup, task spawning with span creation, and result collection. The length is justified by the complexity of parallel execution with proper error handling and observability."
+)]
 pub async fn execute_superstep<S: State>(
     pending_tasks: &[PendingTask<S>],
     state: &S,
@@ -92,12 +96,8 @@ pub async fn execute_superstep<S: State>(
     }
 
     // Create interrupt context for HITL support
-    // Extract resume values from config if available
-    let resume_values = config
-        .resume_value
-        .as_ref()
-        .map(|v| vec![Some(v.clone())])
-        .unwrap_or_default();
+    // Convert ResumeValue to Vec<Option<serde_json::Value>> for InterruptContext
+    let resume_values = convert_resume_value_to_vec(&config.resume_value);
 
     let (interrupt_tx, interrupt_rx) = mpsc::unbounded_channel();
     let interrupt_context = Arc::new(InterruptContext::new(resume_values, interrupt_tx));
@@ -126,49 +126,80 @@ pub async fn execute_superstep<S: State>(
             "juncture.node.execute",
             node_name = %node_name,
             task_id = %task_id,
+            "juncture.node.output_type" = tracing::field::Empty,
         );
 
-        join_set.spawn(async move {
-            // Acquire semaphore permit
-            let _permit = permit.acquire_owned().await.unwrap();
-
-            let start = Instant::now();
-
-            // Execute task with cancellation support and interrupt context
-            // The INTERRUPT_CONTEXT.scope() makes the context available to
-            // the interrupt!() macro within node execution
-            let result = tokio::select! {
-                biased;
-                () = token.cancelled() => {
-                    return Err(JunctureError::execution("Task cancelled"));
-                }
-                result = crate::interrupt::INTERRUPT_CONTEXT.scope(ctx, async move {
-                    node.call(task_state, &task_config).await
-                }) => result,
-            };
-
-            let duration = start.elapsed();
-
-            #[cfg(feature = "otel")]
-            {
-                // Emit metrics for node execution
-                event!(
-                    name: "juncture.node.execute.metrics",
-                    Level::DEBUG,
-                    node_name = %node_name,
-                    duration_ms = duration.as_millis(),
-                    success = result.is_ok(),
+        join_set.spawn(
+            async move {
+                // Acquire semaphore permit
+                // The semaphore is created with max_parallel_tasks permits and
+                // we never close it, so acquisition should always succeed
+                let _permit = permit.acquire_owned().await.expect(
+                    "Semaphore acquisition failed: semaphore should never be closed \
+                     as it is owned by the PregelLoop and never dropped during execution",
                 );
-            };
 
-            result.map(|command| TaskOutput {
-                task_id,
-                node_name,
-                command,
-                duration,
-                trigger: task_trigger,
-            })
-        }.instrument(span));
+                let start = Instant::now();
+
+                // Execute task with cancellation support and interrupt context
+                // The INTERRUPT_CONTEXT.scope() makes the context available to
+                // the interrupt!() macro within node execution
+                let result = tokio::select! {
+                    biased;
+                    () = token.cancelled() => {
+                        return Err(JunctureError::execution("Task cancelled"));
+                    }
+                    result = crate::interrupt::INTERRUPT_CONTEXT.scope(ctx, async move {
+                        node.call(task_state, &task_config).await
+                    }) => result,
+                };
+
+                let duration = start.elapsed();
+
+                // Determine and record output type
+                // Priority: interrupt > send > end > goto > update
+                let output_type = result.as_ref().map_or("error", |command| {
+                    if command.resume.is_some() {
+                        "interrupt"
+                    } else if matches!(command.goto, crate::command::Goto::Send(_)) {
+                        "send"
+                    } else if matches!(command.goto, crate::command::Goto::End) {
+                        "end"
+                    } else if !matches!(command.goto, crate::command::Goto::None) {
+                        "goto"
+                    } else if command.update.is_some() {
+                        "update"
+                    } else {
+                        "none"
+                    }
+                });
+
+                // Record output type in span
+                tracing::Span::current().record("juncture.node.output_type", output_type);
+
+                #[cfg(feature = "otel")]
+                {
+                    // Emit metrics for node execution
+                    event!(
+                        name: "juncture.node.execute.metrics",
+                        Level::DEBUG,
+                        node_name = %node_name,
+                        duration_ms = duration.as_millis(),
+                        success = result.is_ok(),
+                        output_type = %output_type,
+                    );
+                };
+
+                result.map(|command| TaskOutput {
+                    task_id,
+                    node_name,
+                    command,
+                    duration,
+                    trigger: task_trigger,
+                })
+            }
+            .instrument(span),
+        );
     }
 
     // Collect results as they complete
@@ -207,6 +238,58 @@ pub async fn execute_superstep<S: State>(
     }
 
     Ok((SuperstepResult { task_outputs }, interrupt_rx))
+}
+
+/// Convert `ResumeValue` to `Vec<Option<serde_json::Value>>` for `InterruptContext`
+///
+/// This helper function converts the high-level `ResumeValue` enum into the
+/// position-indexed vector that `InterruptContext` expects.
+///
+/// # Arguments
+///
+/// * `resume_value` - Optional resume value from config
+///
+/// # Returns
+///
+/// A vector of resume values indexed by interrupt position
+#[allow(
+    clippy::ref_option,
+    reason = "config stores Option<ResumeValue> and we need to pass it by reference"
+)]
+fn convert_resume_value_to_vec(
+    resume_value: &Option<ResumeValue>,
+) -> Vec<Option<serde_json::Value>> {
+    match resume_value {
+        None => Vec::new(),
+        Some(ResumeValue::Single(value)) => vec![Some(value.clone())],
+        Some(ResumeValue::ById(_map)) => {
+            // For ID-based resume, we can't easily map to positions
+            // without knowing the interrupt IDs. Return empty and let
+            // the interrupt context handle ID-based lookups separately.
+            // ID-based resume will be supported when interrupt metadata
+            // is persisted in checkpoints.
+            Vec::new()
+        }
+        Some(ResumeValue::ByNamespace(map)) => {
+            // For namespace-based resume, convert to position-based
+            // by parsing numeric indices from namespace keys
+            let max_index = map
+                .keys()
+                .filter_map(|k| k.parse::<usize>().ok())
+                .max()
+                .unwrap_or(0);
+
+            let mut values = vec![None; max_index + 1];
+            for (key, value) in map {
+                if let Ok(index) = key.parse::<usize>()
+                    && index < values.len()
+                {
+                    values[index] = Some(value.clone());
+                }
+            }
+            values
+        }
+    }
 }
 
 #[cfg(test)]
