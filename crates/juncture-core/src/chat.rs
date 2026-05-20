@@ -680,13 +680,138 @@ impl ChatModel for ChatOpenAI {
         Self::parse_response(&resp_json)
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "SSE stream setup requires channel decoupling, byte buffering, and unfold boilerplate"
+    )]
     async fn stream(
         &self,
-        _messages: &[Message],
-        _options: Option<&CallOptions>,
+        messages: &[Message],
+        options: Option<&CallOptions>,
     ) -> Result<crate::llm::BoxStream<'_, Result<MessageChunk, LlmError>>, LlmError> {
-        // SSE streaming implementation deferred to facade crate
-        Ok(Box::pin(stream::empty()))
+        let mut body = self.build_request_body(messages, options);
+        body["stream"] = serde_json::Value::Bool(true);
+        // Request usage stats in streaming mode so the final chunk carries token counts
+        body["stream_options"] = serde_json::json!({"include_usage": true});
+
+        let url = format!("{}/chat/completions", self.base_url);
+        let response = self
+            .http_client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", self.api_key))
+            .header("Content-Type", "application/json")
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| {
+                if e.is_connect() || e.is_timeout() {
+                    LlmError::NetworkError(e.to_string())
+                } else if e.is_status() {
+                    match e.status() {
+                        Some(reqwest::StatusCode::UNAUTHORIZED) => {
+                            LlmError::AuthError("Invalid API key".to_string())
+                        }
+                        Some(reqwest::StatusCode::TOO_MANY_REQUESTS) => {
+                            LlmError::RateLimited { retry_after: None }
+                        }
+                        _ => LlmError::NetworkError(e.to_string()),
+                    }
+                } else {
+                    LlmError::NetworkError(e.to_string())
+                }
+            })?;
+
+        let status = response.status();
+        if status == reqwest::StatusCode::UNAUTHORIZED {
+            return Err(LlmError::AuthError("Invalid API key".to_string()));
+        }
+        if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            return Err(LlmError::RateLimited { retry_after: None });
+        }
+        if status == reqwest::StatusCode::BAD_REQUEST {
+            let body_text = response
+                .text()
+                .await
+                .map_err(|e| LlmError::NetworkError(e.to_string()))?;
+            if body_text.contains("context_length_exceeded")
+                || body_text.contains("maximum context length")
+            {
+                return Err(LlmError::ContextLengthExceeded { used: 0, limit: 0 });
+            }
+            return Err(LlmError::InvalidResponse(body_text));
+        }
+        if !status.is_success() {
+            let body_text = response
+                .text()
+                .await
+                .map_err(|e| LlmError::NetworkError(e.to_string()))?;
+            return Err(LlmError::InvalidResponse(format!(
+                "HTTP {status}: {body_text}"
+            )));
+        }
+
+        // Decouple the response body from the Response object via an mpsc
+        // channel, same pattern as ChatAnthropic. This is required because
+        // async_trait boxes the future and self-referential borrows across
+        // that boundary are not possible.
+        let (tx, rx) = tokio::sync::mpsc::channel::<Result<tokio_util::bytes::Bytes, LlmError>>(8);
+        tokio::spawn(async move {
+            let mut reader = response;
+            loop {
+                match reader.chunk().await {
+                    Ok(Some(chunk)) => {
+                        if tx.send(Ok(chunk)).await.is_err() {
+                            break;
+                        }
+                    }
+                    Ok(None) => break,
+                    Err(e) => {
+                        let _ = tx.send(Err(LlmError::NetworkError(e.to_string()))).await;
+                        break;
+                    }
+                }
+            }
+        });
+
+        let receiver_stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+        let byte_stream: std::pin::Pin<
+            Box<dyn futures::Stream<Item = Result<tokio_util::bytes::Bytes, LlmError>> + Send>,
+        > = Box::pin(receiver_stream);
+        let sse_buffer = String::new();
+        let pending_chunks: Vec<Result<MessageChunk, LlmError>> = Vec::new();
+
+        let chunk_stream = stream::unfold(
+            (byte_stream, sse_buffer, pending_chunks),
+            |(mut byte_stream, mut sse_buffer, mut pending_chunks)| async move {
+                loop {
+                    if let Some(chunk) = pending_chunks.pop() {
+                        return Some((chunk, (byte_stream, sse_buffer, pending_chunks)));
+                    }
+
+                    match byte_stream.next().await {
+                        Some(Ok(bytes)) => {
+                            sse_buffer.push_str(&String::from_utf8_lossy(&bytes));
+
+                            let mut new_chunks = Vec::new();
+                            while let Some(pos) = sse_buffer.find("\n\n") {
+                                let raw_event = sse_buffer[..pos].to_string();
+                                sse_buffer.drain(..pos + 2);
+                                new_chunks.push(parse_openai_sse_line(&raw_event));
+                            }
+                            // Reverse so we can pop() in order
+                            new_chunks.reverse();
+                            pending_chunks = new_chunks;
+                        }
+                        Some(Err(e)) => {
+                            return Some((Err(e), (byte_stream, sse_buffer, pending_chunks)));
+                        }
+                        None => return None,
+                    }
+                }
+            },
+        );
+
+        Ok(Box::pin(chunk_stream))
     }
 
     fn bind_tools(&self, tools: Vec<ToolDefinition>) -> Self {
@@ -1251,6 +1376,132 @@ fn parse_ollama_ndjson_line(line: &str) -> Result<MessageChunk, LlmError> {
     })
 }
 
+/// Extract data lines from a raw `OpenAI` SSE event.
+///
+/// `OpenAI` SSE uses `data: <json>` lines (no `event:` prefix like Anthropic).
+/// Returns `None` if no `data:` line is found.
+fn extract_openai_data_line(raw: &str) -> Option<&str> {
+    for line in raw.lines() {
+        if let Some(rest) = line.strip_prefix("data:") {
+            let trimmed = rest.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed);
+            }
+        }
+    }
+    None
+}
+
+/// Cast a u64 to usize for `OpenAI` tool call indices.
+///
+/// `OpenAI` always sends small non-negative integers for tool call indices,
+/// so truncation is safe in practice.
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "OpenAI index is always small"
+)]
+fn parse_openai_tool_call_index(val: &serde_json::Value) -> usize {
+    val.as_u64().unwrap_or(0) as usize
+}
+
+/// Parse a single raw SSE event (between `\n\n` boundaries) from the `OpenAI`
+/// streaming API into a `Result<MessageChunk, LlmError>`.
+///
+/// `OpenAI` streaming format: each SSE event is `data: {json}` where json has:
+/// - `choices[0].delta.content` - text delta
+/// - `choices[0].delta.tool_calls[]` - tool call chunks with incremental fields
+/// - `choices[0].delta.role` - role (first chunk only)
+/// - `usage` - token counts (final chunk, when `stream_options.include_usage` is set)
+/// - `data: [DONE]` marks end of stream
+fn parse_openai_sse_line(raw: &str) -> Result<MessageChunk, LlmError> {
+    let Some(data) = extract_openai_data_line(raw) else {
+        return Ok(empty_chunk());
+    };
+
+    // [DONE] marker signals stream end; return empty chunk (outer loop
+    // terminates naturally when the byte stream exhausts)
+    if data == "[DONE]" {
+        return Ok(empty_chunk());
+    }
+
+    let json: serde_json::Value = serde_json::from_str(data)
+        .map_err(|e| LlmError::InvalidResponse(format!("Invalid OpenAI SSE JSON: {e}")))?;
+
+    // Check for error in response
+    if let Some(error) = json.get("error") {
+        let error_msg = error
+            .get("message")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("Unknown streaming error")
+            .to_string();
+        return Err(LlmError::InvalidResponse(error_msg));
+    }
+
+    let choice = json.get("choices").and_then(|c| c.get(0));
+    let delta = choice.and_then(|c| c.get("delta"));
+
+    let role = delta
+        .and_then(|d| d.get("role"))
+        .and_then(serde_json::Value::as_str)
+        .and_then(|r| match r {
+            "assistant" => Some(Role::Ai),
+            _ => None,
+        });
+
+    let content = delta
+        .and_then(|d| d.get("content"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("")
+        .to_string();
+
+    let tool_call_chunks: Vec<crate::llm::ToolCallChunk> = delta
+        .and_then(|d| d.get("tool_calls"))
+        .and_then(serde_json::Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .map(|tc| {
+                    let index = tc.get("index").map_or(0, parse_openai_tool_call_index);
+                    let id = tc
+                        .get("id")
+                        .and_then(serde_json::Value::as_str)
+                        .map(String::from);
+                    let function = tc.get("function");
+                    let name = function
+                        .and_then(|f| f.get("name"))
+                        .and_then(serde_json::Value::as_str)
+                        .map(String::from);
+                    let args_delta = function
+                        .and_then(|f| f.get("arguments"))
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("")
+                        .to_string();
+                    crate::llm::ToolCallChunk {
+                        id,
+                        name,
+                        args_delta,
+                        index,
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let usage = json.get("usage").and_then(|u| {
+        Some(crate::state::TokenUsage {
+            input_tokens: u.get("prompt_tokens")?.as_u64()?,
+            output_tokens: u.get("completion_tokens")?.as_u64()?,
+            total_tokens: u.get("total_tokens")?.as_u64()?,
+        })
+    });
+
+    Ok(MessageChunk {
+        role,
+        content,
+        tool_call_chunks,
+        usage,
+    })
+}
+
 // Rust guideline compliant 2026-05-21
 
 #[cfg(test)]
@@ -1456,5 +1707,166 @@ mod tests {
         let body = ollama.build_request_body(&messages, None, true);
         assert_eq!(body["stream"], true);
         assert_eq!(body["model"], "llama3");
+    }
+
+    // --- OpenAI SSE tests ---
+
+    #[test]
+    fn test_extract_openai_data_line_valid() {
+        let raw = "data: {\"id\":\"chatcmpl-1\",\"choices\":[]}";
+        let data = extract_openai_data_line(raw).expect("should extract");
+        assert_eq!(data, "{\"id\":\"chatcmpl-1\",\"choices\":[]}");
+    }
+
+    #[test]
+    fn test_extract_openai_data_line_with_whitespace() {
+        let raw = "data:   {\"id\":\"chatcmpl-1\"}";
+        let data = extract_openai_data_line(raw).expect("should extract");
+        assert_eq!(data, "{\"id\":\"chatcmpl-1\"}");
+    }
+
+    #[test]
+    fn test_extract_openai_data_line_done() {
+        let raw = "data: [DONE]";
+        let data = extract_openai_data_line(raw).expect("should extract");
+        assert_eq!(data, "[DONE]");
+    }
+
+    #[test]
+    fn test_extract_openai_data_line_no_data_prefix() {
+        let raw = ": keepalive comment";
+        assert!(extract_openai_data_line(raw).is_none());
+    }
+
+    #[test]
+    fn test_extract_openai_data_line_empty() {
+        assert!(extract_openai_data_line("").is_none());
+    }
+
+    #[test]
+    fn test_parse_openai_sse_role_chunk() {
+        let raw = "data: {\"id\":\"chatcmpl-abc\",\"object\":\"chat.completion.chunk\",\"created\":1234,\"model\":\"gpt-4o\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\"},\"finish_reason\":null}]}";
+        let chunk = parse_openai_sse_line(raw).expect("should parse");
+        assert_eq!(chunk.role, Some(Role::Ai));
+        assert!(chunk.content.is_empty());
+        assert!(chunk.tool_call_chunks.is_empty());
+    }
+
+    #[test]
+    fn test_parse_openai_sse_content_chunk() {
+        let raw = "data: {\"id\":\"chatcmpl-abc\",\"object\":\"chat.completion.chunk\",\"created\":1234,\"model\":\"gpt-4o\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hello world\"},\"finish_reason\":null}]}";
+        let chunk = parse_openai_sse_line(raw).expect("should parse");
+        assert!(chunk.role.is_none());
+        assert_eq!(chunk.content, "Hello world");
+        assert!(chunk.tool_call_chunks.is_empty());
+        assert!(chunk.usage.is_none());
+    }
+
+    #[test]
+    fn test_parse_openai_sse_done_marker() {
+        let raw = "data: [DONE]";
+        let chunk = parse_openai_sse_line(raw).expect("should parse");
+        assert!(chunk.role.is_none());
+        assert!(chunk.content.is_empty());
+        assert!(chunk.tool_call_chunks.is_empty());
+        assert!(chunk.usage.is_none());
+    }
+
+    #[test]
+    fn test_parse_openai_sse_tool_call_start() {
+        let raw = "data: {\"id\":\"chatcmpl-abc\",\"object\":\"chat.completion.chunk\",\"created\":1234,\"model\":\"gpt-4o\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_abc123\",\"type\":\"function\",\"function\":{\"name\":\"get_weather\",\"arguments\":\"\"}}]},\"finish_reason\":null}]}";
+        let chunk = parse_openai_sse_line(raw).expect("should parse");
+        assert_eq!(chunk.tool_call_chunks.len(), 1);
+        assert_eq!(
+            chunk.tool_call_chunks[0].id,
+            Some("call_abc123".to_string())
+        );
+        assert_eq!(
+            chunk.tool_call_chunks[0].name,
+            Some("get_weather".to_string())
+        );
+        assert_eq!(chunk.tool_call_chunks[0].index, 0);
+        assert!(chunk.tool_call_chunks[0].args_delta.is_empty());
+    }
+
+    #[test]
+    fn test_parse_openai_sse_tool_call_args_delta() {
+        let raw = "data: {\"id\":\"chatcmpl-abc\",\"object\":\"chat.completion.chunk\",\"created\":1234,\"model\":\"gpt-4o\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"city\\\":\\\"SF\\\"}\"}}]},\"finish_reason\":null}]}";
+        let chunk = parse_openai_sse_line(raw).expect("should parse");
+        assert_eq!(chunk.tool_call_chunks.len(), 1);
+        assert!(chunk.tool_call_chunks[0].id.is_none());
+        assert!(chunk.tool_call_chunks[0].name.is_none());
+        assert_eq!(chunk.tool_call_chunks[0].args_delta, r#"{"city":"SF"}"#);
+    }
+
+    #[test]
+    fn test_parse_openai_sse_usage_chunk() {
+        let raw = "data: {\"id\":\"chatcmpl-abc\",\"object\":\"chat.completion.chunk\",\"created\":1234,\"model\":\"gpt-4o\",\"choices\":[],\"usage\":{\"prompt_tokens\":25,\"completion_tokens\":10,\"total_tokens\":35}}";
+        let chunk = parse_openai_sse_line(raw).expect("should parse");
+        let usage = chunk.usage.expect("should have usage");
+        assert_eq!(usage.input_tokens, 25);
+        assert_eq!(usage.output_tokens, 10);
+        assert_eq!(usage.total_tokens, 35);
+    }
+
+    #[test]
+    fn test_parse_openai_sse_error_response() {
+        let raw = "data: {\"error\":{\"message\":\"Rate limit exceeded\",\"type\":\"rate_limit_error\",\"code\":\"rate_limit_exceeded\"}}";
+        let result = parse_openai_sse_line(raw);
+        assert!(result.is_err());
+        match result {
+            Err(LlmError::InvalidResponse(msg)) => {
+                assert_eq!(msg, "Rate limit exceeded");
+            }
+            _ => panic!("expected InvalidResponse error"),
+        }
+    }
+
+    #[test]
+    fn test_parse_openai_sse_invalid_json() {
+        let raw = "data: not valid json";
+        let result = parse_openai_sse_line(raw);
+        assert!(result.is_err());
+        match result {
+            Err(LlmError::InvalidResponse(msg)) => {
+                assert!(msg.starts_with("Invalid OpenAI SSE JSON:"));
+            }
+            _ => panic!("expected InvalidResponse error"),
+        }
+    }
+
+    #[test]
+    fn test_parse_openai_sse_no_data_line() {
+        let raw = ": this is a comment";
+        let chunk = parse_openai_sse_line(raw).expect("should return empty chunk");
+        assert!(chunk.content.is_empty());
+    }
+
+    #[test]
+    fn test_parse_openai_sse_empty_choices() {
+        let raw = "data: {\"id\":\"chatcmpl-abc\",\"object\":\"chat.completion.chunk\",\"created\":1234,\"model\":\"gpt-4o\",\"choices\":[]}";
+        let chunk = parse_openai_sse_line(raw).expect("should parse");
+        assert!(chunk.content.is_empty());
+        assert!(chunk.tool_call_chunks.is_empty());
+    }
+
+    #[test]
+    fn test_parse_openai_sse_multiple_tool_calls() {
+        let raw = "data: {\"id\":\"chatcmpl-abc\",\"object\":\"chat.completion.chunk\",\"created\":1234,\"model\":\"gpt-4o\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"fn_a\",\"arguments\":\"\"}},{\"index\":1,\"id\":\"call_2\",\"type\":\"function\",\"function\":{\"name\":\"fn_b\",\"arguments\":\"\"}}]},\"finish_reason\":null}]}";
+        let chunk = parse_openai_sse_line(raw).expect("should parse");
+        assert_eq!(chunk.tool_call_chunks.len(), 2);
+        assert_eq!(chunk.tool_call_chunks[0].id, Some("call_1".to_string()));
+        assert_eq!(chunk.tool_call_chunks[0].name, Some("fn_a".to_string()));
+        assert_eq!(chunk.tool_call_chunks[0].index, 0);
+        assert_eq!(chunk.tool_call_chunks[1].id, Some("call_2".to_string()));
+        assert_eq!(chunk.tool_call_chunks[1].name, Some("fn_b".to_string()));
+        assert_eq!(chunk.tool_call_chunks[1].index, 1);
+    }
+
+    #[test]
+    fn test_parse_openai_sse_content_with_special_chars() {
+        let raw = r#"data: {"id":"chatcmpl-abc","object":"chat.completion.chunk","created":1234,"model":"gpt-4o","choices":[{"index":0,"delta":{"content":"Hello\nworld\ttab"},"finish_reason":null}]}"#;
+        let chunk = parse_openai_sse_line(raw).expect("should parse");
+        assert_eq!(chunk.content, "Hello\nworld\ttab");
     }
 }
