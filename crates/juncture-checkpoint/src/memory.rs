@@ -340,6 +340,7 @@ mod tests {
             versions_seen: HashMap::new(),
             pending_tasks: vec![],
             pending_sends: vec![],
+            pending_interrupts: vec![],
             schema_version: 1,
             created_at: Utc::now().to_rfc3339(),
             v: 1,

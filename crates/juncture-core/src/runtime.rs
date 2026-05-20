@@ -116,6 +116,15 @@ impl<C: Clone + Send + Sync + 'static> Runtime<C> {
             remaining_steps: remaining.try_into().unwrap_or(u32::MAX),
         }
     }
+
+    /// Access the heartbeat for sending periodic alive signals
+    ///
+    /// Long-running nodes should call `heartbeat.ping()` periodically
+    /// to prevent false idle timeout detection.
+    #[must_use]
+    pub const fn heartbeat(&self) -> &Heartbeat {
+        &self.heartbeat
+    }
 }
 
 impl Default for Runtime<()>

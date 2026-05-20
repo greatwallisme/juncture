@@ -164,6 +164,9 @@ pub struct PregelLoop<S: State> {
     /// This is stored here so `after_tick` can drain it
     interrupt_rx: Option<mpsc::UnboundedReceiver<crate::interrupt::InterruptSignal>>,
 
+    /// Interrupt signals captured during execution for checkpoint persistence
+    pending_interrupts: Vec<crate::interrupt::InterruptSignal>,
+
     /// Superstep start time for duration tracking
     ///
     /// Set at the beginning of [`execute_superstep`], read in [`after_tick`].
@@ -189,6 +192,7 @@ impl<S: State> std::fmt::Debug for PregelLoop<S> {
             .field("run_control", &self.run_control)
             .field("run_id", &self.run_id)
             .field("interrupt_rx", &self.interrupt_rx.is_some())
+            .field("pending_interrupts", &self.pending_interrupts.len())
             .field("superstep_start", &self.superstep_start.is_some())
             .finish()
     }
@@ -258,6 +262,7 @@ impl<S: State> PregelLoop<S> {
             run_control: RunControl::new(),
             run_id,
             interrupt_rx: None,
+            pending_interrupts: Vec::new(),
             superstep_start: None,
         })
     }
@@ -419,6 +424,7 @@ impl<S: State> PregelLoop<S> {
                 &channel_versions,
                 &versions_seen_map,
             ) {
+                self.pending_interrupts.clone_from(&signals);
                 self.status = LoopStatus::InterruptBefore(signals);
                 return Ok(false);
             }
@@ -636,6 +642,7 @@ impl<S: State> PregelLoop<S> {
 
         // If we received any interrupt signals from nodes, handle them
         if !node_interrupts.is_empty() {
+            self.pending_interrupts.clone_from(&node_interrupts);
             self.status = LoopStatus::InterruptAfter(node_interrupts.clone());
 
             // Emit interrupt events to stream
@@ -690,6 +697,7 @@ impl<S: State> PregelLoop<S> {
                 &channel_versions,
                 &versions_seen_map,
             ) {
+                self.pending_interrupts.clone_from(&signals);
                 self.status = LoopStatus::InterruptAfter(signals.clone());
 
                 // Emit interrupt events to stream
@@ -754,6 +762,12 @@ impl<S: State> PregelLoop<S> {
     #[must_use]
     pub const fn status(&self) -> &LoopStatus {
         &self.status
+    }
+
+    /// Get the pending interrupt signals for checkpoint persistence
+    #[must_use]
+    pub fn pending_interrupts(&self) -> &[crate::interrupt::InterruptSignal] {
+        &self.pending_interrupts
     }
 
     /// Check if the loop is still running

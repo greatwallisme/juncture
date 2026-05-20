@@ -23,7 +23,7 @@ tokio::task_local! {
 /// Signal sent when a node requests interruption
 ///
 /// Contains the interrupt payload and metadata for resumption.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct InterruptSignal {
     /// Interrupt index (for position-based resume)
     pub index: usize,
@@ -285,6 +285,15 @@ impl Scratchpad {
         self.processed_interrupts.contains(id)
     }
 
+    /// Check if a confirmation-only resume is valid for the given interrupt.
+    ///
+    /// Returns `true` when the interrupt has already been processed,
+    /// meaning the caller can resume without providing an explicit value.
+    #[must_use]
+    pub fn get_null_resume(&self, interrupt_id: &str) -> bool {
+        self.is_interrupt_processed(interrupt_id)
+    }
+
     /// Mark an interrupt as processed
     ///
     /// # Arguments
@@ -316,6 +325,20 @@ impl Scratchpad {
     /// * `value` - The value to store
     pub fn set_data(&mut self, key: String, value: serde_json::Value) {
         self.data.insert(key, value);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Scratchpad;
+
+    #[test]
+    fn scratchpad_get_null_resume() {
+        let mut pad = Scratchpad::new();
+        assert!(!pad.get_null_resume("int-1"));
+        pad.mark_interrupt_processed("int-1");
+        assert!(pad.get_null_resume("int-1"));
+        assert!(!pad.get_null_resume("int-2"));
     }
 }
 

@@ -338,6 +338,15 @@ impl LoopStatus {
     pub const fn is_interrupted(&self) -> bool {
         matches!(self, Self::InterruptBefore(_) | Self::InterruptAfter(_))
     }
+
+    /// Extract interrupt signals if interrupted
+    #[must_use]
+    pub fn interrupt_signals(&self) -> &[InterruptSignal] {
+        match self {
+            Self::InterruptBefore(signals) | Self::InterruptAfter(signals) => signals,
+            _ => &[],
+        }
+    }
 }
 
 /// A task result that may be synchronously ready or asynchronously computed

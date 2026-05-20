@@ -1158,6 +1158,7 @@ mod tests {
                         versions_seen: HashMap::new(),
                         pending_tasks: Vec::new(),
                         pending_sends: Vec::new(),
+                        pending_interrupts: Vec::new(),
                         schema_version: 1,
                         created_at: "2024-01-01T00:00:00Z".to_string(),
                         v: 1,

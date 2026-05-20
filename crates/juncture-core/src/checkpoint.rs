@@ -303,6 +303,13 @@ pub struct Checkpoint {
     /// Pending Send operations awaiting delivery
     pub pending_sends: Vec<SerializedSend>,
 
+    /// Interrupt signals captured when execution was interrupted
+    ///
+    /// Populated when checkpoint source is `CheckpointSource::Interrupt`.
+    /// Used for ID-based resume to match incoming resume values.
+    #[serde(default)]
+    pub pending_interrupts: Vec<crate::interrupt::InterruptSignal>,
+
     /// State schema version for migration support
     pub schema_version: u32,
 
