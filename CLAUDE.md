@@ -58,13 +58,15 @@ Hooks in `.claude/settings.local.json` auto-run verification on `.rs` file write
 
 ## Reference Projects
 
-| Path | Description |
-|------|-------------|
-| `/root/project/reference/langgraph` | Official LangGraph Python source |
-| `/root/project/reference/langgraph-doc` | LangGraph documentation |
-| `/root/project/reference/rust-langgraph` | Community Rust port |
-| `/root/project/reference/oxidizedgraph` | Rust implementation |
-| `/root/project/reference/cognis` | Most complete Rust reference (workspace of 7+ crates) |
+| Project | Commit ID | Notes |
+|---------|-----------|-------|
+| **langgraph** (Python) | `076e2a3627206f5a1aef573aaca4a01e5af897ca` | Official LangGraph Python source - Channel architecture reference |
+| **langgraph-doc** | N/A (static docs) | LangGraph documentation - design reference |
+| **rust-langgraph** | `7828e62edeafb5b8e5b043fd988e3557b2536c95` | Community Rust port - alternative implementation reference |
+| **oxidizedgraph** | `2eadb5b56c265122d21f28187bd3feb2bca8ada4` | Rust implementation - reference for Rust patterns |
+| **cognis** | `f7a9406db69bbe587d379c95e55c45b6c02d1f9b` | Most complete Rust reference (7+ crates workspace) |
+
+**Note**: Reference projects are active and may have updates since review date. Use commit IDs above for reproducibility.
 
 ## Constraints
 

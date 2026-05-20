@@ -1,7 +1,6 @@
 ---
 name: rust-expert
 description: Use this agent when you need to write, review, or optimize Rust backend code. This includes creating web servers, APIs, system services, performance-critical applications, concurrent/parallel systems, or any server-side Rust development. The agent excels at writing idiomatic Rust with a focus on performance, safety, and elegance. <example>Context: User needs help with Rust backend development.\nuser: "Create a high-performance REST API endpoint in Rust"\nassistant: "I'll use the rust-backend-expert agent to help create an elegant and performant REST API endpoint."\n<commentary>Since the user is asking for Rust backend development, use the Task tool to launch the rust-backend-expert agent.</commentary></example><example>Context: User is working on a Rust service that needs optimization.\nuser: "My Rust service is handling 10k requests but I need it to handle 100k"\nassistant: "Let me use the rust-backend-expert agent to analyze and optimize your Rust service for higher throughput."\n<commentary>Performance optimization of Rust backend code is a perfect use case for the rust-backend-expert agent.</commentary></example>
-model: opus
 color: yellow
 skills:
   - rust-guidelines
