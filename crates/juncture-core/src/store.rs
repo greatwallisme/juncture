@@ -312,13 +312,50 @@ pub struct MemoryStore {
     index_config: Option<IndexConfig>,
 }
 
+/// Trait for computing embeddings for vector search.
+///
+/// Implementations provide async embedding generation from text inputs,
+/// used by vector-capable stores for similarity search.
+///
+/// # Errors
+///
+/// Implementations should return [`StoreError::Other`] or a suitable variant
+/// if embedding generation fails (network error, model error, etc.).
+#[async_trait::async_trait]
+pub trait EmbeddingFunc: Send + Sync + 'static {
+    /// Generate embedding vectors for the given texts.
+    ///
+    /// # Arguments
+    ///
+    /// * `texts` - Text strings to embed
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] if embedding generation fails.
+    async fn embed(&self, texts: Vec<String>) -> Result<Vec<Vec<f32>>, StoreError>;
+}
+
 /// Vector index configuration
-#[derive(Debug, Clone)]
+///
+/// Configure vector similarity search on a store by providing an
+/// [`EmbeddingFunc`] implementation and the embedding dimension count.
 pub struct IndexConfig {
     /// Embedding dimensions
     pub dims: usize,
-    /// Fields to index
-    pub fields: Vec<String>,
+    /// Embedding function for computing vectors from text
+    pub embed: Option<Box<dyn EmbeddingFunc>>,
+    /// Fields to index (None indexes all text fields)
+    pub fields: Option<Vec<String>>,
+}
+
+impl std::fmt::Debug for IndexConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IndexConfig")
+            .field("dims", &self.dims)
+            .field("embed", &self.embed.as_ref().map(|_| "..."))
+            .field("fields", &self.fields)
+            .finish()
+    }
 }
 
 impl Default for MemoryStore {
@@ -594,7 +631,7 @@ fn compare_numbers(
 /// Provides persistent storage using `SQLite` database.
 /// Requires the `sqlite` feature flag.
 #[cfg(feature = "sqlite")]
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct SqliteStore {
     /// Database connection pool
     pool: Option<sqlx::SqlitePool>,
@@ -874,7 +911,7 @@ impl Store for SqliteStore {
 /// Provides persistent storage using `PostgreSQL` database.
 /// Requires the `postgres` feature flag.
 #[cfg(feature = "postgres")]
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct PostgresStore {
     /// Database connection pool
     pool: Option<sqlx::PgPool>,
@@ -1146,4 +1183,4 @@ impl Store for PostgresStore {
     }
 }
 
-// Rust guideline compliant 2026-05-19
+// Rust guideline compliant 2026-05-20

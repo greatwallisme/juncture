@@ -159,8 +159,8 @@ pub use state::{
     TokenUsage, ToolCall, UntrackedChannel, messages_reducer,
 };
 pub use store::{
-    FilterExpr, IndexConfig, Item, MemoryStore, SearchItem, SearchQuery, SearchResult, Store,
-    StoreError, StoreOp, StoreResult,
+    EmbeddingFunc, FilterExpr, IndexConfig, Item, MemoryStore, SearchItem, SearchQuery,
+    SearchResult, Store, StoreError, StoreOp, StoreResult,
 };
 pub use stream::{
     BatchTransformer, DebugEvent, EventEmitter, FilterFieldsTransformer, JsonParseTransformer,
