@@ -6,7 +6,7 @@
 mod context;
 
 use std::collections::{HashMap, HashSet};
-use std::hash::{Hash, Hasher};
+use std::hash::Hash;
 use xxhash_rust::xxh3::Xxh3;
 
 pub use context::InterruptContext;
@@ -82,7 +82,7 @@ pub const HIDDEN_TAG: &str = "__hidden__";
 
 /// Generate a deterministic interrupt ID from node name and index
 ///
-/// Uses xxhash for fast, deterministic ID generation based on the
+/// Uses `xxh3_128` for fast, deterministic 128-bit ID generation based on the
 /// node name and index.
 ///
 /// # Arguments
@@ -92,7 +92,7 @@ pub const HIDDEN_TAG: &str = "__hidden__";
 ///
 /// # Returns
 ///
-/// A hexadecimal string representing the 128-bit hash (32 characters)
+/// A lowercase hexadecimal string representing the 128-bit hash (32 characters)
 ///
 /// # Examples
 ///
@@ -100,21 +100,22 @@ pub const HIDDEN_TAG: &str = "__hidden__";
 /// use juncture_core::interrupt::generate_interrupt_id;
 ///
 /// let id = generate_interrupt_id("my_node", 0);
-/// assert!(id.len() == 32); // xxh3 128-bit hash produces 32-character hex string
+/// assert_eq!(id.len(), 32);
 /// ```
+///
+/// # Determinism
+///
+/// The same `(node_name, index)` pair always produces the same ID within a
+/// single process. Cross-process or cross-version reproducibility is **not**
+/// guaranteed because the xxh3 internal algorithm may differ across builds
+/// (e.g., SIMD variant selection).
 #[must_use]
 pub fn generate_interrupt_id(node_name: &str, index: usize) -> String {
     let mut hasher = Xxh3::new();
     node_name.hash(&mut hasher);
     index.hash(&mut hasher);
-    // Use finish() twice to get 128-bit result (finish128 is not available in this version)
-    let hash1 = hasher.finish();
-    let mut hasher2 = Xxh3::new();
-    node_name.hash(&mut hasher2);
-    index.hash(&mut hasher2);
-    hasher2.write_u8(1); // Add differentiator to get different second hash
-    let hash2 = hasher2.finish();
-    format!("{hash1:016x}{hash2:016x}")
+    let hash = hasher.digest128();
+    format!("{hash:032x}")
 }
 
 /// Check if execution should interrupt based on the current state
