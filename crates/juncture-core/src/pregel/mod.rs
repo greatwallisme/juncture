@@ -41,9 +41,9 @@ mod loop_;
 mod protocol;
 mod runner;
 mod scheduler;
-mod stream;
 mod types;
 
+pub use crate::stream::{StreamEvent, StreamMode};
 pub use budget::{
     BudgetConfig, BudgetExceededAction, BudgetExceededReason, BudgetTracker, BudgetUsage,
 };
@@ -56,7 +56,6 @@ pub use scheduler::{
     FieldVersionTracker, TriggerToNodes, VersionsSeen, apply_writes, check_replace_conflicts,
     compute_next_tasks, consume_triggered_channels, schedule_error_handlers,
 };
-pub use stream::{StreamEvent, StreamMode};
 pub use types::{
     BubbleUp, GraphDrained, GraphInterrupt, LoopStatus, PendingTask, SuperstepResult,
     SyncAsyncFuture, TaskOutput, TaskTrigger,

@@ -317,11 +317,18 @@ impl<S: State> EventEmitter<S> {
 
     #[must_use]
     #[allow(clippy::match_same_arms, reason = "each arm is explicit for clarity")]
-    pub const fn should_emit(&self, event: &StreamEvent<S>) -> bool {
+    pub fn should_emit(&self, event: &StreamEvent<S>) -> bool {
         match (&self.mode, event) {
             (StreamMode::Values, StreamEvent::Values { .. } | StreamEvent::End { .. }) => true,
             (StreamMode::Updates, StreamEvent::Updates { .. } | StreamEvent::End { .. }) => true,
-            (StreamMode::Messages, StreamEvent::Messages { .. } | StreamEvent::End { .. }) => true,
+            (StreamMode::Messages, StreamEvent::Messages { .. } | StreamEvent::End { .. }) => {
+                // Filter out Messages events with "nostream" tag
+                if let StreamEvent::Messages { metadata, .. } = event {
+                    !Self::has_nostream_tag(metadata)
+                } else {
+                    true
+                }
+            }
             (StreamMode::Custom, StreamEvent::Custom { .. } | StreamEvent::End { .. }) => true,
             (StreamMode::Debug, _) => true, // Debug mode receives all events including End
             (StreamMode::Tools, StreamEvent::Tools(_) | StreamEvent::End { .. }) => true,
@@ -330,7 +337,47 @@ impl<S: State> EventEmitter<S> {
                 StreamEvent::CheckpointSaved { .. } | StreamEvent::End { .. },
             ) => true,
             (StreamMode::Tasks, StreamEvent::TaskDetail { .. } | StreamEvent::End { .. }) => true,
-            (StreamMode::Multi(_), _) => true, // Allow all events in multi-mode
+            (StreamMode::Multi(modes), _) => {
+                // Check if any sub-mode matches this event
+                Self::mode_matches_multi(modes, event)
+            }
+            _ => false,
+        }
+    }
+
+    /// Check if metadata contains "nostream" tag
+    #[must_use]
+    fn has_nostream_tag(metadata: &MessageStreamMetadata) -> bool {
+        metadata.tags.iter().any(|tag| tag == "nostream")
+    }
+
+    /// Check if event matches any mode in a Multi mode
+    #[must_use]
+    fn mode_matches_multi(modes: &[StreamMode], event: &StreamEvent<S>) -> bool {
+        modes.iter().any(|m| Self::mode_matches_single(m, event))
+    }
+
+    /// Check if event matches a single mode
+    #[must_use]
+    #[allow(
+        clippy::match_same_arms,
+        clippy::missing_const_for_fn,
+        reason = "each arm is explicit for clarity; non-const for multi-mode filtering"
+    )]
+    fn mode_matches_single(mode: &StreamMode, event: &StreamEvent<S>) -> bool {
+        match (mode, event) {
+            (StreamMode::Values, StreamEvent::Values { .. } | StreamEvent::End { .. }) => true,
+            (StreamMode::Updates, StreamEvent::Updates { .. } | StreamEvent::End { .. }) => true,
+            (StreamMode::Messages, StreamEvent::Messages { .. } | StreamEvent::End { .. }) => true,
+            (StreamMode::Custom, StreamEvent::Custom { .. } | StreamEvent::End { .. }) => true,
+            (StreamMode::Debug, _) => true,
+            (StreamMode::Tools, StreamEvent::Tools(_) | StreamEvent::End { .. }) => true,
+            (
+                StreamMode::Checkpoints,
+                StreamEvent::CheckpointSaved { .. } | StreamEvent::End { .. },
+            ) => true,
+            (StreamMode::Tasks, StreamEvent::TaskDetail { .. } | StreamEvent::End { .. }) => true,
+            (StreamMode::Multi(_), _) => false,
             _ => false,
         }
     }
@@ -430,6 +477,8 @@ pub struct StreamConfig {
     pub mode: StreamMode,
     pub include_subgraphs: bool,
     pub subgraph_filter: Option<Vec<String>>,
+    /// Optional field names to filter in Values/Updates events
+    pub output_keys: Option<Vec<String>>,
 }
 
 impl StreamConfig {
@@ -439,6 +488,7 @@ impl StreamConfig {
             mode,
             include_subgraphs: false,
             subgraph_filter: None,
+            output_keys: None,
         }
     }
 
@@ -453,10 +503,17 @@ impl StreamConfig {
         self.subgraph_filter = Some(filter);
         self
     }
+
+    /// Filter output to only include specified fields in Values/Updates events
+    #[must_use]
+    pub fn with_output_keys(mut self, keys: Vec<String>) -> Self {
+        self.output_keys = Some(keys);
+        self
+    }
 }
 
 /// Resumption state for streaming
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct StreamResumption {
     pub run_id: String,
     pub last_checkpoint_id: Option<String>,

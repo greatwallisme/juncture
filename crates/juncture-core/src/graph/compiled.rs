@@ -168,7 +168,7 @@ impl<S: State> CompiledGraph<S> {
 
     /// Stream graph execution as a sequence of events
     ///
-    /// Executes the graph and emits [`StreamEvent`](crate::pregel::StreamEvent)s
+    /// Executes the graph and emits [`StreamEvent`](crate::stream::StreamEvent)s
     /// as each superstep completes, enabling real-time monitoring of execution progress.
     ///
     /// # Arguments
@@ -184,8 +184,8 @@ impl<S: State> CompiledGraph<S> {
         &self,
         input: S,
         config: &RunnableConfig,
-        mode: crate::pregel::StreamMode,
-    ) -> Result<Vec<crate::pregel::StreamEvent<S>>, JunctureError>
+        mode: crate::stream::StreamMode,
+    ) -> Result<Vec<crate::stream::StreamEvent<S>>, JunctureError>
     where
         S: Clone,
     {
@@ -208,25 +208,36 @@ impl<S: State> CompiledGraph<S> {
             pregel.after_tick(result).await?;
 
             match mode {
-                crate::pregel::StreamMode::Values => {
-                    events.push(crate::pregel::StreamEvent::Values {
+                crate::stream::StreamMode::Values => {
+                    events.push(crate::stream::StreamEvent::Values {
                         state: pregel.snapshot_state(),
+                        step,
                     });
                 }
-                crate::pregel::StreamMode::Updates => {
-                    events.push(crate::pregel::StreamEvent::Updates {
-                        updates: Vec::new(),
+                crate::stream::StreamMode::Updates => {
+                    events.push(crate::stream::StreamEvent::Updates {
+                        node: String::new(),
+                        update: S::Update::default(),
+                        step,
                     });
                 }
-                crate::pregel::StreamMode::Debug => {
-                    events.push(crate::pregel::StreamEvent::TaskEnd {
+                crate::stream::StreamMode::Debug => {
+                    events.push(crate::stream::StreamEvent::TaskDetail {
                         task_id: format!("step-{step}"),
-                        node_name: String::new(),
-                        duration: std::time::Duration::ZERO,
+                        node: String::new(),
+                        step,
+                        attempt: 0,
+                        event: crate::stream::TaskEventType::Started,
                     });
                 }
+                _ => {}
             }
         }
+
+        // Add End event with final state
+        events.push(crate::stream::StreamEvent::End {
+            output: pregel.into_state(),
+        });
 
         Ok(events)
     }

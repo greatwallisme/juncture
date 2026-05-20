@@ -3,9 +3,8 @@
 //! Provides [`PregelProtocol`] as a common interface supporting both
 //! local and remote graph execution.
 
-use crate::State;
 use crate::config::RunnableConfig;
-use crate::pregel::stream::StreamMode;
+use crate::{State, stream::StreamMode};
 use futures::future::BoxFuture;
 use futures::stream::BoxStream;
 use std::pin::Pin;
@@ -43,7 +42,7 @@ pub trait PregelProtocol<S: State>: Send + Sync + 'static {
 
     /// Execute the graph with streaming output
     ///
-    /// Returns a stream of [`crate::pregel::stream::StreamEvent`] items as
+    /// Returns a stream of [`crate::stream::StreamEvent`] items as
     /// the graph executes, enabling real-time observation of execution progress.
     ///
     /// # Errors
@@ -65,10 +64,7 @@ pub trait PregelProtocol<S: State>: Send + Sync + 'static {
         Result<
             Pin<
                 Box<
-                    BoxStream<
-                        'static,
-                        Result<crate::pregel::stream::StreamEvent<S>, crate::JunctureError>,
-                    >,
+                    BoxStream<'static, Result<crate::stream::StreamEvent<S>, crate::JunctureError>>,
                 >,
             >,
             crate::JunctureError,

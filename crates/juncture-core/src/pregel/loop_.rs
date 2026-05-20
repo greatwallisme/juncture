@@ -14,6 +14,7 @@ use crate::{
         scheduler::{FieldVersionTracker, VersionsSeen, compute_next_tasks},
         types::{LoopStatus, PendingTask, SuperstepResult},
     },
+    stream::StreamEvent,
 };
 use indexmap::IndexMap;
 use std::collections::{HashMap, HashSet};
@@ -135,7 +136,7 @@ pub struct PregelLoop<S: State> {
     pub cancellation_token: CancellationToken,
 
     /// Optional stream event sender
-    pub stream_tx: Option<mpsc::UnboundedSender<crate::pregel::stream::StreamEvent<S>>>,
+    pub stream_tx: Option<mpsc::UnboundedSender<StreamEvent<S>>>,
 
     /// Optional checkpoint saver for crash recovery
     pub checkpointer: Option<Arc<dyn crate::checkpoint::CheckpointSaver>>,
@@ -249,10 +250,7 @@ impl<S: State> PregelLoop<S> {
     /// let (tx, _rx) = mpsc::unbounded_channel();
     /// loop.set_stream_sender(tx);
     /// ```
-    pub fn set_stream_sender(
-        &mut self,
-        tx: mpsc::UnboundedSender<crate::pregel::stream::StreamEvent<S>>,
-    ) {
+    pub fn set_stream_sender(&mut self, tx: mpsc::UnboundedSender<StreamEvent<S>>) {
         self.stream_tx = Some(tx);
     }
 
@@ -434,6 +432,10 @@ impl<S: State> PregelLoop<S> {
     /// Returns an error if:
     /// - Task computation fails
     ///
+    /// # Panics
+    ///
+    /// Panics if a task duration exceeds `u64::MAX` milliseconds (extremely unlikely)
+    ///
     /// # Examples
     ///
     /// ```ignore
@@ -466,10 +468,12 @@ impl<S: State> PregelLoop<S> {
         // Emit stream events
         if let Some(ref tx) = self.stream_tx {
             for task_output in &result.task_outputs {
-                let event = crate::pregel::stream::StreamEvent::TaskEnd {
+                let event = StreamEvent::TaskEnd {
+                    node: task_output.node_name.clone(),
                     task_id: task_output.task_id.clone(),
-                    node_name: task_output.node_name.clone(),
-                    duration: task_output.duration,
+                    step: self.step,
+                    duration_ms: u64::try_from(task_output.duration.as_millis())
+                        .expect("duration should fit in u64"),
                 };
                 let _ = tx.send(event);
             }
