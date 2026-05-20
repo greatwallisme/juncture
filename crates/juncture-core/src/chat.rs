@@ -715,7 +715,6 @@ impl ChatModel for ChatOpenAI {
 
 /// Ollama implementation
 #[derive(Clone, Debug)]
-#[expect(dead_code, reason = "Fields reserved for future API implementation")]
 pub struct ChatOllama {
     /// Model name
     model: String,
@@ -723,7 +722,11 @@ pub struct ChatOllama {
     base_url: String,
     /// Default call options
     default_options: CallOptions,
-    /// Registered tools
+    /// Registered tools (reserved for Ollama tool calling support)
+    #[expect(
+        dead_code,
+        reason = "Ollama tool calling not yet integrated into build_request_body"
+    )]
     tools: Vec<ToolDefinition>,
     /// HTTP client
     http_client: reqwest::Client,
@@ -755,22 +758,16 @@ impl ChatOllama {
         self.base_url = url.into();
         self
     }
-}
 
-#[async_trait]
-impl ChatModel for ChatOllama {
-    #[allow(
-        clippy::too_many_lines,
-        reason = "Complex HTTP request/response handling for Ollama API"
-    )]
-    async fn invoke(
+    /// Build the request body for the Ollama Chat API
+    fn build_request_body(
         &self,
         messages: &[Message],
         options: Option<&CallOptions>,
-    ) -> Result<Message, LlmError> {
+        stream: bool,
+    ) -> serde_json::Value {
         let opts = options.unwrap_or(&self.default_options);
 
-        // Build request body for Ollama API
         let mut body = serde_json::json!({
             "model": self.model,
             "messages": messages.iter().map(|m| {
@@ -795,10 +792,9 @@ impl ChatModel for ChatOllama {
                     },
                 })
             }).collect::<Vec<_>>(),
-            "stream": false,
+            "stream": stream,
         });
 
-        // Add optional parameters
         if let Some(temp) = opts.temperature {
             body["options"] = serde_json::json!({"temperature": temp});
         }
@@ -818,13 +814,17 @@ impl ChatModel for ChatOllama {
             body["options"]["num_predict"] = serde_json::json!(max_tokens);
         }
 
+        body
+    }
+
+    /// Send an HTTP request to the Ollama API
+    async fn send_request(&self, body: &serde_json::Value) -> Result<reqwest::Response, LlmError> {
         let url = format!("{}/api/chat", self.base_url);
 
-        let response = self
-            .http_client
+        self.http_client
             .post(&url)
             .header("Content-Type", "application/json")
-            .json(&body)
+            .json(body)
             .send()
             .await
             .map_err(|e| {
@@ -836,30 +836,47 @@ impl ChatModel for ChatOllama {
                 } else {
                     LlmError::NetworkError(e.to_string())
                 }
-            })?;
+            })
+    }
 
+    /// Check HTTP status and return an appropriate error if not successful
+    async fn check_status(
+        response: reqwest::Response,
+        model: &str,
+    ) -> Result<reqwest::Response, LlmError> {
         let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            if body.contains("model") && body.contains("not found") {
+                return Err(LlmError::InvalidResponse(format!(
+                    "Model '{model}' not found in Ollama. Run: ollama pull {model}"
+                )));
+            }
+            return Err(LlmError::InvalidResponse(format!("HTTP {status}: {body}")));
+        }
+        Ok(response)
+    }
+}
+
+#[async_trait]
+impl ChatModel for ChatOllama {
+    async fn invoke(
+        &self,
+        messages: &[Message],
+        options: Option<&CallOptions>,
+    ) -> Result<Message, LlmError> {
+        let body = self.build_request_body(messages, options, false);
+        let response = self.send_request(&body).await?;
+        let response = Self::check_status(response, &self.model).await?;
+
         let resp_text = response
             .text()
             .await
             .map_err(|e| LlmError::NetworkError(e.to_string()))?;
 
-        if !status.is_success() {
-            if resp_text.contains("model") && resp_text.contains("not found") {
-                return Err(LlmError::InvalidResponse(format!(
-                    "Model '{}' not found in Ollama. Run: ollama pull {}",
-                    self.model, self.model
-                )));
-            }
-            return Err(LlmError::InvalidResponse(format!(
-                "HTTP {status}: {resp_text}"
-            )));
-        }
-
         let resp_json: serde_json::Value = serde_json::from_str(&resp_text)
             .map_err(|e| LlmError::InvalidResponse(format!("Invalid JSON: {e}")))?;
 
-        // Parse Ollama response
         let message = resp_json
             .get("message")
             .ok_or_else(|| LlmError::InvalidResponse("No message in response".to_string()))?;
@@ -891,14 +908,77 @@ impl ChatModel for ChatOllama {
 
     async fn stream(
         &self,
-        _messages: &[Message],
-        _options: Option<&CallOptions>,
+        messages: &[Message],
+        options: Option<&CallOptions>,
     ) -> Result<crate::llm::BoxStream<'_, Result<MessageChunk, LlmError>>, LlmError> {
-        // Ollama streaming requires SSE parsing
-        // This is deferred to future implementation
-        Err(LlmError::InvalidResponse(
-            "Streaming not yet implemented for ChatOllama".to_string(),
-        ))
+        let body = self.build_request_body(messages, options, true);
+        let response = self.send_request(&body).await?;
+        let response = Self::check_status(response, &self.model).await?;
+
+        // Decouple the response body from the Response object via an mpsc
+        // channel, same pattern as ChatAnthropic. This is required because
+        // async_trait boxes the future and self-referential borrows across
+        // that boundary are not possible.
+        let (tx, rx) = tokio::sync::mpsc::channel::<Result<tokio_util::bytes::Bytes, LlmError>>(8);
+        tokio::spawn(async move {
+            let mut reader = response;
+            loop {
+                match reader.chunk().await {
+                    Ok(Some(chunk)) => {
+                        if tx.send(Ok(chunk)).await.is_err() {
+                            break;
+                        }
+                    }
+                    Ok(None) => break,
+                    Err(e) => {
+                        let _ = tx.send(Err(LlmError::NetworkError(e.to_string()))).await;
+                        break;
+                    }
+                }
+            }
+        });
+
+        let receiver_stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+        let byte_stream: std::pin::Pin<
+            Box<dyn futures::Stream<Item = Result<tokio_util::bytes::Bytes, LlmError>> + Send>,
+        > = Box::pin(receiver_stream);
+        let ndjson_buffer = String::new();
+        let pending_chunks: Vec<Result<MessageChunk, LlmError>> = Vec::new();
+
+        let chunk_stream = stream::unfold(
+            (byte_stream, ndjson_buffer, pending_chunks),
+            |(mut byte_stream, mut ndjson_buffer, mut pending_chunks)| async move {
+                loop {
+                    if let Some(chunk) = pending_chunks.pop() {
+                        return Some((chunk, (byte_stream, ndjson_buffer, pending_chunks)));
+                    }
+
+                    match byte_stream.next().await {
+                        Some(Ok(bytes)) => {
+                            ndjson_buffer.push_str(&String::from_utf8_lossy(&bytes));
+
+                            let mut new_chunks = Vec::new();
+                            while let Some(pos) = ndjson_buffer.find('\n') {
+                                let line = ndjson_buffer[..pos].trim().to_string();
+                                ndjson_buffer.drain(..=pos);
+                                if line.is_empty() {
+                                    continue;
+                                }
+                                new_chunks.push(parse_ollama_ndjson_line(&line));
+                            }
+                            new_chunks.reverse();
+                            pending_chunks = new_chunks;
+                        }
+                        Some(Err(e)) => {
+                            return Some((Err(e), (byte_stream, ndjson_buffer, pending_chunks)));
+                        }
+                        None => return None,
+                    }
+                }
+            },
+        );
+
+        Ok(Box::pin(chunk_stream))
     }
 
     fn bind_tools(&self, tools: Vec<ToolDefinition>) -> Self {
@@ -1120,6 +1200,57 @@ fn parse_message_delta(json: &serde_json::Value) -> MessageChunk {
     }
 }
 
+/// Parse a single NDJSON line from the Ollama streaming API into a
+/// `Result<MessageChunk, LlmError>`.
+///
+/// Ollama streaming format: each line is a complete JSON object with fields:
+/// - `message.content` - text delta
+/// - `done` - whether this is the final chunk
+/// - `eval_count` / `prompt_eval_count` - token counts (final chunk only)
+fn parse_ollama_ndjson_line(line: &str) -> Result<MessageChunk, LlmError> {
+    let json: serde_json::Value = serde_json::from_str(line)
+        .map_err(|e| LlmError::InvalidResponse(format!("Invalid Ollama NDJSON: {e}")))?;
+
+    if let Some(error_msg) = json.get("error").and_then(serde_json::Value::as_str) {
+        return Err(LlmError::InvalidResponse(error_msg.to_string()));
+    }
+
+    let content = json
+        .get("message")
+        .and_then(|m| m.get("content"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("")
+        .to_string();
+
+    let done = json
+        .get("done")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+
+    let usage = done.then(|| {
+        let input = json
+            .get("prompt_eval_count")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        let output = json
+            .get("eval_count")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        crate::state::TokenUsage {
+            input_tokens: input,
+            output_tokens: output,
+            total_tokens: input + output,
+        }
+    });
+
+    Ok(MessageChunk {
+        role: done.then_some(Role::Ai),
+        content,
+        tool_call_chunks: vec![],
+        usage,
+    })
+}
+
 // Rust guideline compliant 2026-05-21
 
 #[cfg(test)]
@@ -1240,5 +1371,90 @@ mod tests {
         let (event_type, data) = extract_sse_fields(raw).expect("should parse");
         assert_eq!(event_type, "content_block_start");
         assert_eq!(data, "{\"type\":\"content_block_start\"}");
+    }
+
+    #[test]
+    fn test_parse_ollama_ndjson_content_chunk() {
+        let line = r#"{"model":"llama3","created_at":"2024-01-01T00:00:00Z","message":{"role":"assistant","content":"Hello"},"done":false}"#;
+        let chunk = parse_ollama_ndjson_line(line).expect("should parse");
+        assert_eq!(chunk.content, "Hello");
+        assert!(chunk.role.is_none());
+        assert!(chunk.tool_call_chunks.is_empty());
+        assert!(chunk.usage.is_none());
+    }
+
+    #[test]
+    fn test_parse_ollama_ndjson_final_chunk() {
+        let line = r#"{"model":"llama3","created_at":"2024-01-01T00:00:02Z","message":{"role":"assistant","content":""},"done":true,"total_duration":123456789,"eval_count":10,"prompt_eval_count":20}"#;
+        let chunk = parse_ollama_ndjson_line(line).expect("should parse");
+        assert!(chunk.content.is_empty());
+        assert_eq!(chunk.role, Some(Role::Ai));
+        assert!(chunk.tool_call_chunks.is_empty());
+        let usage = chunk.usage.expect("final chunk should have usage");
+        assert_eq!(usage.input_tokens, 20);
+        assert_eq!(usage.output_tokens, 10);
+        assert_eq!(usage.total_tokens, 30);
+    }
+
+    #[test]
+    fn test_parse_ollama_ndjson_error() {
+        let line = r#"{"error":"model not found"}"#;
+        let result = parse_ollama_ndjson_line(line);
+        assert!(result.is_err());
+        match result {
+            Err(LlmError::InvalidResponse(msg)) => {
+                assert_eq!(msg, "model not found");
+            }
+            _ => panic!("expected InvalidResponse error"),
+        }
+    }
+
+    #[test]
+    fn test_parse_ollama_ndjson_invalid_json() {
+        let line = "not json at all";
+        let result = parse_ollama_ndjson_line(line);
+        assert!(result.is_err());
+        match result {
+            Err(LlmError::InvalidResponse(msg)) => {
+                assert!(msg.starts_with("Invalid Ollama NDJSON:"));
+            }
+            _ => panic!("expected InvalidResponse error"),
+        }
+    }
+
+    #[test]
+    fn test_parse_ollama_ndjson_mid_stream_chunk() {
+        let line = r#"{"model":"llama3","created_at":"2024-01-01T00:00:01Z","message":{"role":"assistant","content":" world"},"done":false}"#;
+        let chunk = parse_ollama_ndjson_line(line).expect("should parse");
+        assert_eq!(chunk.content, " world");
+        assert!(chunk.usage.is_none());
+    }
+
+    #[test]
+    fn test_parse_ollama_ndjson_final_chunk_no_usage() {
+        let line = r#"{"model":"llama3","created_at":"2024-01-01T00:00:02Z","message":{"role":"assistant","content":""},"done":true}"#;
+        let chunk = parse_ollama_ndjson_line(line).expect("should parse");
+        let usage = chunk
+            .usage
+            .expect("final chunk should have usage even without eval fields");
+        assert_eq!(usage.input_tokens, 0);
+        assert_eq!(usage.output_tokens, 0);
+    }
+
+    #[test]
+    fn test_ollama_build_request_body_stream() {
+        let ollama = ChatOllama::new("llama3");
+        let messages = vec![Message {
+            id: "1".to_string(),
+            role: Role::Human,
+            content: Content::Text("hello".to_string()),
+            tool_calls: vec![],
+            tool_call_id: None,
+            name: None,
+            usage: None,
+        }];
+        let body = ollama.build_request_body(&messages, None, true);
+        assert_eq!(body["stream"], true);
+        assert_eq!(body["model"], "llama3");
     }
 }
