@@ -7,7 +7,9 @@
 use super::builder::NodeMetadata;
 use crate::{
     JunctureError, State,
-    checkpoint::{CheckpointFilter, CheckpointSource, StateSnapshot},
+    checkpoint::{
+        Checkpoint, CheckpointFilter, CheckpointMetadata, CheckpointSource, StateSnapshot,
+    },
     config::RunnableConfig,
     edge::TriggerTable,
     interrupt::ResumeValue,
@@ -482,28 +484,52 @@ impl<S: State> CompiledGraph<S> {
     ///
     /// # Errors
     ///
-    /// Returns [`JunctureError::Checkpoint`] if no checkpointer is configured
-    /// or if the state cannot be retrieved.
-    #[expect(
-        clippy::unused_async,
-        reason = "async API consistency for checkpoint operations"
-    )]
+    /// Returns [`JunctureError::Checkpoint`] if no checkpointer is configured,
+    /// the checkpoint cannot be retrieved, or the state cannot be deserialized.
     pub async fn get_state(
         &self,
-        _config: &RunnableConfig,
-    ) -> Result<Option<StateSnapshot<S>>, JunctureError> {
+        config: &RunnableConfig,
+    ) -> Result<Option<StateSnapshot<S>>, JunctureError>
+    where
+        S: serde::de::DeserializeOwned,
+    {
         let checkpointer =
             self.inner.checkpointer.as_ref().ok_or_else(|| {
                 JunctureError::checkpoint("no checkpointer configured for get_state")
             })?;
 
-        let _ = checkpointer;
+        let tuple = checkpointer
+            .get_tuple(config)
+            .await
+            .map_err(|e| JunctureError::checkpoint(e.to_string()))?;
 
-        // Full implementation requires deserialization of checkpoint state,
-        // which will be completed in Phase 6 (checkpoint integration).
-        Err(JunctureError::checkpoint(
-            "get_state not yet implemented: requires checkpoint state recovery",
-        ))
+        let Some(tuple) = tuple else {
+            return Ok(None);
+        };
+
+        // Deserialize channel values into S
+        let values: S = serde_json::from_value(tuple.checkpoint.channel_values)
+            .map_err(|e| JunctureError::checkpoint(format!("failed to deserialize state: {e}")))?;
+
+        // Extract next nodes from pending_tasks
+        let next: Vec<String> = tuple
+            .checkpoint
+            .pending_tasks
+            .iter()
+            .map(|t| t.node.clone())
+            .collect();
+
+        let snapshot = StateSnapshot {
+            values,
+            next,
+            config: tuple.config,
+            metadata: tuple.metadata,
+            created_at: tuple.checkpoint.created_at,
+            parent_config: tuple.parent_config,
+            tasks: vec![],
+        };
+
+        Ok(Some(snapshot))
     }
 
     /// Get the full state history for a thread
@@ -546,36 +572,85 @@ impl<S: State> CompiledGraph<S> {
     ///
     /// Applies the provided state update to the current checkpoint state.
     /// Used for administrative state modifications outside of normal execution.
+    /// The updated checkpoint is saved with [`CheckpointSource::Update`] and an
+    /// incremented step counter.
     ///
     /// # Arguments
     ///
     /// * `config` - Configuration with `thread_id` and `checkpoint_id` set
-    /// * `update` - State update to apply
+    /// * `update` - State update to apply (carries `update`, `label`, and `as_node`)
     ///
     /// # Errors
     ///
-    /// Returns [`JunctureError::Checkpoint`] if no checkpointer is configured
-    /// or if the update cannot be applied.
-    #[expect(
-        clippy::unused_async,
-        reason = "async API consistency for checkpoint operations"
-    )]
+    /// Returns [`JunctureError::Checkpoint`] if no checkpointer is configured,
+    /// the checkpoint cannot be found, state deserialization/serialization fails,
+    /// or the checkpoint cannot be saved.
+    ///
+    /// # Notes
+    ///
+    /// This method requires `S: DeserializeOwned + Serialize` to deserialize
+    /// the state from the checkpoint and re-serialize after applying the update.
     pub async fn update_state(
         &self,
-        _config: &RunnableConfig,
+        config: &RunnableConfig,
         update: StateUpdate<S>,
-    ) -> Result<RunnableConfig, JunctureError> {
+    ) -> Result<RunnableConfig, JunctureError>
+    where
+        S: serde::de::DeserializeOwned + serde::Serialize,
+    {
         let checkpointer = self.inner.checkpointer.as_ref().ok_or_else(|| {
             JunctureError::checkpoint("no checkpointer configured for update_state")
         })?;
 
-        let _ = (checkpointer, update);
+        // Load current checkpoint
+        let tuple = checkpointer
+            .get_tuple(config)
+            .await
+            .map_err(|e| JunctureError::checkpoint(e.to_string()))?;
 
-        // Full implementation requires checkpoint state modification,
-        // which will be completed in Phase 6 (checkpoint integration).
-        Err(JunctureError::checkpoint(
-            "update_state not yet implemented: requires checkpoint state recovery",
-        ))
+        let Some(tuple) = tuple else {
+            return Err(JunctureError::checkpoint(
+                "no checkpoint found for update_state",
+            ));
+        };
+
+        // Deserialize current state from checkpoint
+        let mut state: S = serde_json::from_value(tuple.checkpoint.channel_values)
+            .map_err(|e| JunctureError::checkpoint(format!("failed to deserialize state: {e}")))?;
+
+        // Apply the user's update
+        state.apply(update.update);
+
+        // Re-serialize the updated state
+        let updated_values = serde_json::to_value(&state).map_err(|e| {
+            JunctureError::checkpoint(format!("failed to serialize updated state: {e}"))
+        })?;
+
+        // Record the writer node in metadata.writes when as_node is provided
+        let mut writes = tuple.metadata.writes;
+        if let Some(as_node) = update.as_node {
+            writes.insert(as_node, serde_json::Value::Null);
+        }
+
+        // Build updated checkpoint with new channel values
+        let updated_checkpoint = Checkpoint {
+            channel_values: updated_values,
+            ..tuple.checkpoint
+        };
+
+        // Build updated metadata: source=Update, step incremented
+        let metadata = CheckpointMetadata {
+            source: CheckpointSource::Update,
+            step: tuple.metadata.step + 1,
+            writes,
+            ..tuple.metadata
+        };
+
+        // Save the updated checkpoint
+        checkpointer
+            .put(config, updated_checkpoint, metadata)
+            .await
+            .map_err(|e| JunctureError::checkpoint(e.to_string()))
     }
 
     /// Bulk update state across multiple checkpoints
@@ -1345,6 +1420,209 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_update_state_no_checkpoint_found() {
+        use crate::checkpoint::{Checkpoint, CheckpointError, CheckpointMetadata, CheckpointTuple};
+
+        struct NoCheckpointCheckpointer;
+
+        #[async_trait::async_trait]
+        impl crate::checkpoint::CheckpointSaver for NoCheckpointCheckpointer {
+            async fn get_tuple(
+                &self,
+                _config: &crate::config::RunnableConfig,
+            ) -> Result<Option<CheckpointTuple>, CheckpointError> {
+                Ok(None)
+            }
+
+            async fn list(
+                &self,
+                _config: &crate::config::RunnableConfig,
+                _filter: Option<crate::checkpoint::CheckpointFilter>,
+            ) -> Result<Vec<CheckpointTuple>, CheckpointError> {
+                Ok(Vec::new())
+            }
+
+            async fn put(
+                &self,
+                _config: &crate::config::RunnableConfig,
+                _checkpoint: Checkpoint,
+                _metadata: CheckpointMetadata,
+            ) -> Result<crate::config::RunnableConfig, CheckpointError> {
+                Ok(crate::config::RunnableConfig::new())
+            }
+
+            async fn put_writes(
+                &self,
+                _config: &crate::config::RunnableConfig,
+                _writes: Vec<crate::checkpoint::PendingWrite>,
+                _task_id: &str,
+            ) -> Result<(), CheckpointError> {
+                Ok(())
+            }
+        }
+
+        let nodes = {
+            let mut nodes: IndexMap<String, Arc<dyn crate::Node<StateDummy>>> = IndexMap::new();
+            nodes.insert("a".to_string(), mock_node("a"));
+            nodes
+        };
+
+        let compiled = CompiledGraph::with_checkpointer(
+            nodes,
+            TriggerTable::new(),
+            IndexMap::new(),
+            Some(Arc::new(NoCheckpointCheckpointer)),
+        );
+
+        let config = RunnableConfig::new();
+        let update = StateUpdate {
+            update: StateDummyUpdate,
+            label: None,
+            as_node: None,
+        };
+
+        let result = compiled.update_state(&config, update).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.is_checkpoint());
+        assert!(
+            err.to_string().contains("no checkpoint found"),
+            "Expected 'no checkpoint found' error, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "mock checkpointer boilerplate inflates line count; extraction would hurt readability"
+    )]
+    async fn test_update_state_success() {
+        use crate::checkpoint::{
+            Checkpoint, CheckpointError, CheckpointMetadata, CheckpointSource, CheckpointTuple,
+        };
+        use std::collections::HashMap;
+        use std::sync::{Arc, Mutex};
+
+        #[derive(Clone)]
+        enum ObservedCall {
+            Put { source: CheckpointSource, step: i64 },
+        }
+
+        struct MockCheckpointer {
+            observed: Arc<Mutex<Vec<ObservedCall>>>,
+        }
+
+        #[async_trait::async_trait]
+        impl crate::checkpoint::CheckpointSaver for MockCheckpointer {
+            async fn get_tuple(
+                &self,
+                _config: &crate::config::RunnableConfig,
+            ) -> Result<Option<CheckpointTuple>, CheckpointError> {
+                Ok(Some(CheckpointTuple {
+                    config: crate::config::RunnableConfig::new(),
+                    checkpoint: Checkpoint {
+                        id: "cp_123".to_string(),
+                        channel_values: serde_json::Value::Null,
+                        channel_versions: HashMap::new(),
+                        versions_seen: HashMap::new(),
+                        pending_tasks: Vec::new(),
+                        pending_sends: Vec::new(),
+                        pending_interrupts: Vec::new(),
+                        schema_version: 1,
+                        created_at: "2024-01-01T00:00:00Z".to_string(),
+                        v: 1,
+                        new_versions: HashMap::new(),
+                        counters_since_delta_snapshot: HashMap::new(),
+                    },
+                    metadata: CheckpointMetadata {
+                        source: CheckpointSource::Loop,
+                        step: 5,
+                        writes: HashMap::new(),
+                        parents: HashMap::new(),
+                        run_id: "run_abc".to_string(),
+                    },
+                    pending_writes: Vec::new(),
+                    parent_config: None,
+                }))
+            }
+
+            async fn list(
+                &self,
+                _config: &crate::config::RunnableConfig,
+                _filter: Option<crate::checkpoint::CheckpointFilter>,
+            ) -> Result<Vec<CheckpointTuple>, CheckpointError> {
+                Ok(Vec::new())
+            }
+
+            async fn put(
+                &self,
+                _config: &crate::config::RunnableConfig,
+                _checkpoint: Checkpoint,
+                metadata: CheckpointMetadata,
+            ) -> Result<crate::config::RunnableConfig, CheckpointError> {
+                self.observed
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(ObservedCall::Put {
+                        source: metadata.source,
+                        step: metadata.step,
+                    });
+                Ok(crate::config::RunnableConfig::new())
+            }
+
+            async fn put_writes(
+                &self,
+                _config: &crate::config::RunnableConfig,
+                _writes: Vec<crate::checkpoint::PendingWrite>,
+                _task_id: &str,
+            ) -> Result<(), CheckpointError> {
+                Ok(())
+            }
+        }
+
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let nodes = {
+            let mut nodes: IndexMap<String, Arc<dyn crate::Node<StateDummy>>> = IndexMap::new();
+            nodes.insert("a".to_string(), mock_node("a"));
+            nodes
+        };
+
+        let compiled = CompiledGraph::with_checkpointer(
+            nodes,
+            TriggerTable::new(),
+            IndexMap::new(),
+            Some(Arc::new(MockCheckpointer {
+                observed: Arc::clone(&observed),
+            })),
+        );
+
+        let config = RunnableConfig::new();
+        let update = StateUpdate {
+            update: StateDummyUpdate,
+            label: Some("manual fix".to_string()),
+            as_node: Some("admin".to_string()),
+        };
+
+        let result = compiled.update_state(&config, update).await;
+        assert!(result.is_ok(), "update_state should succeed");
+
+        // Verify the put was called with correct metadata
+        let calls = observed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_eq!(calls.len(), 1, "Expected exactly one put call");
+        match &calls[0] {
+            ObservedCall::Put { source, step } => {
+                assert!(
+                    matches!(source, CheckpointSource::Update),
+                    "Expected Update source, got {source:?}"
+                );
+                assert_eq!(*step, 6, "Expected step to be incremented from 5 to 6");
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn test_bulk_update_state_no_checkpointer() {
         let mut nodes: IndexMap<String, Arc<dyn crate::Node<StateDummy>>> = IndexMap::new();
         nodes.insert("a".to_string(), mock_node("a"));
@@ -1589,7 +1867,7 @@ mod tests {
         NodeFnUpdate(|_s: StateDummy| async move { Ok(StateDummyUpdate) }).into_node(name)
     }
 
-    #[derive(Clone, Debug, serde::Deserialize)]
+    #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
     #[serde(crate = "serde")]
     struct StateDummy;
 
