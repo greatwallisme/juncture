@@ -13,6 +13,10 @@ use std::{sync::Arc, time::Instant};
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
+use tracing::Instrument;
+
+#[cfg(feature = "otel")]
+use tracing::{event, Level};
 
 /// Execute a single superstep in parallel
 ///
@@ -117,6 +121,13 @@ pub async fn execute_superstep<S: State>(
         let token = cancellation_token.clone();
         let ctx = Arc::clone(&interrupt_context);
 
+        // Create span before moving values into the async block
+        let span = tracing::info_span!(
+            "juncture.node.execute",
+            node_name = %node_name,
+            task_id = %task_id,
+        );
+
         join_set.spawn(async move {
             // Acquire semaphore permit
             let _permit = permit.acquire_owned().await.unwrap();
@@ -138,6 +149,18 @@ pub async fn execute_superstep<S: State>(
 
             let duration = start.elapsed();
 
+            #[cfg(feature = "otel")]
+            {
+                // Emit metrics for node execution
+                event!(
+                    name: "juncture.node.execute.metrics",
+                    Level::DEBUG,
+                    node_name = %node_name,
+                    duration_ms = duration.as_millis(),
+                    success = result.is_ok(),
+                );
+            };
+
             result.map(|command| TaskOutput {
                 task_id,
                 node_name,
@@ -145,7 +168,7 @@ pub async fn execute_superstep<S: State>(
                 duration,
                 trigger: task_trigger,
             })
-        });
+        }.instrument(span));
     }
 
     // Collect results as they complete

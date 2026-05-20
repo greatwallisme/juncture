@@ -6,6 +6,15 @@
 
 use std::fmt;
 
+#[cfg(feature = "otel")]
+use opentelemetry::trace::TracerProvider as _;
+#[cfg(feature = "otel")]
+use opentelemetry_otlp::WithExportConfig;
+#[cfg(feature = "otel")]
+use opentelemetry_sdk::{trace::TracerProvider, Resource};
+#[cfg(feature = "otel")]
+use tracing_subscriber::prelude::*;
+
 /// Error type for tracing configuration failures
 #[derive(Debug)]
 pub enum TracingError {
@@ -262,9 +271,9 @@ impl TracingConfig {
     /// Install the tracing subscriber
     ///
     /// This initializes the global tracing subscriber with the configured
-    /// settings. Currently sets up a basic `tracing-subscriber` for logging.
-    /// In the future, when OpenTelemetry dependencies are added, this will
-    /// configure OTLP exporters.
+    /// settings. When the `otel` feature is enabled and an OTLP endpoint
+    /// is configured, it sets up OpenTelemetry OTLP export. Otherwise,
+    /// it configures basic `tracing-subscriber` logging.
     ///
     /// # Errors
     ///
@@ -289,11 +298,82 @@ impl TracingConfig {
             .with_default_directive(self.log_level.into())
             .from_env_lossy();
 
-        // Install the subscriber
+        #[cfg(feature = "otel")]
+        {
+            // Only set up OTLP if endpoint is configured
+            // Clone to avoid borrow checker issues with self move
+            let otlp_endpoint = self.otlp_endpoint.clone();
+            if let Some(endpoint) = otlp_endpoint.as_ref() {
+                return self.install_otel(env_filter, endpoint);
+            }
+        }
+
+        // Fallback to basic fmt subscriber without OTLP
         tracing_subscriber::fmt()
             .with_env_filter(env_filter)
             .try_init()
             .map_err(|e| TracingError::InstallFailed(e.to_string()))?;
+
+        Ok(())
+    }
+
+    /// Install OpenTelemetry OTLP pipeline
+    ///
+    /// Sets up the OpenTelemetry tracer with OTLP exporter and configures
+    /// the tracing subscriber with both OTLP and fmt layers.
+    ///
+    /// This is separated from `install()` to allow conditional compilation
+    /// based on the `otel` feature flag.
+    #[cfg(feature = "otel")]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "OTLP setup requires: resource config, OTLP exporter, tracer provider, layers, subscriber initialization"
+    )]
+    fn install_otel(
+        self,
+        env_filter: tracing_subscriber::EnvFilter,
+        otlp_endpoint: &str,
+    ) -> Result<(), TracingError> {
+        // Build resource attributes
+        let mut resource_attributes = vec![
+            opentelemetry::KeyValue::new("service.name", self.service_name),
+            opentelemetry::KeyValue::new("service.version", self.service_version),
+        ];
+
+        // Add custom resource attributes
+        for (key, value) in self.resource_attributes {
+            resource_attributes.push(opentelemetry::KeyValue::new(key, value));
+        }
+
+        let resource = Resource::new(resource_attributes);
+
+        // Configure OTLP exporter using tonic
+        let exporter = opentelemetry_otlp::SpanExporter::builder()
+            .with_tonic()
+            .with_endpoint(otlp_endpoint)
+            .build()
+            .map_err(|e| TracingError::InstallFailed(format!("OTLP exporter build failed: {e}")))?;
+
+        // Create tracer provider with resource
+        let tracer_provider = TracerProvider::builder()
+            .with_resource(resource)
+            .with_simple_exporter(exporter)
+            .build();
+
+        // Create OpenTelemetry layer
+        let otel_layer = tracing_opentelemetry::layer()
+            .with_tracer(tracer_provider.tracer("juncture"));
+
+        // Create fmt layer for console logging with filter
+        let fmt_layer = tracing_subscriber::fmt::layer()
+            .with_filter(env_filter);
+
+        // Build and initialize subscriber with both layers
+        tracing_subscriber::registry()
+            .with(otel_layer)
+            .with(fmt_layer)
+            .try_init()
+            .map_err(|e| TracingError::InstallFailed(format!("Subscriber init failed: {e}")))?;
 
         Ok(())
     }

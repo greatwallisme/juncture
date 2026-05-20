@@ -320,6 +320,15 @@ impl<S: State> PregelLoop<S> {
     ///     loop.after_tick(result)?;
     /// }
     /// ```
+    #[tracing::instrument(
+        name = "juncture.graph.invoke",
+        skip(self),
+        fields(
+            thread_id = ?std::thread::current().id(),
+            step = self.step,
+            recursion_limit = self.runnable_config.recursion_limit,
+        )
+    )]
     pub fn tick(&mut self) -> Result<bool, JunctureError> {
         // Check recursion limit
         if self.step >= self.runnable_config.recursion_limit {
@@ -413,6 +422,14 @@ impl<S: State> PregelLoop<S> {
     /// ```ignore
     /// let result = loop.execute_superstep().await?;
     /// ```
+    #[tracing::instrument(
+        name = "juncture.superstep",
+        skip(self),
+        fields(
+            step = self.step,
+            num_tasks = self.pending_tasks.len(),
+        )
+    )]
     pub async fn execute_superstep(&mut self) -> Result<SuperstepResult<S>, JunctureError> {
         let (result, interrupt_rx) = execute_superstep(
             &self.pending_tasks,

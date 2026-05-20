@@ -11,7 +11,12 @@ categories.workspace = true
 
 [features]
 default = []
-otel = []  # Future: add opentelemetry deps when ready
+otel = [
+    "opentelemetry",
+    "opentelemetry-otlp",
+    "opentelemetry_sdk",
+    "tracing-opentelemetry",
+]
 
 [dependencies]
 juncture-core = { path = "../juncture-core" }
@@ -19,6 +24,12 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+# OpenTelemetry dependencies (feature-gated)
+opentelemetry = { version = "0.27", optional = true }
+opentelemetry-otlp = { version = "0.27", features = ["tonic"], optional = true }
+opentelemetry_sdk = { version = "0.27", features = ["rt-tokio"], optional = true }
+tracing-opentelemetry = { version = "0.28", optional = true }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }
