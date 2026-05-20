@@ -26,6 +26,7 @@ pub(crate) enum ErrorKind {
         writers: Vec<String>,
     },
     TaskPanicked(String),
+    NodeTimeout(NodeTimeoutError),
 }
 
 /// Error code categorizing the error type
@@ -288,6 +289,7 @@ impl JunctureError {
             ErrorKind::Cancelled => ErrorCode::Cancelled,
             ErrorKind::MultipleWriters { .. } => ErrorCode::MultipleWriters,
             ErrorKind::TaskPanicked(_) => ErrorCode::TaskPanicked,
+            ErrorKind::NodeTimeout(_) => ErrorCode::NodeTimeout,
         }
     }
 
@@ -397,6 +399,21 @@ impl JunctureError {
         matches!(self.kind, ErrorKind::TaskPanicked(_))
     }
 
+    /// Node execution exceeded its timeout
+    #[must_use]
+    pub fn node_timeout(err: NodeTimeoutError) -> Self {
+        Self {
+            kind: ErrorKind::NodeTimeout(err),
+            backtrace: Backtrace::capture(),
+        }
+    }
+
+    /// Check if this is a node timeout error
+    #[must_use]
+    pub const fn is_node_timeout(&self) -> bool {
+        matches!(self.kind, ErrorKind::NodeTimeout(_))
+    }
+
     /// Get the error code categorizing this error (alias for `code()`)
     ///
     /// This method is an alias for [`code()`](Self::code) and exists for
@@ -477,6 +494,7 @@ impl std::fmt::Display for JunctureError {
                 )
             }
             ErrorKind::TaskPanicked(msg) => write!(f, "Task panicked: {msg}"),
+            ErrorKind::NodeTimeout(err) => write!(f, "Node timeout: {err}"),
         }
     }
 }
@@ -521,6 +539,38 @@ mod tests {
         assert_eq!(
             JunctureError::task_panicked("boom").code(),
             ErrorCode::TaskPanicked
+        );
+        assert_eq!(
+            JunctureError::node_timeout(NodeTimeoutError::RunTimeout {
+                node: "n".to_string(),
+                timeout: 1000,
+            })
+            .code(),
+            ErrorCode::NodeTimeout
+        );
+    }
+
+    #[test]
+    fn node_timeout_error_construct_and_check() {
+        let err = JunctureError::node_timeout(NodeTimeoutError::RunTimeout {
+            node: "my_node".to_string(),
+            timeout: 5000,
+        });
+        assert!(err.is_node_timeout());
+        assert!(!err.is_execution());
+        assert_eq!(err.code(), ErrorCode::NodeTimeout);
+    }
+
+    #[test]
+    fn node_timeout_juncture_error_display() {
+        let err = JunctureError::node_timeout(NodeTimeoutError::RunTimeout {
+            node: "my_node".to_string(),
+            timeout: 5000,
+        });
+        let msg = err.to_string();
+        assert!(
+            msg.contains("my_node"),
+            "display should contain node name: {msg}"
         );
     }
 

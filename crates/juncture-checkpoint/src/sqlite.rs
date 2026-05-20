@@ -17,6 +17,7 @@ use juncture_core::checkpoint::{
 use juncture_core::config::RunnableConfig;
 
 use crate::error::CheckpointError;
+use crate::serde::{SerializerKind, deserialize_auto};
 
 // Convert crate's CheckpointError to core's CheckpointError
 #[allow(dead_code, reason = "conversion trait used internally")]
@@ -54,6 +55,7 @@ impl<T> ToCoreCheckpointError<T> for Result<T, CheckpointError> {
 /// `SQLite` checkpoint saver
 ///
 /// Stores checkpoints in a `SQLite` database for persistence.
+/// Uses `MessagePack` serialization by default for high-performance binary storage.
 #[derive(Clone)]
 pub struct SqliteSaver {
     /// Database connection pool
@@ -63,6 +65,8 @@ pub struct SqliteSaver {
     #[cfg(feature = "sqlite")]
     #[allow(dead_code, reason = "Path stored for debugging and future use")]
     db_path: PathBuf,
+    /// Serializer for checkpoint data fields
+    serializer: SerializerKind,
 }
 
 #[cfg(feature = "sqlite")]
@@ -71,6 +75,7 @@ impl std::fmt::Debug for SqliteSaver {
         f.debug_struct("SqliteSaver")
             .field("pool", &self.pool)
             .field("db_path", &self.db_path)
+            .field("serializer", &self.serializer)
             .finish()
     }
 }
@@ -159,6 +164,7 @@ impl SqliteSaver {
         Ok(Self {
             pool: Arc::new(pool),
             db_path: path,
+            serializer: SerializerKind::default(),
         })
     }
 
@@ -243,7 +249,18 @@ impl SqliteSaver {
         Ok(Self {
             pool: Arc::new(pool),
             db_path: PathBuf::from(":memory:"),
+            serializer: SerializerKind::default(),
         })
+    }
+
+    /// Create a `SqliteSaver` with a custom serializer
+    ///
+    /// Allows overriding the default `MessagePack` serializer with a custom
+    /// format (e.g., `SerializerKind::Json` for debugging).
+    #[must_use]
+    pub const fn with_serializer(mut self, serializer: SerializerKind) -> Self {
+        self.serializer = serializer;
+        self
     }
 
     /// Get thread ID from config, returning error if not set
@@ -274,26 +291,26 @@ impl SqliteSaver {
         checkpoint_id: String,
         created_at: String,
     ) -> Result<Checkpoint, CoreCheckpointError> {
-        let channel_values: serde_json::Value = serde_json::from_slice(channel_values_bytes)
+        let channel_values: serde_json::Value = deserialize_auto(channel_values_bytes)
             .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
         let channel_versions: std::collections::HashMap<String, u64> =
-            serde_json::from_slice(channel_versions_bytes)
+            deserialize_auto(channel_versions_bytes)
                 .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
         let versions_seen: std::collections::HashMap<
             String,
             std::collections::HashMap<String, u64>,
-        > = serde_json::from_slice(versions_seen_bytes)
+        > = deserialize_auto(versions_seen_bytes)
             .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
         let pending_tasks: Vec<CheckpointPendingTask> = pending_tasks_bytes
             .map(|bytes| {
-                serde_json::from_slice(bytes)
+                deserialize_auto::<Vec<CheckpointPendingTask>>(bytes)
                     .map_err(|e| CoreCheckpointError::Storage(e.to_string()))
             })
             .transpose()?
             .unwrap_or_default();
         let pending_sends: Vec<SerializedSend> = pending_sends_bytes
             .map(|bytes| {
-                serde_json::from_slice(bytes)
+                deserialize_auto::<Vec<SerializedSend>>(bytes)
                     .map_err(|e| CoreCheckpointError::Storage(e.to_string()))
             })
             .transpose()?
@@ -444,7 +461,7 @@ impl juncture_core::checkpoint::CheckpointSaver for SqliteSaver {
                         .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?,
                 )?;
 
-                let metadata: CheckpointMetadata = serde_json::from_slice(&metadata_bytes)
+                let metadata: CheckpointMetadata = deserialize_auto(&metadata_bytes)
                     .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
 
                 // Load pending writes for this checkpoint
@@ -535,7 +552,7 @@ impl juncture_core::checkpoint::CheckpointSaver for SqliteSaver {
                 created_at,
             )?;
 
-            let metadata: CheckpointMetadata = serde_json::from_slice(&metadata_bytes)
+            let metadata: CheckpointMetadata = deserialize_auto(&metadata_bytes)
                 .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
 
             results.push(CheckpointTuple {
@@ -560,18 +577,30 @@ impl juncture_core::checkpoint::CheckpointSaver for SqliteSaver {
             Self::get_thread_id(config).map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
         let checkpoint_ns = Self::get_checkpoint_ns(config);
 
-        // Serialize each field separately per design spec
-        let channel_values_bytes = serde_json::to_vec(&checkpoint.channel_values)
+        // Serialize each field separately per design spec using the configured serializer
+        let channel_values_bytes = self
+            .serializer
+            .serialize(&checkpoint.channel_values)
             .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
-        let channel_versions_bytes = serde_json::to_vec(&checkpoint.channel_versions)
+        let channel_versions_bytes = self
+            .serializer
+            .serialize(&checkpoint.channel_versions)
             .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
-        let versions_seen_bytes = serde_json::to_vec(&checkpoint.versions_seen)
+        let versions_seen_bytes = self
+            .serializer
+            .serialize(&checkpoint.versions_seen)
             .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
-        let pending_tasks_bytes = serde_json::to_vec(&checkpoint.pending_tasks)
+        let pending_tasks_bytes = self
+            .serializer
+            .serialize(&checkpoint.pending_tasks)
             .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
-        let pending_sends_bytes = serde_json::to_vec(&checkpoint.pending_sends)
+        let pending_sends_bytes = self
+            .serializer
+            .serialize(&checkpoint.pending_sends)
             .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
-        let metadata_bytes = serde_json::to_vec(&metadata)
+        let metadata_bytes = self
+            .serializer
+            .serialize(&metadata)
             .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
 
         // Extract parent_checkpoint_id from metadata.parents using empty namespace key
@@ -840,6 +869,137 @@ mod tests {
         let tuple_after = saver.get_tuple(&result_config1).await.unwrap().unwrap();
         assert_eq!(tuple_after.pending_writes.len(), 0);
     }
+
+    #[tokio::test]
+    #[cfg(feature = "sqlite")]
+    async fn test_sqlite_saver_msgpack_roundtrip() {
+        use crate::SerializationFormat;
+
+        let saver = SqliteSaver::from_connection_string("sqlite::memory:")
+            .await
+            .unwrap();
+        let config = create_test_config("thread-msgpack");
+
+        // Create a checkpoint with non-trivial data to exercise msgpack encoding
+        let mut channel_versions = std::collections::HashMap::new();
+        channel_versions.insert("messages".to_string(), 3);
+        channel_versions.insert("context".to_string(), 1);
+
+        let mut versions_seen = std::collections::HashMap::new();
+        let mut inner = std::collections::HashMap::new();
+        inner.insert("node_a".to_string(), 2);
+        versions_seen.insert("messages".to_string(), inner);
+
+        let checkpoint = Checkpoint {
+            id: "cp-msgpack-1".to_string(),
+            channel_values: json!({"messages": ["hello", "world"], "count": 42}),
+            channel_versions,
+            versions_seen,
+            pending_tasks: vec![CheckpointPendingTask {
+                id: "task-1".to_string(),
+                node: "process_node".to_string(),
+                triggers: vec!["trigger_a".to_string()],
+                state_override: Some(json!({"key": "value"})),
+            }],
+            pending_sends: vec![SerializedSend {
+                node: "outbox_node".to_string(),
+                state: serde_json::Value::String("payload".to_string()),
+            }],
+            schema_version: 1,
+            created_at: Utc::now().to_rfc3339(),
+            v: 1,
+            new_versions: std::collections::HashMap::new(),
+            counters_since_delta_snapshot: std::collections::HashMap::new(),
+        };
+
+        let metadata = create_test_metadata();
+        let result_config = saver
+            .put(&config, checkpoint.clone(), metadata)
+            .await
+            .unwrap();
+
+        // Verify the default serializer is MessagePack
+        assert_eq!(saver.serializer.format(), SerializationFormat::MessagePack);
+
+        // Retrieve and verify all fields round-tripped correctly
+        let tuple = saver.get_tuple(&result_config).await.unwrap().unwrap();
+        assert_eq!(tuple.checkpoint.id, "cp-msgpack-1");
+        assert_eq!(
+            tuple.checkpoint.channel_values,
+            json!({"messages": ["hello", "world"], "count": 42})
+        );
+        assert_eq!(tuple.checkpoint.channel_versions.get("messages"), Some(&3));
+        assert_eq!(tuple.checkpoint.channel_versions.get("context"), Some(&1));
+        assert!(
+            tuple
+                .checkpoint
+                .versions_seen
+                .get("messages")
+                .is_some_and(|m| m.get("node_a") == Some(&2))
+        );
+        assert_eq!(tuple.checkpoint.pending_tasks.len(), 1);
+        assert_eq!(tuple.checkpoint.pending_tasks[0].id, "task-1");
+        assert_eq!(tuple.checkpoint.pending_sends.len(), 1);
+        assert_eq!(tuple.checkpoint.pending_sends[0].node, "outbox_node");
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "sqlite")]
+    async fn test_sqlite_saver_reads_legacy_json_data() {
+        use crate::SerializationFormat;
+
+        let saver = SqliteSaver::from_connection_string("sqlite::memory:")
+            .await
+            .unwrap();
+
+        // Manually insert JSON-format data to simulate legacy checkpoints
+        // written before the MsgpackSerializer default
+        let channel_values_bytes = serde_json::to_vec(&json!({"key": "legacy"})).unwrap();
+        let channel_versions_bytes =
+            serde_json::to_vec(&std::collections::HashMap::<String, u64>::new()).unwrap();
+        let versions_seen_bytes = serde_json::to_vec(&std::collections::HashMap::<
+            String,
+            std::collections::HashMap<String, u64>,
+        >::new())
+        .unwrap();
+        let pending_tasks_bytes = serde_json::to_vec(&Vec::<CheckpointPendingTask>::new()).unwrap();
+        let pending_sends_bytes = serde_json::to_vec(&Vec::<SerializedSend>::new()).unwrap();
+        let metadata_bytes = serde_json::to_vec(&create_test_metadata()).unwrap();
+
+        sqlx::query(
+            r"
+            INSERT INTO checkpoints
+            (thread_id, checkpoint_ns, checkpoint_id, parent_checkpoint_id,
+             channel_values, channel_versions, versions_seen,
+             pending_tasks, pending_sends, schema_version, metadata, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ",
+        )
+        .bind("thread-legacy")
+        .bind("")
+        .bind("cp-legacy-1")
+        .bind(Option::<String>::None)
+        .bind(&channel_values_bytes)
+        .bind(&channel_versions_bytes)
+        .bind(&versions_seen_bytes)
+        .bind(&pending_tasks_bytes)
+        .bind(&pending_sends_bytes)
+        .bind(1_i64)
+        .bind(&metadata_bytes)
+        .bind(Utc::now().to_rfc3339())
+        .execute(&*saver.pool)
+        .await
+        .unwrap();
+
+        // Verify the saver can read the legacy JSON data
+        let config = RunnableConfig::default().with_thread_id("thread-legacy");
+        let tuple = saver.get_tuple(&config).await.unwrap().unwrap();
+        assert_eq!(tuple.checkpoint.id, "cp-legacy-1");
+        assert_eq!(tuple.checkpoint.channel_values, json!({"key": "legacy"}));
+
+        // Verify that the serializer is indeed MessagePack (default), proving auto-detection works
+        assert_eq!(saver.serializer.format(), SerializationFormat::MessagePack);
+    }
 }
 
-// Rust guideline compliant 2026-05-19
+// Rust guideline compliant 2026-05-20

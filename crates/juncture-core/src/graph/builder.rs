@@ -430,6 +430,147 @@ impl RetryPolicy {
     }
 }
 
+/// Node wrapper that adds timeout enforcement
+///
+/// Wraps an inner node and enforces a maximum execution duration.
+/// If the inner node does not complete within `run_timeout`, the
+/// execution is cancelled and a [`JunctureError::node_timeout`] is returned.
+pub struct TimeoutNode<S: State> {
+    /// The inner node being wrapped
+    inner: Arc<dyn crate::Node<S>>,
+
+    /// Timeout policy governing timeout behavior
+    policy: crate::TimeoutPolicy,
+
+    /// Node name (same as inner node)
+    name: String,
+}
+
+impl<S: State> std::fmt::Debug for TimeoutNode<S> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TimeoutNode")
+            .field("name", &self.name)
+            .field("inner", &"<node>")
+            .field("policy", &self.policy)
+            .finish()
+    }
+}
+
+impl<S: State> TimeoutNode<S> {
+    /// Create a new timeout node
+    ///
+    /// # Arguments
+    ///
+    /// * `inner` - The node to wrap
+    /// * `policy` - Timeout policy governing timeout behavior
+    #[must_use]
+    pub fn new(
+        inner: Arc<dyn crate::Node<S>>,
+        policy: crate::TimeoutPolicy,
+    ) -> Self {
+        let name = inner.name().to_string();
+        Self {
+            inner,
+            policy,
+            name,
+        }
+    }
+}
+
+impl<S: State + Clone> crate::Node<S> for TimeoutNode<S> {
+    fn call(
+        &self,
+        state: S,
+        config: &crate::RunnableConfig,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<crate::Command<S>, crate::JunctureError>>
+                + Send
+                + '_,
+        >,
+    > {
+        let inner = Arc::clone(&self.inner);
+        let config = config.clone();
+        let node_name = self.name.clone();
+        let run_timeout = self.policy.run_timeout;
+
+        Box::pin(async move {
+            execute_with_timeout(
+                &node_name,
+                run_timeout,
+                |s, cfg| inner.call(s, cfg),
+                state,
+                &config,
+            )
+            .await
+        })
+    }
+
+    fn name(&self) -> &str {
+        &self.name
+    }
+}
+
+/// Execute an async operation with a timeout.
+///
+/// Wraps the provided operation in a [`tokio::time::timeout`] and returns
+/// a [`JunctureError::node_timeout`] if the operation does not complete within
+/// `run_timeout`. Inner node errors are passed through unchanged.
+///
+/// # Arguments
+///
+/// * `node_name` - Name of the node for error reporting
+/// * `run_timeout` - Maximum duration the operation is allowed to run
+/// * `operation` - The async operation to execute; receives state and config
+/// * `state` - The input state passed to the operation
+/// * `config` - Execution configuration passed through to the operation
+///
+/// # Errors
+///
+/// Returns [`JunctureError::node_timeout`] if the operation exceeds `run_timeout`.
+/// Returns the inner error if the operation fails before the timeout.
+///
+/// # Examples
+///
+/// ```ignore
+/// use juncture_core::graph::builder::execute_with_timeout;
+/// use std::time::Duration;
+///
+/// let result = execute_with_timeout(
+///     "my_node",
+///     Duration::from_secs(30),
+///     |state, config| my_node.call(state, config),
+///     state,
+///     &config,
+/// ).await?;
+/// ```
+pub async fn execute_with_timeout<S, F, Fut>(
+    node_name: &str,
+    run_timeout: std::time::Duration,
+    operation: F,
+    state: S,
+    config: &crate::RunnableConfig,
+) -> Result<crate::Command<S>, crate::JunctureError>
+where
+    S: State,
+    F: FnOnce(S, &crate::RunnableConfig) -> Fut,
+    Fut: std::future::Future<Output = Result<crate::Command<S>, crate::JunctureError>>,
+{
+    let result = tokio::time::timeout(run_timeout, operation(state, config)).await;
+
+    match result {
+        Ok(Ok(command)) => Ok(command),
+        Ok(Err(error)) => Err(error),
+        Err(_) => Err(crate::JunctureError::node_timeout(
+            crate::error::NodeTimeoutError::RunTimeout {
+                node: node_name.to_string(),
+                timeout: u64::try_from(run_timeout.as_millis())
+                    .unwrap_or(u64::MAX),
+            },
+        )),
+    }
+}
+
 /// Builder for constructing executable Juncture graphs
 ///
 /// # Examples
@@ -1920,6 +2061,135 @@ mod tests {
             elapsed < std::time::Duration::from_secs(2),
             "max_interval capping should prevent very long waits, elapsed: {elapsed:?}"
         );
+    }
+
+    // --- Timeout tests ---
+
+    #[tokio::test]
+    async fn test_execute_with_timeout_succeeds_within_limit() {
+        let config = crate::RunnableConfig::new();
+
+        let result = execute_with_timeout(
+            "test_node",
+            std::time::Duration::from_secs(10),
+            |_s: StateDummy, _cfg: &crate::RunnableConfig| async {
+                Ok(crate::Command::end())
+            },
+            StateDummy,
+            &config,
+        )
+        .await;
+
+        result.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_execute_with_timeout_fires_on_slow_node() {
+        let config = crate::RunnableConfig::new();
+
+        let result = execute_with_timeout(
+            "slow_node",
+            std::time::Duration::from_millis(10),
+            |_s: StateDummy, _cfg: &crate::RunnableConfig| async {
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                Ok(crate::Command::end())
+            },
+            StateDummy,
+            &config,
+        )
+        .await;
+
+        let err = result.unwrap_err();
+        assert!(err.is_node_timeout());
+    }
+
+    #[tokio::test]
+    async fn test_execute_with_timeout_passes_through_inner_error() {
+        let config = crate::RunnableConfig::new();
+
+        let result = execute_with_timeout(
+            "failing_node",
+            std::time::Duration::from_secs(10),
+            |_s: StateDummy, _cfg: &crate::RunnableConfig| async {
+                Err(crate::JunctureError::execution("inner failure"))
+            },
+            StateDummy,
+            &config,
+        )
+        .await;
+
+        let err = result.unwrap_err();
+        assert!(err.is_execution());
+        assert!(!err.is_node_timeout());
+    }
+
+    #[tokio::test]
+    async fn test_timeout_node_wrapper_integration() {
+        use crate::node::NodeFnCommand;
+
+        let call_count = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let count_clone = Arc::clone(&call_count);
+
+        let inner: Arc<dyn crate::Node<StateDummy>> = NodeFnCommand(move |_s: StateDummy| {
+            let counter = Arc::clone(&count_clone);
+            async move {
+                counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                Ok(crate::Command::end())
+            }
+        })
+        .into_node("inner");
+
+        let policy = crate::TimeoutPolicy::new()
+            .with_run_timeout(std::time::Duration::from_secs(10));
+
+        let timeout_node = TimeoutNode::new(inner, policy);
+        let config = crate::RunnableConfig::new();
+
+        let result = timeout_node.call(StateDummy, &config).await;
+        result.unwrap();
+        assert_eq!(call_count.load(std::sync::atomic::Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn test_timeout_node_fires_on_exceeded_duration() {
+        use crate::node::NodeFnCommand;
+
+        let inner: Arc<dyn crate::Node<StateDummy>> = NodeFnCommand(|_s: StateDummy| async {
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+            Ok(crate::Command::end())
+        })
+        .into_node("inner");
+
+        let policy = crate::TimeoutPolicy::new()
+            .with_run_timeout(std::time::Duration::from_millis(10));
+
+        let timeout_node = TimeoutNode::new(inner, policy);
+        let config = crate::RunnableConfig::new();
+
+        let result = timeout_node.call(StateDummy, &config).await;
+        let err = result.unwrap_err();
+        assert!(err.is_node_timeout());
+    }
+
+    #[tokio::test]
+    async fn test_timeout_node_passes_through_inner_error() {
+        use crate::node::NodeFnCommand;
+
+        let inner: Arc<dyn crate::Node<StateDummy>> = NodeFnCommand(|_s: StateDummy| async {
+            Err(crate::JunctureError::execution("node failure"))
+        })
+        .into_node("inner");
+
+        let policy = crate::TimeoutPolicy::new()
+            .with_run_timeout(std::time::Duration::from_secs(10));
+
+        let timeout_node = TimeoutNode::new(inner, policy);
+        let config = crate::RunnableConfig::new();
+
+        let result = timeout_node.call(StateDummy, &config).await;
+        let err = result.unwrap_err();
+        assert!(err.is_execution());
+        assert!(!err.is_node_timeout());
     }
 }
 

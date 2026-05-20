@@ -32,6 +32,61 @@ pub enum SerializationFormat {
     Json,
 }
 
+/// Serializer kind for checkpoint data
+///
+/// An enum-dispatched serializer that can be stored in checkpoint savers without
+/// requiring dynamic dispatch. Defaults to `MessagePack`.
+#[derive(Clone, Debug, Default)]
+pub enum SerializerKind {
+    /// `MessagePack` binary format (default, high performance)
+    #[default]
+    MessagePack,
+    /// JSON text format (human readable, debug friendly)
+    Json,
+}
+
+impl SerializerKind {
+    /// Serialize a serializable value to bytes using this serializer
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CheckpointError::Serialize`] if serialization fails.
+    pub fn serialize<T: Serialize>(&self, value: &T) -> Result<Vec<u8>, CheckpointError> {
+        match self {
+            Self::MessagePack => {
+                rmp_serde::to_vec(value).map_err(|e| CheckpointError::Serialize(e.to_string()))
+            }
+            Self::Json => {
+                serde_json::to_vec(value).map_err(|e| CheckpointError::Serialize(e.to_string()))
+            }
+        }
+    }
+
+    /// Deserialize bytes to a deserializable type using this serializer
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CheckpointError::Deserialize`] if deserialization fails.
+    pub fn deserialize<T: DeserializeOwned>(&self, data: &[u8]) -> Result<T, CheckpointError> {
+        match self {
+            Self::MessagePack => {
+                rmp_serde::from_slice(data).map_err(|e| CheckpointError::Deserialize(e.to_string()))
+            }
+            Self::Json => serde_json::from_slice(data)
+                .map_err(|e| CheckpointError::Deserialize(e.to_string())),
+        }
+    }
+
+    /// Get the format identifier
+    #[must_use]
+    pub const fn format(&self) -> SerializationFormat {
+        match self {
+            Self::MessagePack => SerializationFormat::MessagePack,
+            Self::Json => SerializationFormat::Json,
+        }
+    }
+}
+
 /// Checkpoint serializer trait
 ///
 /// Abstraction over different serialization formats, allowing checkpoint storage
@@ -347,13 +402,46 @@ pub fn detect_format(data: &[u8]) -> SerializationFormat {
     }
 
     // MessagePack format detection (heuristic)
-    // MessagePack maps often start with fixmap (0x80-0x8f) or map16 (0xde)
-    if (0x80..=0x8f).contains(&first_byte) || first_byte == 0xde || first_byte == 0xdf {
+    // fixmap: 0x80-0x8f, fixarray: 0x90-0x9f, map16: 0xde, map32: 0xdf
+    // array16: 0xdc, array32: 0xdd
+    if (0x80..=0x9f).contains(&first_byte)
+        || first_byte == 0xde
+        || first_byte == 0xdf
+        || first_byte == 0xdc
+        || first_byte == 0xdd
+    {
         return SerializationFormat::MessagePack;
     }
 
     // Default to JSON for unknown formats
     SerializationFormat::Json
+}
+
+/// Deserialize bytes using format auto-detection
+///
+/// Detects whether the data is `MessagePack` or JSON, then deserializes
+/// using the appropriate serializer. Falls back to JSON deserialization
+/// if detection is ambiguous.
+///
+/// This function provides backwards compatibility when reading checkpoints
+/// that were written with a different serializer (e.g., old JSON data
+/// read by a saver now defaulting to `MessagePack`).
+///
+/// # Errors
+///
+/// Returns [`CheckpointError::Deserialize`] if neither `MessagePack` nor JSON
+/// deserialization succeeds.
+pub fn deserialize_auto<T: DeserializeOwned>(data: &[u8]) -> Result<T, CheckpointError> {
+    let format = detect_format(data);
+    match format {
+        SerializationFormat::MessagePack => {
+            // Try msgpack first, fall back to JSON if detection was wrong
+            MsgpackSerializer::new()
+                .deserialize::<T>(data)
+                .or_else(|_| JsonSerializer::new().deserialize::<T>(data))
+        }
+        SerializationFormat::Json => JsonSerializer::new().deserialize::<T>(data),
+    }
 }
 
 #[cfg(test)]
@@ -454,4 +542,4 @@ mod tests {
     }
 }
 
-// Rust guideline compliant 2026-05-19
+// Rust guideline compliant 2026-05-20

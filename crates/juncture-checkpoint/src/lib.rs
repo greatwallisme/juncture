@@ -60,7 +60,7 @@ pub use postgres::PostgresSaver;
 
 pub use serde::{
     CheckpointSerializer, JsonPlusSerializer, JsonSerializer, MsgpackSerializer,
-    SerializationFormat, detect_format,
+    SerializationFormat, SerializerKind, deserialize_auto, detect_format,
 };
 
 #[cfg(feature = "sqlite")]
