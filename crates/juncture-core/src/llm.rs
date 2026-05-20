@@ -316,7 +316,7 @@ where
 
         // Extract tool call arguments and parse as T
         if let Some(tool_call) = response.tool_calls.first() {
-            let _value: T = serde_json::from_value(tool_call.args.clone()).map_err(|e| {
+            let _value: T = serde_json::from_value(tool_call.arguments.clone()).map_err(|e| {
                 LlmError::InvalidResponse(format!("Failed to parse structured output: {e}"))
             })?;
 

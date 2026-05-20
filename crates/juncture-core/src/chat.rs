@@ -265,11 +265,15 @@ impl ChatModel for ChatAnthropic {
                             .and_then(|n| n.as_str())
                             .unwrap_or("")
                             .to_string();
-                        let args = content_block
+                        let arguments = content_block
                             .get("input")
                             .cloned()
                             .unwrap_or(serde_json::Value::Null);
-                        tool_calls.push(crate::state::ToolCall { id, name, args });
+                        tool_calls.push(crate::state::ToolCall {
+                            id,
+                            name,
+                            arguments,
+                        });
                     }
                     _ => {}
                 }
@@ -428,7 +432,7 @@ impl ChatOpenAI {
                             "type": "function",
                             "function": {
                                 "name": tc.name,
-                                "arguments": tc.args.to_string(),
+                                "arguments": tc.arguments.to_string(),
                             }
                         })).collect::<Vec<_>>()
                     );
@@ -498,12 +502,16 @@ impl ChatOpenAI {
                         let id = tc.get("id")?.as_str()?.to_string();
                         let func = tc.get("function")?;
                         let name = func.get("name")?.as_str()?.to_string();
-                        let args = func
+                        let arguments = func
                             .get("arguments")
                             .and_then(|a| a.as_str())
                             .and_then(|s| serde_json::from_str(s).ok())
                             .unwrap_or(serde_json::Value::Null);
-                        Some(crate::state::ToolCall { id, name, args })
+                        Some(crate::state::ToolCall {
+                            id,
+                            name,
+                            arguments,
+                        })
                     })
                     .collect()
             })

@@ -150,7 +150,7 @@ impl ToolExecutionTrace {
 ///         ToolCall {
 ///             id: "call_123".to_string(),
 ///             name: "search".to_string(),
-///             args: json!({"query": "rust programming"}),
+///             arguments: json!({"query": "rust programming"}),
 ///         },
 ///     ]),
 /// ];
@@ -371,7 +371,7 @@ impl ToolNode {
 
         // Execute the tool
         let start = std::time::Instant::now();
-        let result = tool.invoke(tool_call.args.clone()).await;
+        let result = tool.invoke(tool_call.arguments.clone()).await;
         let duration_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
 
         // Record duration
@@ -566,7 +566,7 @@ mod tests {
             vec![ToolCall {
                 id: "call_1".to_string(),
                 name: "echo".to_string(),
-                args: json!({"message": "hello"}),
+                arguments: json!({"message": "hello"}),
             }],
         )];
 
@@ -592,12 +592,12 @@ mod tests {
                 ToolCall {
                     id: "call_1".to_string(),
                     name: "echo".to_string(),
-                    args: json!({"message": "first"}),
+                    arguments: json!({"message": "first"}),
                 },
                 ToolCall {
                     id: "call_2".to_string(),
                     name: "echo".to_string(),
-                    args: json!({"message": "second"}),
+                    arguments: json!({"message": "second"}),
                 },
             ],
         )];
@@ -631,7 +631,7 @@ mod tests {
             vec![ToolCall {
                 id: "call_1".to_string(),
                 name: "nonexistent".to_string(),
-                args: json!({}),
+                arguments: json!({}),
             }],
         )];
 
@@ -657,7 +657,7 @@ mod tests {
             vec![ToolCall {
                 id: "call_1".to_string(),
                 name: "nonexistent".to_string(),
-                args: json!({}),
+                arguments: json!({}),
             }],
         )];
 
@@ -674,7 +674,7 @@ mod tests {
             vec![ToolCall {
                 id: "call_1".to_string(),
                 name: "fail".to_string(),
-                args: json!({}),
+                arguments: json!({}),
             }],
         )];
 
@@ -700,7 +700,7 @@ mod tests {
             vec![ToolCall {
                 id: "call_1".to_string(),
                 name: "fail".to_string(),
-                args: json!({}),
+                arguments: json!({}),
             }],
         )];
 

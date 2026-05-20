@@ -46,7 +46,7 @@ async fn test_tool_node_integration() {
         vec![ToolCall {
             id: "call_1".to_string(),
             name: "test_tool".to_string(),
-            args: json!({"input": "hello"}),
+            arguments: json!({"input": "hello"}),
         }],
     )];
 
@@ -67,7 +67,7 @@ async fn test_tools_condition_integration() {
         vec![ToolCall {
             id: "call_1".to_string(),
             name: "test_tool".to_string(),
-            args: json!({}),
+            arguments: json!({}),
         }],
     )];
     assert_eq!(tools_condition(&messages_with_tools), "tools");

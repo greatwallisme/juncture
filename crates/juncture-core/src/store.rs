@@ -130,6 +130,19 @@ pub struct Item {
     pub created_at: DateTime<Utc>,
     /// Last update timestamp
     pub updated_at: DateTime<Utc>,
+    /// Optional expiration timestamp for TTL support
+    pub expires_at: Option<DateTime<Utc>>,
+}
+
+impl Item {
+    /// Returns `true` if the item has expired based on `expires_at`.
+    ///
+    /// Items without an expiration timestamp are never considered expired.
+    #[must_use]
+    pub fn is_expired(&self) -> bool {
+        self.expires_at
+            .is_some_and(|expires_at| Utc::now() > expires_at)
+    }
 }
 
 /// Search result item with optional similarity score
@@ -368,6 +381,7 @@ impl Store for MemoryStore {
             value,
             created_at: existing.map_or(now, |i| i.created_at),
             updated_at: now,
+            expires_at: None,
         };
 
         namespace_map.insert(key.to_string(), item);
@@ -687,6 +701,7 @@ impl Store for SqliteStore {
                 updated_at: chrono::DateTime::parse_from_rfc3339(&updated_at)
                     .map_err(|e| StoreError::Database(format!("invalid timestamp: {e}")))?
                     .with_timezone(&chrono::Utc),
+                expires_at: None,
             }))
         } else {
             Ok(None)
@@ -961,6 +976,7 @@ impl Store for PostgresStore {
                 value,
                 created_at,
                 updated_at,
+                expires_at: None,
             }))
         } else {
             Ok(None)

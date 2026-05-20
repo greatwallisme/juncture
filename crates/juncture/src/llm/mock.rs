@@ -103,7 +103,7 @@ impl MockChatModel {
     ///     ToolCall {
     ///         id: "call_123".to_string(),
     ///         name: "get_weather".to_string(),
-    ///         args: json!({"location": "NYC"}),
+    ///         arguments: json!({"location": "NYC"}),
     ///     },
     /// ];
     /// let model = MockChatModel::new("gpt-4")
@@ -184,7 +184,7 @@ impl ChatModel for MockChatModel {
                 .map(|(index, call)| ToolCallChunk {
                     id: Some(call.id.clone()),
                     name: Some(call.name.clone()),
-                    args_delta: call.args.to_string(),
+                    args_delta: call.arguments.to_string(),
                     index,
                 })
                 .collect(),

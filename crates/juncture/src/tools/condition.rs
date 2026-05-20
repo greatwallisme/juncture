@@ -70,7 +70,7 @@ mod tests {
             vec![ToolCall {
                 id: "call_123".to_string(),
                 name: "search".to_string(),
-                args: json!({"query": "test"}),
+                arguments: json!({"query": "test"}),
             }],
         )];
         assert_eq!(tools_condition(&messages), "tools");
@@ -88,7 +88,7 @@ mod tests {
                 vec![ToolCall {
                     id: "call_123".to_string(),
                     name: "search".to_string(),
-                    args: json!({}),
+                    arguments: json!({}),
                 }],
             ),
             Message::human("Never mind"),

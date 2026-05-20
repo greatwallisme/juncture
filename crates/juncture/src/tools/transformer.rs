@@ -25,7 +25,7 @@ use crate::tools::error::ToolError;
 /// impl ToolCallTransformer for DefaultInjector {
 ///     fn transform(&self, tool_call: &mut ToolCall) -> Result<(), ToolError> {
 ///         if tool_call.name == "search" {
-///             if let Some(obj) = tool_call.args.as_object_mut() {
+///             if let Some(obj) = tool_call.arguments.as_object_mut() {
 ///                 if !obj.contains_key("limit") {
 ///                     obj.insert("limit".to_string(), json!(10));
 ///                 }
@@ -108,7 +108,7 @@ mod tests {
     impl ToolCallTransformer for LimitInjector {
         fn transform(&self, tool_call: &mut ToolCall) -> Result<(), ToolError> {
             if tool_call.name == "search"
-                && let Some(obj) = tool_call.args.as_object_mut()
+                && let Some(obj) = tool_call.arguments.as_object_mut()
                 && !obj.contains_key("limit")
             {
                 obj.insert("limit".to_string(), json!(10));
@@ -140,7 +140,7 @@ mod tests {
         let mut tool_call = ToolCall {
             id: "call_1".to_string(),
             name: "test".to_string(),
-            args: json!({}),
+            arguments: json!({}),
         };
 
         transformer.transform(&mut tool_call).unwrap();
@@ -152,11 +152,11 @@ mod tests {
         let mut tool_call = ToolCall {
             id: "call_1".to_string(),
             name: "search".to_string(),
-            args: json!({"query": "test"}),
+            arguments: json!({"query": "test"}),
         };
 
         transformer.transform(&mut tool_call).unwrap();
-        assert_eq!(tool_call.args["limit"], 10);
+        assert_eq!(tool_call.arguments["limit"], 10);
     }
 
     #[test]
@@ -165,11 +165,17 @@ mod tests {
         let mut tool_call = ToolCall {
             id: "call_1".to_string(),
             name: "other".to_string(),
-            args: json!({"query": "test"}),
+            arguments: json!({"query": "test"}),
         };
 
         transformer.transform(&mut tool_call).unwrap();
-        assert!(!tool_call.args.as_object().unwrap().contains_key("limit"));
+        assert!(
+            !tool_call
+                .arguments
+                .as_object()
+                .unwrap()
+                .contains_key("limit")
+        );
     }
 
     #[test]
@@ -180,7 +186,7 @@ mod tests {
         let mut tool_call = ToolCall {
             id: "call_1".to_string(),
             name: "dangerous".to_string(),
-            args: json!({}),
+            arguments: json!({}),
         };
 
         let result = transformer.transform(&mut tool_call);
@@ -198,11 +204,11 @@ mod tests {
         let mut tool_call = ToolCall {
             id: "call_1".to_string(),
             name: "search".to_string(),
-            args: json!({"query": "test"}),
+            arguments: json!({"query": "test"}),
         };
 
         composite.transform(&mut tool_call).unwrap();
-        assert_eq!(tool_call.args["limit"], 10);
+        assert_eq!(tool_call.arguments["limit"], 10);
     }
 
     #[test]
@@ -227,7 +233,7 @@ mod tests {
         let mut tool_call = ToolCall {
             id: "call_1".to_string(),
             name: "blocked".to_string(),
-            args: json!({}),
+            arguments: json!({}),
         };
 
         let result = composite.transform(&mut tool_call);

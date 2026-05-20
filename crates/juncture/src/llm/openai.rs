@@ -715,7 +715,7 @@ fn convert_message(message: &Message) -> OpenAIMessage {
                     r#type: "function".to_string(),
                     function: OpenAIFunctionCall {
                         name: tc.name.clone(),
-                        arguments: tc.args.to_string(),
+                        arguments: tc.arguments.to_string(),
                     },
                 })
                 .collect(),
@@ -780,7 +780,7 @@ fn convert_api_response(response: &OpenAIResponse) -> Result<Message, LlmError> 
         calls
             .iter()
             .map(|tc| {
-                let args: serde_json::Value = serde_json::from_str(&tc.function.arguments)
+                let arguments: serde_json::Value = serde_json::from_str(&tc.function.arguments)
                     .map_err(|e| {
                         LlmError::InvalidResponse(format!("Failed to parse tool arguments: {e}"))
                     })?;
@@ -788,7 +788,7 @@ fn convert_api_response(response: &OpenAIResponse) -> Result<Message, LlmError> 
                 Ok(ToolCall {
                     id: tc.id.clone(),
                     name: tc.function.name.clone(),
-                    args,
+                    arguments,
                 })
             })
             .collect::<Result<Vec<_>, LlmError>>()?

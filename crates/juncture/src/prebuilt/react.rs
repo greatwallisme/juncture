@@ -627,7 +627,7 @@ mod tests {
                 vec![ToolCall {
                     id: "call_1".to_string(),
                     name: "echo".to_string(),
-                    args: json!({"message": "hello"}),
+                    arguments: json!({"message": "hello"}),
                 }],
             )],
         };
@@ -698,7 +698,7 @@ mod tests {
                 vec![ToolCall {
                     id: "call_1".to_string(),
                     name: "search".to_string(),
-                    args: json!({}),
+                    arguments: json!({}),
                 }],
             )],
         };

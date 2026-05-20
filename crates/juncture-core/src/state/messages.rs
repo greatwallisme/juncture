@@ -85,7 +85,7 @@ pub struct ToolCall {
     /// Tool name
     pub name: String,
     /// Tool arguments as JSON value
-    pub args: serde_json::Value,
+    pub arguments: serde_json::Value,
 }
 
 /// Token usage information from LLM API responses

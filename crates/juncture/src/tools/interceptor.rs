@@ -237,7 +237,7 @@ mod tests {
         let tool_call = ToolCall {
             id: "call_1".to_string(),
             name: "test".to_string(),
-            args: json!({}),
+            arguments: json!({}),
         };
 
         interceptor
@@ -269,7 +269,7 @@ mod tests {
         let tool_call = ToolCall {
             id: "call_1".to_string(),
             name: "test".to_string(),
-            args: json!({}),
+            arguments: json!({}),
         };
 
         interceptor
@@ -291,7 +291,7 @@ mod tests {
         let tool_call = ToolCall {
             id: "call_1".to_string(),
             name: "test".to_string(),
-            args: json!({}),
+            arguments: json!({}),
         };
 
         let result = interceptor.pre_execute(&tool_call, &json!(null)).await;
@@ -309,7 +309,7 @@ mod tests {
         let tool_call = ToolCall {
             id: "call_1".to_string(),
             name: "test".to_string(),
-            args: json!({}),
+            arguments: json!({}),
         };
 
         composite
@@ -333,7 +333,7 @@ mod tests {
         let tool_call = ToolCall {
             id: "call_1".to_string(),
             name: "test".to_string(),
-            args: json!({}),
+            arguments: json!({}),
         };
 
         let result = composite.pre_execute(&tool_call, &json!(null)).await;

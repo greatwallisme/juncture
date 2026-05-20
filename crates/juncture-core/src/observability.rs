@@ -94,7 +94,7 @@ impl CacheKeyInput {
             for call in &msg.tool_calls {
                 call.id.hash(&mut hasher);
                 call.name.hash(&mut hasher);
-                if let Ok(s) = serde_json::to_string(&call.args) {
+                if let Ok(s) = serde_json::to_string(&call.arguments) {
                     s.hash(&mut hasher);
                 }
             }

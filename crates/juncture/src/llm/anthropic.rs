@@ -723,7 +723,7 @@ fn convert_content(
             .map(|tc| ContentBlock::ToolUse {
                 id: tc.id.clone(),
                 name: tc.name.clone(),
-                input: tc.args.clone(),
+                input: tc.arguments.clone(),
             })
             .collect();
         return Ok(AnthropicContent::Blocks(blocks));
@@ -815,7 +815,7 @@ fn convert_api_response(response: AnthropicResponse) -> Message {
                 tool_calls.push(ToolCall {
                     id,
                     name,
-                    args: input,
+                    arguments: input,
                 });
             }
         }
