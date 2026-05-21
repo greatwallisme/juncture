@@ -155,6 +155,72 @@ impl<T: GraphCallbackHandler + ?Sized> GraphCallbackHandler for Arc<T> {
     }
 }
 
+/// Adapter that wraps any [`GraphCallbackHandler`] and implements
+/// [`juncture_core::observability::GraphLifecycleCallback`].
+///
+/// Use [`CallbackHandlerAdapter::new`] to create an instance, then pass the
+/// resulting `Arc<CallbackHandlerAdapter>` to
+/// [`RunnableConfig::with_callback_handler`].
+///
+/// [`RunnableConfig::with_callback_handler`]: juncture_core::config::RunnableConfig::with_callback_handler
+///
+/// # Examples
+///
+/// ```ignore
+/// use std::sync::Arc;
+/// use juncture_tracing::callback::{CallbackHandlerAdapter, GraphCallbackHandler};
+/// use juncture_core::config::RunnableConfig;
+///
+/// struct MyHandler;
+/// impl GraphCallbackHandler for MyHandler {}
+///
+/// let handler = Arc::new(MyHandler);
+/// let adapter = CallbackHandlerAdapter::new(handler);
+/// let config = RunnableConfig::new()
+///     .with_callback_handler(adapter);
+/// ```
+pub struct CallbackHandlerAdapter {
+    inner: Arc<dyn GraphCallbackHandler>,
+}
+
+impl CallbackHandlerAdapter {
+    /// Create a new adapter wrapping the given [`GraphCallbackHandler`].
+    #[must_use]
+    pub fn new(handler: Arc<dyn GraphCallbackHandler>) -> Self {
+        Self { inner: handler }
+    }
+}
+
+impl std::fmt::Debug for CallbackHandlerAdapter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CallbackHandlerAdapter")
+            .field("inner", &"<GraphCallbackHandler>")
+            .finish()
+    }
+}
+
+impl juncture_core::observability::GraphLifecycleCallback for CallbackHandlerAdapter {
+    fn on_node_start(&self, node: &str, task_id: &str) {
+        self.inner.on_node_start(node, task_id);
+    }
+
+    fn on_node_end(&self, node: &str, task_id: &str, duration_ms: u64) {
+        self.inner.on_node_end(node, task_id, duration_ms);
+    }
+
+    fn on_node_error(&self, node: &str, error: &JunctureError) {
+        self.inner.on_node_error(node, error);
+    }
+
+    fn on_graph_end(&self, result: &Result<(), JunctureError>) {
+        self.inner.on_graph_end(result);
+    }
+
+    fn on_checkpoint_saved(&self, checkpoint_id: &str, step: usize) {
+        self.inner.on_checkpoint_saved(checkpoint_id, step);
+    }
+}
+
 /// Event payload for graph interruptions
 ///
 /// Contains detailed information about an interruption event.

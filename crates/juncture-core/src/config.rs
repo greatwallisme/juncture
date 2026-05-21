@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use crate::checkpoint::CheckpointSaver;
 use crate::interrupt::ResumeValue;
-use crate::observability::MetricsCollector;
+use crate::observability::{GraphLifecycleCallback, MetricsCollector};
 use crate::pregel::BudgetConfig;
 use crate::pregel::Durability;
 use crate::runtime::RuntimeStore;
@@ -86,6 +86,13 @@ pub struct RunnableConfig {
 
     /// Optional metrics collector for OpenTelemetry or in-memory metrics
     pub metrics_collector: Option<Arc<dyn MetricsCollector>>,
+
+    /// Optional callback handler for graph lifecycle events
+    ///
+    /// Receives notifications at key points during graph execution:
+    /// node start/end/error, graph completion, and checkpoint saves.
+    /// All methods have default no-op implementations.
+    pub callback_handler: Option<Arc<dyn GraphLifecycleCallback>>,
 }
 
 impl std::fmt::Debug for RunnableConfig {
@@ -124,6 +131,13 @@ impl std::fmt::Debug for RunnableConfig {
                     .metrics_collector
                     .as_ref()
                     .map(|_| "<MetricsCollector>"),
+            )
+            .field(
+                "callback_handler",
+                &self
+                    .callback_handler
+                    .as_ref()
+                    .map(|_| "<GraphLifecycleCallback>"),
             )
             .finish()
     }
@@ -272,6 +286,25 @@ impl RunnableConfig {
     #[must_use]
     pub fn with_metrics_collector(mut self, collector: Arc<dyn MetricsCollector>) -> Self {
         self.metrics_collector = Some(collector);
+        self
+    }
+
+    /// Set the callback handler for graph lifecycle events
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// use std::sync::Arc;
+    /// use juncture_core::config::RunnableConfig;
+    /// use juncture_core::observability::GraphLifecycleCallback;
+    ///
+    /// let handler: Arc<dyn GraphLifecycleCallback> = /* ... */;
+    /// let config = RunnableConfig::new()
+    ///     .with_callback_handler(handler);
+    /// ```
+    #[must_use]
+    pub fn with_callback_handler(mut self, handler: Arc<dyn GraphLifecycleCallback>) -> Self {
+        self.callback_handler = Some(handler);
         self
     }
 }

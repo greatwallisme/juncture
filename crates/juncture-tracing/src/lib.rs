@@ -58,7 +58,9 @@ pub mod config;
 pub mod metrics;
 
 // Re-exports for convenience
-pub use callback::{GraphCallbackHandler, GraphInterruptEvent, GraphResumeEvent};
+pub use callback::{
+    CallbackHandlerAdapter, GraphCallbackHandler, GraphInterruptEvent, GraphResumeEvent,
+};
 pub use debug::DebugEvent;
 pub use test_utils::TestMetricsCollector;
 pub use types::{LlmCacheKeyInput, LlmCachePolicy, ServerInfo};

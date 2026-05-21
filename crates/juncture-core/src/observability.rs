@@ -265,4 +265,61 @@ pub trait MetricsCollector: Send + Sync + 'static {
     fn set_gauge(&self, name: &str, value: u64);
 }
 
+// ---------------------------------------------------------------------------
+// GraphLifecycleCallback trait
+// ---------------------------------------------------------------------------
+
+/// Callback trait for graph lifecycle events.
+///
+/// Implementations receive notifications at key points during graph execution.
+/// All methods have default no-op implementations. Injected via
+/// [`RunnableConfig::with_callback_handler`].
+///
+/// The trait lives in `juncture-core` so the Pregel engine can emit callbacks
+/// without depending on `juncture-tracing`. The `juncture-tracing` crate
+/// provides a blanket impl that forwards [`GraphCallbackHandler`] to this
+/// trait, so any type implementing [`GraphCallbackHandler`] can be passed
+/// to [`RunnableConfig::with_callback_handler`] directly.
+///
+/// [`GraphCallbackHandler`]: juncture_tracing::callback::GraphCallbackHandler
+/// [`RunnableConfig::with_callback_handler`]: crate::config::RunnableConfig::with_callback_handler
+///
+/// # Examples
+///
+/// ```ignore
+/// use std::sync::Arc;
+/// use juncture_core::observability::GraphLifecycleCallback;
+/// use juncture_core::config::RunnableConfig;
+///
+/// let handler: Arc<dyn GraphLifecycleCallback> = /* ... */;
+/// let config = RunnableConfig::new()
+///     .with_callback_handler(handler);
+/// ```
+pub trait GraphLifecycleCallback: Send + Sync + 'static {
+    /// Called when a node starts execution.
+    fn on_node_start(&self, node: &str, task_id: &str) {
+        let _ = (node, task_id);
+    }
+
+    /// Called when a node completes execution successfully.
+    fn on_node_end(&self, node: &str, task_id: &str, duration_ms: u64) {
+        let _ = (node, task_id, duration_ms);
+    }
+
+    /// Called when a node encounters an error.
+    fn on_node_error(&self, node: &str, error: &crate::JunctureError) {
+        let _ = (node, error);
+    }
+
+    /// Called when the graph execution completes.
+    fn on_graph_end(&self, result: &Result<(), crate::JunctureError>) {
+        let _ = result;
+    }
+
+    /// Called when a checkpoint is saved.
+    fn on_checkpoint_saved(&self, checkpoint_id: &str, step: usize) {
+        let _ = (checkpoint_id, step);
+    }
+}
+
 // Rust guideline compliant 2026-05-21

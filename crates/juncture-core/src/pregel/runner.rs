@@ -149,6 +149,10 @@ where
         let ctx = Arc::clone(&interrupt_context);
         let has_error_handler = error_handler_map.contains_key(&node_name);
 
+        // Extract callback handler separately so it can be used after task_config
+        // is moved into the async block for node.call()
+        let callback_handler = task_config.callback_handler.clone();
+
         // Create span before moving values into the async block
         let span = tracing::info_span!(
             "juncture.node.execute",
@@ -171,6 +175,11 @@ where
                      as it is owned by the PregelLoop and never dropped during execution",
                 );
 
+                // Notify callback handler: node starting
+                if let Some(ref handler) = callback_handler {
+                    handler.on_node_start(&node_name, &task_id);
+                }
+
                 let start = Instant::now();
 
                 // Execute task with cancellation support and interrupt context
@@ -181,7 +190,11 @@ where
                     () = token.cancelled() => {
                         tracing::Span::current().record("juncture.node.error", "cancelled");
                         tracing::Span::current().record("otel.status_code", "ERROR");
-                        return Err((node_name.clone(), JunctureError::execution("Task cancelled")));
+                        let err = JunctureError::execution("Task cancelled");
+                        if let Some(ref handler) = callback_handler {
+                            handler.on_node_error(&node_name, &err);
+                        }
+                        return Err((node_name.clone(), err));
                     }
                     result = crate::interrupt::INTERRUPT_CONTEXT.scope(ctx, async move {
                         node.call(task_state, &task_config).await
@@ -241,6 +254,18 @@ where
                         output_type = %output_type,
                     );
                 };
+
+                // Notify callback handler of node result
+                if let Some(ref handler) = callback_handler {
+                    match &result {
+                        Ok(_) => {
+                            handler.on_node_end(&node_name, &task_id, duration_ms);
+                        }
+                        Err(err) => {
+                            handler.on_node_error(&node_name, err);
+                        }
+                    }
+                }
 
                 result
                     .map(|command| TaskOutput {

@@ -418,15 +418,23 @@ impl<S: State> PregelLoop<S> {
         if self.step >= self.runnable_config.recursion_limit {
             self.status = LoopStatus::OutOfSteps;
             self.emit_counter("juncture.graph.errors", 1);
-            return Err(JunctureError::recursion_limit(
+            let result: Result<(), JunctureError> = Err(JunctureError::recursion_limit(
                 self.step,
                 self.runnable_config.recursion_limit,
             ));
+            self.on_graph_end(&result);
+            // Extract the error from the Result for the return value.
+            // This is safe because we just constructed it as Err.
+            let Err(err) = result else {
+                unreachable!("result was constructed as Err");
+            };
+            return Err(err);
         }
 
         // Check cancellation
         if self.cancellation_token.is_cancelled() {
             self.status = LoopStatus::Cancelled;
+            self.on_graph_end(&Ok(()));
             return Ok(false);
         }
 
@@ -436,9 +444,14 @@ impl<S: State> PregelLoop<S> {
         {
             self.status = LoopStatus::BudgetExceeded;
             self.emit_counter("juncture.graph.errors", 1);
-            return Err(JunctureError::execution(format!(
+            let result: Result<(), JunctureError> = Err(JunctureError::execution(format!(
                 "Budget exceeded: {reason}"
             )));
+            self.on_graph_end(&result);
+            let Err(err) = result else {
+                unreachable!("result was constructed as Err");
+            };
+            return Err(err);
         }
 
         // Emit budget gauges when a collector is configured
@@ -459,6 +472,7 @@ impl<S: State> PregelLoop<S> {
             // Check if drain is requested - if so, we're done
             if self.run_control.is_drain_requested() {
                 self.status = LoopStatus::Done;
+                self.on_graph_end(&Ok(()));
                 return Ok(false);
             }
 
@@ -466,6 +480,7 @@ impl<S: State> PregelLoop<S> {
             // This is a no-op in the current implementation since
             // compute_next_tasks requires completed tasks
             self.status = LoopStatus::Done;
+            self.on_graph_end(&Ok(()));
             return Ok(false);
         }
 
@@ -1231,6 +1246,10 @@ impl<S: State> PregelLoop<S> {
                     step = self.step,
                     "Interrupt checkpoint saved"
                 );
+                // Notify callback handler about checkpoint save
+                if let Some(ref cp_id) = self.runnable_config.checkpoint_id {
+                    self.on_checkpoint_saved(cp_id, self.step);
+                }
             }
             Err(err) => {
                 tracing::warn!(
@@ -1336,6 +1355,26 @@ impl<S: State> PregelLoop<S> {
     fn emit_gauge(&self, name: &str, value: u64) {
         if let Some(ref collector) = self.runnable_config.metrics_collector {
             collector.set_gauge(name, value);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Lifecycle callback helpers
+    // -----------------------------------------------------------------------
+
+    /// Invoke graph-end callback if a handler is configured.
+    #[inline]
+    fn on_graph_end(&self, result: &Result<(), JunctureError>) {
+        if let Some(ref handler) = self.runnable_config.callback_handler {
+            handler.on_graph_end(result);
+        }
+    }
+
+    /// Invoke checkpoint-saved callback if a handler is configured.
+    #[inline]
+    fn on_checkpoint_saved(&self, checkpoint_id: &str, step: usize) {
+        if let Some(ref handler) = self.runnable_config.callback_handler {
+            handler.on_checkpoint_saved(checkpoint_id, step);
         }
     }
 }
