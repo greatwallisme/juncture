@@ -243,9 +243,9 @@ where
             // Generate unique invocation ID for this subgraph execution
             let invocation_id = uuid::Uuid::new_v4().to_string();
 
-            // Build child namespace using CHECKPOINT_NS_SEPARATOR between nesting levels
+            // Build child namespace using leading-| per-segment format per design spec
             let child_ns = config.checkpoint_ns.as_ref().map_or_else(
-                || format!("{name}:{invocation_id}"),
+                || format!("{CHECKPOINT_NS_SEPARATOR}{name}:{invocation_id}"),
                 |parent_ns| format!("{parent_ns}{CHECKPOINT_NS_SEPARATOR}{name}:{invocation_id}"),
             );
 
@@ -315,17 +315,21 @@ mod tests {
 
     #[test]
     fn test_checkpoint_namespace_separator() {
-        // Test that namespace separator uses | instead of :
+        // Test that namespace uses |name:id format per design spec 07-subgraph.md section 3
         let ns = crate::checkpoint::CheckpointNamespace::root();
-        let child = ns.child("node1");
-        let grandchild = child.child("node2");
+        let child = ns.child("node1", "id1");
+        let grandchild = child.child("node2", "id2");
 
-        assert_eq!(child.as_str(), "node1");
-        assert_eq!(grandchild.as_str(), "node1|node2");
+        assert_eq!(child.as_str(), "|node1:id1");
+        assert_eq!(grandchild.as_str(), "|node1:id1|node2:id2");
 
-        // Test parsing
-        let parsed = crate::checkpoint::CheckpointNamespace::parse("node1|node2");
-        assert_eq!(parsed.as_str(), "node1|node2");
+        // Test parsing round-trip
+        let parsed = crate::checkpoint::CheckpointNamespace::parse("|node1:id1|node2:id2");
+        assert_eq!(parsed.as_str(), "|node1:id1|node2:id2");
+
+        // Test root is empty
+        assert_eq!(ns.as_str(), "");
+        assert!(ns.is_root());
     }
 
     fn mock_node(name: &str) -> Arc<dyn crate::Node<StateDummy>> {

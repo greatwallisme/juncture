@@ -59,130 +59,19 @@ impl From<serde_json::Error> for CheckpointError {
     }
 }
 
-/// Namespace for checkpoint isolation in subgraph execution
-///
-/// Provides hierarchical namespace isolation to prevent checkpoint
-/// collisions when executing nested subgraphs.
-///
-/// # Examples
-///
-/// ```ignore
-/// use juncture_core::checkpoint::CheckpointNamespace;
-///
-/// let root_ns = CheckpointNamespace::root();
-/// let child_ns = root_ns.child("agent_a");
-/// let grandchild_ns = child_ns.child("step_1");
-///
-/// assert_eq!(root_ns.as_str(), "");
-/// assert_eq!(child_ns.as_str(), "agent_a");
-/// assert_eq!(grandchild_ns.as_str(), "agent_a|step_1");
-/// ```
-#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
-pub struct CheckpointNamespace {
-    /// Namespace segments forming a hierarchical path
-    pub segments: Vec<String>,
-}
-
-impl CheckpointNamespace {
-    /// Create a new root namespace (empty path)
-    #[must_use]
-    pub const fn root() -> Self {
-        Self {
-            segments: Vec::new(),
-        }
-    }
-
-    /// Create a namespace from segments
-    #[must_use]
-    pub const fn new(segments: Vec<String>) -> Self {
-        Self { segments }
-    }
-
-    /// Create a child namespace
-    #[must_use]
-    pub fn child(&self, name: &str) -> Self {
-        let mut segments = self.segments.clone();
-        segments.push(name.to_string());
-        Self { segments }
-    }
-
-    /// Get the parent namespace
-    #[must_use]
-    pub fn parent(&self) -> Option<Self> {
-        if self.segments.is_empty() {
-            None
-        } else {
-            let segments = self.segments[..self.segments.len() - 1].to_vec();
-            Some(Self { segments })
-        }
-    }
-
-    /// Check if this is a root namespace
-    #[must_use]
-    pub const fn is_root(&self) -> bool {
-        self.segments.is_empty()
-    }
-
-    /// Convert to string representation
-    ///
-    /// Uses [`CHECKPOINT_NS_SEPARATOR`] as the separator between namespace segments
-    /// as per design doc 04-checkpoint.md, Implementation Note C-04-5.
-    #[must_use]
-    pub fn as_str(&self) -> String {
-        self.segments.join(CHECKPOINT_NS_SEPARATOR)
-    }
-
-    /// Convert to string representation (alias for `as_str`)
-    ///
-    /// Note: This method shadows the `Display::to_string` implementation.
-    /// Use `as_str()` or the `Display` trait instead.
-    #[allow(
-        clippy::should_implement_trait,
-        clippy::inherent_to_string_shadow_display,
-        reason = "required by design spec 04-027"
-    )]
-    #[must_use]
-    pub fn to_string(&self) -> String {
-        self.as_str()
-    }
-
-    /// Parse from string representation
-    ///
-    /// Splits on [`CHECKPOINT_NS_SEPARATOR`] to reconstruct namespace segments.
-    #[must_use]
-    pub fn parse(s: &str) -> Self {
-        if s.is_empty() {
-            Self::root()
-        } else {
-            Self {
-                segments: s.split(CHECKPOINT_NS_SEPARATOR).map(String::from).collect(),
-            }
-        }
-    }
-}
-
-impl std::fmt::Display for CheckpointNamespace {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.as_str())
-    }
-}
-
-impl From<Vec<String>> for CheckpointNamespace {
-    fn from(segments: Vec<String>) -> Self {
-        Self::new(segments)
-    }
-}
-
-impl From<&str> for CheckpointNamespace {
-    fn from(s: &str) -> Self {
-        Self::parse(s)
-    }
-}
-
 /// Single namespace segment with node name and invocation UUID
 ///
 /// Represents one level in a hierarchical checkpoint namespace,
 /// combining a node name with a unique invocation identifier.
+///
+/// # Examples
+///
+/// ```ignore
+/// use juncture_core::checkpoint::NamespaceSegment;
+///
+/// let segment = NamespaceSegment::new("review".to_string(), "uuid-1234".to_string());
+/// assert_eq!(segment.as_str(), "review:uuid-1234");
+/// ```
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct NamespaceSegment {
     /// Node name for this segment
@@ -219,6 +108,151 @@ impl NamespaceSegment {
 impl std::fmt::Display for NamespaceSegment {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.as_str())
+    }
+}
+
+/// Namespace for checkpoint isolation in subgraph execution
+///
+/// Provides hierarchical namespace isolation to prevent checkpoint
+/// collisions when executing nested subgraphs.
+///
+/// The wire format uses a leading `|` per segment with `node_name:invocation_id`
+/// pairs, e.g. `"|review:uuid1|detail:uuid2"`. The root namespace is `""`.
+///
+/// # Examples
+///
+/// ```ignore
+/// use juncture_core::checkpoint::CheckpointNamespace;
+///
+/// let root_ns = CheckpointNamespace::root();
+/// let child_ns = root_ns.child("review", "550e8400-e29b-41d4-a716-446655440000");
+/// let grandchild_ns = child_ns.child("detail", "6ba7b810-9dad-11d1-80b4-00c04fd430c8");
+///
+/// assert_eq!(root_ns.as_str(), "");
+/// assert_eq!(child_ns.as_str(), "|review:550e8400-e29b-41d4-a716-446655440000");
+/// assert_eq!(grandchild_ns.as_str(), "|review:550e8400-e29b-41d4-a716-446655440000|detail:6ba7b810-9dad-11d1-80b4-00c04fd430c8");
+/// ```
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+pub struct CheckpointNamespace {
+    /// Namespace segments forming a hierarchical path
+    pub segments: Vec<NamespaceSegment>,
+}
+
+impl CheckpointNamespace {
+    /// Create a new root namespace (empty path)
+    #[must_use]
+    pub const fn root() -> Self {
+        Self {
+            segments: Vec::new(),
+        }
+    }
+
+    /// Create a namespace from segments
+    #[must_use]
+    pub const fn new(segments: Vec<NamespaceSegment>) -> Self {
+        Self { segments }
+    }
+
+    /// Create a child namespace by appending a new segment
+    ///
+    /// # Arguments
+    ///
+    /// * `node_name` - The node name for this nesting level
+    /// * `invocation_id` - The unique invocation identifier (typically UUID v4)
+    #[must_use]
+    pub fn child(&self, node_name: &str, invocation_id: &str) -> Self {
+        let mut segments = self.segments.clone();
+        segments.push(NamespaceSegment {
+            node_name: node_name.to_string(),
+            invocation_id: invocation_id.to_string(),
+        });
+        Self { segments }
+    }
+
+    /// Get the parent namespace by removing the last segment
+    ///
+    /// Returns `None` if this is already the root namespace.
+    #[must_use]
+    pub fn parent(&self) -> Option<Self> {
+        if self.segments.is_empty() {
+            None
+        } else {
+            let segments = self.segments[..self.segments.len() - 1].to_vec();
+            Some(Self { segments })
+        }
+    }
+
+    /// Check if this is a root namespace
+    #[must_use]
+    pub const fn is_root(&self) -> bool {
+        self.segments.is_empty()
+    }
+
+    /// Convert to string representation using the design-spec wire format
+    ///
+    /// Each segment is prefixed with `|` and formatted as `|node_name:invocation_id`.
+    /// Root produces `""`.
+    #[must_use]
+    pub fn as_str(&self) -> String {
+        self.segments.iter().fold(String::new(), |mut acc, s| {
+            acc.push('|');
+            acc.push_str(&s.node_name);
+            acc.push(':');
+            acc.push_str(&s.invocation_id);
+            acc
+        })
+    }
+
+    /// Convert to string representation (alias for `as_str`)
+    #[allow(
+        clippy::should_implement_trait,
+        clippy::inherent_to_string_shadow_display,
+        reason = "required by design spec 04-027"
+    )]
+    #[must_use]
+    pub fn to_string(&self) -> String {
+        self.as_str()
+    }
+
+    /// Parse from the design-spec wire format `|name:id|name:id`
+    ///
+    /// Empty string produces root. Each segment is split on the first `:`
+    /// to extract `node_name` and `invocation_id`.
+    #[must_use]
+    pub fn parse(s: &str) -> Self {
+        if s.is_empty() {
+            return Self::root();
+        }
+        let trimmed = s.trim_start_matches('|');
+        let segments = trimmed
+            .split('|')
+            .filter_map(|seg| {
+                let (node_name, invocation_id) = seg.split_once(':')?;
+                Some(NamespaceSegment {
+                    node_name: node_name.to_string(),
+                    invocation_id: invocation_id.to_string(),
+                })
+            })
+            .collect();
+        Self { segments }
+    }
+}
+
+impl std::fmt::Display for CheckpointNamespace {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
+impl From<Vec<NamespaceSegment>> for CheckpointNamespace {
+    fn from(segments: Vec<NamespaceSegment>) -> Self {
+        Self::new(segments)
+    }
+}
+
+impl From<&str> for CheckpointNamespace {
+    fn from(s: &str) -> Self {
+        Self::parse(s)
     }
 }
 
