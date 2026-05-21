@@ -2,7 +2,11 @@
 
 use std::sync::Arc;
 
-use juncture_core::state::messages::Message;
+use juncture_core::command::Command;
+use juncture_core::config::RunnableConfig;
+use juncture_core::error::JunctureError;
+use juncture_core::node::Node;
+use juncture_core::state::messages::{Message, MessagesState, MessagesStateUpdate};
 
 use crate::tools::error::ToolError;
 
@@ -119,6 +123,30 @@ impl ValidationNode {
     #[must_use]
     pub const fn is_enabled(&self) -> bool {
         self.max_input_tokens.is_some() || self.validator.is_some()
+    }
+}
+
+impl Node<MessagesState> for ValidationNode {
+    fn call(
+        &self,
+        state: MessagesState,
+        _config: &RunnableConfig,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<Command<MessagesState>, JunctureError>>
+                + Send
+                + '_,
+        >,
+    > {
+        Box::pin(async move {
+            self.validate(&state.messages)
+                .map(|()| Command::update(MessagesStateUpdate::default()))
+                .map_err(|e| JunctureError::execution(e.to_string()))
+        })
+    }
+
+    fn name(&self) -> &'static str {
+        "validation"
     }
 }
 
@@ -300,6 +328,74 @@ mod tests {
 
         validator.validate(&messages).unwrap();
     }
+
+    #[tokio::test]
+    async fn test_node_trait_name() {
+        let validator = ValidationNode::new();
+        assert_eq!(validator.name(), "validation");
+    }
+
+    #[tokio::test]
+    async fn test_node_trait_call_passes_validation() {
+        let validator = ValidationNode::new();
+        let state = MessagesState {
+            messages: vec![Message::human("Hello")],
+        };
+        let config = RunnableConfig::default();
+
+        let result = validator.call(state, &config).await;
+        assert!(result.is_ok());
+
+        let command = result.expect("call should succeed");
+        assert!(command.update.is_some());
+        let update = command.update.expect("command should have an update");
+        assert!(update.messages.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_node_trait_call_fails_validation() {
+        let validator = ValidationNode::new().with_max_tokens(100);
+        let state = MessagesState {
+            messages: vec![Message {
+                id: "msg1".to_string(),
+                role: Role::Human,
+                content: Content::Text("Hello".to_string()),
+                tool_calls: vec![],
+                tool_call_id: None,
+                name: None,
+                usage: Some(TokenUsage {
+                    input_tokens: 200,
+                    output_tokens: 0,
+                    total_tokens: 200,
+                }),
+            }],
+        };
+        let config = RunnableConfig::default();
+
+        let result = validator.call(state, &config).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().is_execution());
+    }
+
+    #[tokio::test]
+    async fn test_node_trait_call_custom_validator_fail() {
+        let validator = ValidationNode::new().with_validator(|messages| {
+            if messages.len() <= 2 {
+                Ok(())
+            } else {
+                Err(ToolError::validation_failed("Too many messages".to_string()))
+            }
+        });
+
+        let state = MessagesState {
+            messages: vec![Message::human("a"), Message::human("b"), Message::human("c")],
+        };
+        let config = RunnableConfig::default();
+
+        let result = validator.call(state, &config).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().is_execution());
+    }
 }
 
-// Rust guideline compliant 2026-05-19
+// Rust guideline compliant 2026-05-21
