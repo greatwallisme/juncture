@@ -137,11 +137,7 @@ impl<S: State> ToolRuntime<S> {
     /// # Arguments
     ///
     /// * `delta` - Output delta fragment to stream
-    #[expect(
-        clippy::unused_async,
-        reason = "async required for future API compatibility with actual async streaming"
-    )]
-    pub async fn emit_output_delta(&self, delta: &str) {
+    pub fn emit_output_delta(&self, delta: &str) {
         if let Some(ref tx) = self.stream_tx {
             let _ = tx.send(serde_json::json!({
                 "delta": delta,
