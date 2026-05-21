@@ -30,6 +30,9 @@ pub struct TestMetricsCollector {
     counters: Arc<Mutex<HashMap<String, u64>>>,
     histogram_values: Arc<Mutex<HashMap<String, Vec<f64>>>>,
     gauge_values: Arc<Mutex<HashMap<String, f64>>>,
+    /// Labeled counters: `metric_name` -> (sorted labels -> value)
+    #[allow(clippy::type_complexity, reason = "labeled metric storage requires nested HashMap")]
+    labeled_counters: Arc<Mutex<HashMap<String, HashMap<Vec<(String, String)>, u64>>>>,
 }
 
 impl Default for TestMetricsCollector {
@@ -74,6 +77,7 @@ impl TestMetricsCollector {
             counters: Arc::new(Mutex::new(HashMap::new())),
             histogram_values: Arc::new(Mutex::new(HashMap::new())),
             gauge_values: Arc::new(Mutex::new(HashMap::new())),
+            labeled_counters: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -277,10 +281,12 @@ impl TestMetricsCollector {
         let mut counters = self.counters.lock().unwrap();
         let mut histograms = self.histogram_values.lock().unwrap();
         let mut gauges = self.gauge_values.lock().unwrap();
+        let mut labeled = self.labeled_counters.lock().unwrap();
 
         counters.clear();
         histograms.clear();
         gauges.clear();
+        labeled.clear();
     }
 
     /// Get all counter names that have been recorded
@@ -357,6 +363,56 @@ impl TestMetricsCollector {
         let gauges = self.gauge_values.lock().unwrap();
         gauges.keys().cloned().collect()
     }
+
+    /// Increment a counter metric with labels
+    ///
+    /// Labels are sorted internally for consistent key matching.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal mutex is poisoned (should not happen in normal usage).
+    #[allow(
+        clippy::significant_drop_tightening,
+        reason = "MutexGuard is needed for entry API; tightening would complicate the code"
+    )]
+    pub fn increment_counter_with_labels(&self, name: &str, value: u64, labels: &[(impl ToString, impl ToString)]) {
+        let key = labels_to_key(labels);
+        let mut labeled = self.labeled_counters.lock().unwrap();
+        let entry = labeled
+            .entry(name.to_string())
+            .or_default()
+            .entry(key)
+            .or_insert(0);
+        *entry = entry.saturating_add(value);
+    }
+
+    /// Get counter value for a specific label set
+    ///
+    /// Returns 0 if no counter with those labels has been recorded.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal mutex is poisoned (should not happen in normal usage).
+    #[must_use]
+    pub fn get_counter_with_labels(&self, name: &str, labels: &[(impl ToString, impl ToString)]) -> u64 {
+        let key = labels_to_key(labels);
+        let labeled = self.labeled_counters.lock().unwrap();
+        labeled
+            .get(name)
+            .and_then(|m| m.get(&key))
+            .copied()
+            .unwrap_or(0)
+    }
+}
+
+/// Convert labels to a sorted Vec key for consistent matching
+fn labels_to_key(labels: &[(impl ToString, impl ToString)]) -> Vec<(String, String)> {
+    let mut key: Vec<(String, String)> = labels
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+    key.sort_by(|a, b| a.0.cmp(&b.0));
+    key
 }
 
 #[cfg(test)]
@@ -475,6 +531,27 @@ mod tests {
         // Changes to clone affect original (they share the same Arc)
         metrics2.increment_counter("test", 3);
         assert_eq!(metrics1.get_counter("test"), 8);
+    }
+
+    #[test]
+    fn test_labeled_counter() {
+        let metrics = TestMetricsCollector::new();
+
+        metrics.increment_counter_with_labels("juncture.llm.calls", 1, &[("model", "gpt-4")]);
+        metrics.increment_counter_with_labels("juncture.llm.calls", 1, &[("model", "gpt-4")]);
+        metrics.increment_counter_with_labels("juncture.llm.calls", 1, &[("model", "claude")]);
+
+        assert_eq!(metrics.get_counter_with_labels("juncture.llm.calls", &[("model", "gpt-4")]), 2);
+        assert_eq!(metrics.get_counter_with_labels("juncture.llm.calls", &[("model", "claude")]), 1);
+        assert_eq!(metrics.get_counter_with_labels("juncture.llm.calls", &[("model", "llama")]), 0);
+    }
+
+    #[test]
+    fn test_labeled_counter_key_ordering() {
+        let metrics = TestMetricsCollector::new();
+
+        metrics.increment_counter_with_labels("test", 1, &[("b", "2"), ("a", "1")]);
+        assert_eq!(metrics.get_counter_with_labels("test", &[("a", "1"), ("b", "2")]), 1);
     }
 }
 
