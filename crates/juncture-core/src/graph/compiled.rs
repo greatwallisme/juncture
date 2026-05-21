@@ -120,6 +120,26 @@ impl<S: State> CompiledGraph<S> {
         effective
     }
 
+    /// Deserialize state from checkpoint, applying schema migration if needed.
+    ///
+    /// Compares the checkpoint's `schema_version` with `S::schema_version()`.
+    /// When they differ, `S::migrate()` transforms the JSON before deserialization.
+    fn deserialize_with_migration(
+        checkpoint: &crate::checkpoint::Checkpoint,
+    ) -> Result<S, JunctureError>
+    where
+        S: serde::de::DeserializeOwned,
+    {
+        let mut channel_values = checkpoint.channel_values.clone();
+        let checkpoint_version = checkpoint.schema_version;
+        let current_version = S::schema_version();
+        if checkpoint_version != current_version {
+            channel_values = S::migrate(checkpoint_version, channel_values);
+        }
+        serde_json::from_value(channel_values)
+            .map_err(|e| JunctureError::checkpoint(format!("failed to deserialize state: {e}")))
+    }
+
     /// Invoke the graph synchronously
     ///
     /// Executes the graph from the given input state and returns the final output.
@@ -575,9 +595,8 @@ impl<S: State> CompiledGraph<S> {
             )));
         }
 
-        // Deserialize state from checkpoint
-        let state: S = serde_json::from_value(tuple.checkpoint.channel_values)
-            .map_err(|e| JunctureError::checkpoint(format!("failed to deserialize state: {e}")))?;
+        // Deserialize state from checkpoint (applies schema migration if needed)
+        let state = Self::deserialize_with_migration(&tuple.checkpoint)?;
 
         // Merge compile-time defaults with runtime config, then add resume value
         let mut resume_config = self.effective_config(config);
@@ -754,9 +773,8 @@ impl<S: State> CompiledGraph<S> {
             )));
         }
 
-        // Deserialize state from checkpoint
-        let state: S = serde_json::from_value(tuple.checkpoint.channel_values)
-            .map_err(|e| JunctureError::checkpoint(format!("failed to deserialize state: {e}")))?;
+        // Deserialize state from checkpoint (applies schema migration if needed)
+        let state = Self::deserialize_with_migration(&tuple.checkpoint)?;
 
         // Merge compile-time defaults with runtime config, then add resume value
         let mut resume_config = self.effective_config(config);
@@ -893,9 +911,8 @@ impl<S: State> CompiledGraph<S> {
             return Ok(None);
         };
 
-        // Deserialize channel values into S
-        let values: S = serde_json::from_value(tuple.checkpoint.channel_values)
-            .map_err(|e| JunctureError::checkpoint(format!("failed to deserialize state: {e}")))?;
+        // Deserialize channel values into S (applies schema migration if needed)
+        let values = Self::deserialize_with_migration(&tuple.checkpoint)?;
 
         // Extract next nodes from pending_tasks
         let next: Vec<String> = tuple
@@ -1000,9 +1017,8 @@ impl<S: State> CompiledGraph<S> {
             ));
         };
 
-        // Deserialize current state from checkpoint
-        let mut state: S = serde_json::from_value(tuple.checkpoint.channel_values)
-            .map_err(|e| JunctureError::checkpoint(format!("failed to deserialize state: {e}")))?;
+        // Deserialize current state from checkpoint (applies schema migration if needed)
+        let mut state = Self::deserialize_with_migration(&tuple.checkpoint)?;
 
         // Apply the user's update
         state.apply(update.update);
@@ -2528,6 +2544,105 @@ mod tests {
 
     #[derive(Clone, Debug, Default, serde::Serialize)]
     struct StateDummyUpdate;
+
+    /// Test state type with `schema_version=2` and a custom `migrate()` that transforms old data.
+    ///
+    /// v1 format: `{"value": 0}` (no `label` field)
+    /// v2 format: `{"value": N, "label": "migrated"}` (added `label` field)
+    #[derive(Clone, Debug, serde::Deserialize, serde::Serialize, PartialEq)]
+    #[serde(crate = "serde")]
+    struct StateV2 {
+        value: i32,
+        label: String,
+    }
+
+    impl crate::State for StateV2 {
+        type Update = StateV2Update;
+        type FieldVersions = ();
+
+        fn apply(&mut self, _update: Self::Update) -> crate::FieldsChanged {
+            crate::FieldsChanged(0)
+        }
+
+        fn reset_ephemeral(&mut self) {}
+
+        fn schema_version() -> u32 {
+            2
+        }
+
+        fn migrate(from_version: u32, value: serde_json::Value) -> serde_json::Value {
+            let mut map = match value {
+                serde_json::Value::Object(m) => m,
+                other => return other,
+            };
+            if from_version < 2 {
+                map.insert(
+                    "label".to_string(),
+                    serde_json::Value::String("migrated".to_string()),
+                );
+            }
+            serde_json::Value::Object(map)
+        }
+    }
+
+    #[derive(Clone, Debug, Default, serde::Serialize)]
+    struct StateV2Update;
+
+    #[test]
+    fn test_deserialize_with_migration_applies_migration_when_versions_differ() {
+        use std::collections::HashMap;
+
+        // Simulate a v1 checkpoint that only has `value`, no `label`
+        let checkpoint = crate::checkpoint::Checkpoint {
+            id: "test_id".to_string(),
+            channel_values: serde_json::json!({"value": 42}),
+            channel_versions: HashMap::new(),
+            versions_seen: HashMap::new(),
+            pending_tasks: Vec::new(),
+            pending_sends: Vec::new(),
+            pending_interrupts: Vec::new(),
+            schema_version: 1, // Old version
+            created_at: "2024-01-01T00:00:00Z".to_string(),
+            v: 1,
+            new_versions: HashMap::new(),
+            counters_since_delta_snapshot: HashMap::new(),
+        };
+
+        let state: StateV2 = CompiledGraph::<StateV2>::deserialize_with_migration(&checkpoint)
+            .expect("deserialization with migration should succeed");
+
+        // The migrate() function should have added the `label` field
+        assert_eq!(state.value, 42);
+        assert_eq!(state.label, "migrated");
+    }
+
+    #[test]
+    fn test_deserialize_with_migration_skips_migration_when_versions_match() {
+        use std::collections::HashMap;
+
+        // Checkpoint already at v2, includes `label`
+        let checkpoint = crate::checkpoint::Checkpoint {
+            id: "test_id".to_string(),
+            channel_values: serde_json::json!({"value": 7, "label": "original"}),
+            channel_versions: HashMap::new(),
+            versions_seen: HashMap::new(),
+            pending_tasks: Vec::new(),
+            pending_sends: Vec::new(),
+            pending_interrupts: Vec::new(),
+            schema_version: 2, // Same version as StateV2::schema_version()
+            created_at: "2024-01-01T00:00:00Z".to_string(),
+            v: 1,
+            new_versions: HashMap::new(),
+            counters_since_delta_snapshot: HashMap::new(),
+        };
+
+        let state: StateV2 = CompiledGraph::<StateV2>::deserialize_with_migration(&checkpoint)
+            .expect("deserialization should succeed");
+
+        // No migration applied, original label preserved
+        assert_eq!(state.value, 7);
+        assert_eq!(state.label, "original");
+    }
 
     #[test]
     fn test_compile_config_default_is_empty() {
