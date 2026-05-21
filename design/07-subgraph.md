@@ -133,7 +133,8 @@ impl<S: State> StateGraph<S> {
 
 // > **实现备注 (D-07-3)**: 实际实现中 `add_subgraph_node` 接受 `Arc<CompiledGraph<Sub>>` 而非
 // > `CompiledGraph<Sub>`（CompiledGraph 已内部使用 Arc，但显式 Arc 允许同一子图在多个父图中复用），
-// > 且返回 `Result<(), TopologyError>` 而非 `&mut Self`，与 `add_node` 的 fail-fast 验证模式一致。
+// > 且返回 `Result<&mut Self, TopologyError>` 而非 `&mut Self`（与 `add_node` 等 builder 方法一致，
+// > 返回 `Result` 类型以支持 fail-fast 验证，同时保留 `&mut Self` 以支持方法链）。
 ```
 
 ### 2.2 模式 2：显式映射（不同 State 类型）

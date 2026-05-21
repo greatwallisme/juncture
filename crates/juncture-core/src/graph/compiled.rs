@@ -91,6 +91,7 @@ impl<S: State> CompiledGraph<S> {
         interrupt_before: Vec<String>,
         interrupt_after: Vec<String>,
         checkpointer: Option<Arc<dyn crate::checkpoint::CheckpointSaver>>,
+        subgraphs: Vec<SubgraphInfo>,
     ) -> Self {
         Self {
             inner: Arc::new(CompiledGraphInner {
@@ -100,6 +101,7 @@ impl<S: State> CompiledGraph<S> {
                 checkpointer,
                 interrupt_before,
                 interrupt_after,
+                subgraphs,
             }),
         }
     }
@@ -1296,11 +1298,8 @@ impl<S: State> CompiledGraph<S> {
     /// Returns metadata about each mounted subgraph, including its
     /// name and persistence configuration.
     #[must_use]
-    pub const fn get_subgraphs(&self) -> Vec<SubgraphInfo> {
-        // The compiled graph does not currently store subgraph mounts
-        // directly. This returns an empty list; subgraph tracking will
-        // be wired through when StateGraph passes mounts to CompiledGraph.
-        Vec::new()
+    pub fn get_subgraphs(&self) -> Vec<SubgraphInfo> {
+        self.inner.subgraphs.clone()
     }
 
     /// Get the nodes in this graph
@@ -1539,6 +1538,9 @@ struct CompiledGraphInner<S: State> {
 
     /// Compile-time `interrupt_after` nodes (HITL defaults)
     interrupt_after: Vec<String>,
+
+    /// Mounted subgraph metadata
+    subgraphs: Vec<SubgraphInfo>,
 }
 
 /// Output from graph execution
@@ -1688,8 +1690,15 @@ mod tests {
         let trigger_table = TriggerTable::new();
         let builder_metadata = IndexMap::new();
 
-        let compiled =
-            CompiledGraph::new(nodes, trigger_table, builder_metadata, vec![], vec![], None);
+        let compiled = CompiledGraph::new(
+            nodes,
+            trigger_table,
+            builder_metadata,
+            vec![],
+            vec![],
+            None,
+            vec![],
+        );
         assert_eq!(compiled.nodes().len(), 1);
     }
 
@@ -1707,8 +1716,15 @@ mod tests {
             },
         );
 
-        let compiled =
-            CompiledGraph::new(nodes, trigger_table, IndexMap::new(), vec![], vec![], None);
+        let compiled = CompiledGraph::new(
+            nodes,
+            trigger_table,
+            IndexMap::new(),
+            vec![],
+            vec![],
+            None,
+            vec![],
+        );
         let mermaid = compiled.to_mermaid();
 
         assert!(mermaid.contains("graph TD"));
@@ -1729,8 +1745,15 @@ mod tests {
             },
         );
 
-        let compiled =
-            CompiledGraph::new(nodes, trigger_table, IndexMap::new(), vec![], vec![], None);
+        let compiled = CompiledGraph::new(
+            nodes,
+            trigger_table,
+            IndexMap::new(),
+            vec![],
+            vec![],
+            None,
+            vec![],
+        );
         let dot = compiled.to_dot();
 
         assert!(dot.contains("digraph juncture_graph"));
@@ -1751,8 +1774,15 @@ mod tests {
             },
         );
 
-        let compiled =
-            CompiledGraph::new(nodes, trigger_table, IndexMap::new(), vec![], vec![], None);
+        let compiled = CompiledGraph::new(
+            nodes,
+            trigger_table,
+            IndexMap::new(),
+            vec![],
+            vec![],
+            None,
+            vec![],
+        );
         let json = compiled.to_json();
 
         assert!(json.is_object());
@@ -1772,6 +1802,7 @@ mod tests {
             vec![],
             vec![],
             None,
+            vec![],
         );
         let drawable = compiled.get_graph(None);
         assert_eq!(drawable.nodes.len(), 1);
@@ -1792,9 +1823,62 @@ mod tests {
             vec![],
             vec![],
             None,
+            vec![],
         );
         let subgraphs = compiled.get_subgraphs();
         assert!(subgraphs.is_empty());
+    }
+
+    #[test]
+    fn test_get_subgraphs_with_mounted_subgraphs() {
+        use crate::subgraph::{SubgraphConfig, SubgraphMount, SubgraphPersistence};
+
+        let mut nodes: IndexMap<String, Arc<dyn crate::Node<StateDummy>>> = IndexMap::new();
+        nodes.insert("a".to_string(), mock_node("a"));
+
+        let sub_node = mock_node("sub_node");
+        let mount_inherit = SubgraphMount::new(
+            "child_graph",
+            SubgraphConfig {
+                persistence: SubgraphPersistence::Inherit,
+            },
+            Arc::clone(&sub_node),
+        );
+        let mount_per_thread = SubgraphMount::new(
+            "worker_graph",
+            SubgraphConfig {
+                persistence: SubgraphPersistence::PerThread,
+            },
+            sub_node,
+        );
+
+        let subgraphs = vec![
+            super::SubgraphInfo {
+                name: mount_inherit.name.clone(),
+                persistence: mount_inherit.config.persistence,
+            },
+            super::SubgraphInfo {
+                name: mount_per_thread.name.clone(),
+                persistence: mount_per_thread.config.persistence,
+            },
+        ];
+
+        let compiled = CompiledGraph::new(
+            nodes,
+            TriggerTable::new(),
+            IndexMap::new(),
+            vec![],
+            vec![],
+            None,
+            subgraphs,
+        );
+
+        let result = compiled.get_subgraphs();
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].name, "child_graph");
+        assert_eq!(result[0].persistence, SubgraphPersistence::Inherit);
+        assert_eq!(result[1].name, "worker_graph");
+        assert_eq!(result[1].persistence, SubgraphPersistence::PerThread);
     }
 
     #[tokio::test]
@@ -1809,6 +1893,7 @@ mod tests {
             vec![],
             vec![],
             None,
+            vec![],
         );
         let config = RunnableConfig::new();
 
@@ -1913,6 +1998,7 @@ mod tests {
             Some(Arc::new(MockCheckpointer {
                 checkpoint_source: CheckpointSource::Input,
             })),
+            vec![],
         );
 
         let config = RunnableConfig::new();
@@ -1939,6 +2025,7 @@ mod tests {
             Some(Arc::new(MockCheckpointer {
                 checkpoint_source: CheckpointSource::Loop,
             })),
+            vec![],
         );
 
         let result = compiled
@@ -1966,6 +2053,7 @@ mod tests {
                     node: "test_node".to_string(),
                 },
             })),
+            vec![],
         );
 
         let result = compiled
@@ -1994,6 +2082,7 @@ mod tests {
             vec![],
             vec![],
             None,
+            vec![],
         );
         let config = RunnableConfig::new();
 
@@ -2016,6 +2105,7 @@ mod tests {
             vec![],
             vec![],
             None,
+            vec![],
         );
         let config = RunnableConfig::new();
 
@@ -2124,6 +2214,7 @@ mod tests {
             Some(Arc::new(MockCheckpointer {
                 checkpoint_source: CheckpointSource::Input,
             })),
+            vec![],
         );
 
         let config = RunnableConfig::new();
@@ -2158,6 +2249,7 @@ mod tests {
                     node: "test_node".to_string(),
                 },
             })),
+            vec![],
         );
 
         let result = compiled
@@ -2191,6 +2283,7 @@ mod tests {
             vec![],
             vec![],
             None,
+            vec![],
         );
         let config = RunnableConfig::new();
 
@@ -2211,6 +2304,7 @@ mod tests {
             vec![],
             vec![],
             None,
+            vec![],
         );
         let config = RunnableConfig::new();
 
@@ -2231,6 +2325,7 @@ mod tests {
             vec![],
             vec![],
             None,
+            vec![],
         );
         let config = RunnableConfig::new();
 
@@ -2300,6 +2395,7 @@ mod tests {
             vec![],
             vec![],
             Some(Arc::new(NoCheckpointCheckpointer)),
+            vec![],
         );
 
         let config = RunnableConfig::new();
@@ -2424,6 +2520,7 @@ mod tests {
             Some(Arc::new(MockCheckpointer {
                 observed: Arc::clone(&observed),
             })),
+            vec![],
         );
 
         let config = RunnableConfig::new();
@@ -2464,6 +2561,7 @@ mod tests {
             vec![],
             vec![],
             None,
+            vec![],
         );
         let config = RunnableConfig::new();
 
@@ -2538,8 +2636,15 @@ mod tests {
             },
         );
 
-        let compiled =
-            CompiledGraph::new(nodes, trigger_table, IndexMap::new(), vec![], vec![], None);
+        let compiled = CompiledGraph::new(
+            nodes,
+            trigger_table,
+            IndexMap::new(),
+            vec![],
+            vec![],
+            None,
+            vec![],
+        );
         let config = RunnableConfig::new();
 
         let mut stream = compiled
@@ -2581,8 +2686,15 @@ mod tests {
             },
         );
 
-        let compiled =
-            CompiledGraph::new(nodes, trigger_table, IndexMap::new(), vec![], vec![], None);
+        let compiled = CompiledGraph::new(
+            nodes,
+            trigger_table,
+            IndexMap::new(),
+            vec![],
+            vec![],
+            None,
+            vec![],
+        );
         let config = RunnableConfig::new();
 
         let mut stream = compiled
@@ -2624,8 +2736,15 @@ mod tests {
             },
         );
 
-        let compiled =
-            CompiledGraph::new(nodes, trigger_table, IndexMap::new(), vec![], vec![], None);
+        let compiled = CompiledGraph::new(
+            nodes,
+            trigger_table,
+            IndexMap::new(),
+            vec![],
+            vec![],
+            None,
+            vec![],
+        );
         let config = RunnableConfig::new();
 
         let mut stream = compiled
@@ -2667,8 +2786,15 @@ mod tests {
             },
         );
 
-        let compiled =
-            CompiledGraph::new(nodes, trigger_table, IndexMap::new(), vec![], vec![], None);
+        let compiled = CompiledGraph::new(
+            nodes,
+            trigger_table,
+            IndexMap::new(),
+            vec![],
+            vec![],
+            None,
+            vec![],
+        );
         let config = RunnableConfig::new();
 
         let mut stream = compiled
@@ -2865,6 +2991,7 @@ mod tests {
             vec!["node_a".to_string()],
             vec!["node_b".to_string()],
             None,
+            vec![],
         );
 
         // When runtime config has no interrupt_before/after, compile-time values apply
@@ -2886,6 +3013,7 @@ mod tests {
             vec!["compile_before".to_string()],
             vec!["compile_after".to_string()],
             None,
+            vec![],
         );
 
         // Runtime values take precedence
@@ -2916,6 +3044,7 @@ mod tests {
             vec![],
             vec![],
             None,
+            vec![],
         );
 
         // When compile-time lists are empty, runtime config stays as-is
@@ -2990,7 +3119,15 @@ mod tests {
             },
         );
 
-        CompiledGraph::new(nodes, trigger_table, IndexMap::new(), vec![], vec![], None)
+        CompiledGraph::new(
+            nodes,
+            trigger_table,
+            IndexMap::new(),
+            vec![],
+            vec![],
+            None,
+            vec![],
+        )
     }
 
     #[tokio::test]
@@ -3641,7 +3778,15 @@ mod tests {
             },
         );
 
-        CompiledGraph::new(nodes, trigger_table, IndexMap::new(), vec![], vec![], None)
+        CompiledGraph::new(
+            nodes,
+            trigger_table,
+            IndexMap::new(),
+            vec![],
+            vec![],
+            None,
+            vec![],
+        )
     }
 
     #[tokio::test]

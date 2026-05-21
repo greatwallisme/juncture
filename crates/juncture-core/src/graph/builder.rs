@@ -897,7 +897,11 @@ impl<S: State> StateGraph<S> {
         subgraph: Arc<crate::graph::CompiledGraph<Sub>>,
     ) -> Result<&mut Self, TopologyError>
     where
-        Sub: crate::subgraph::StateSubset<S> + State + Clone + serde::Serialize,
+        Sub: crate::subgraph::StateSubset<S>
+            + State
+            + Clone
+            + serde::Serialize
+            + for<'de> serde::Deserialize<'de>,
         Sub::Update: serde::Serialize,
         S: Clone,
     {
@@ -954,10 +958,6 @@ impl<S: State> StateGraph<S> {
     ///
     /// Returns an error if a node with the same name already exists.
     #[allow(
-        dead_code,
-        reason = "will be used when subgraph support is fully implemented"
-    )]
-    #[allow(
         clippy::type_complexity,
         reason = "requires type erasure for trait object storage"
     )]
@@ -970,7 +970,7 @@ impl<S: State> StateGraph<S> {
         config: crate::subgraph::SubgraphConfig,
     ) -> Result<&mut Self, TopologyError>
     where
-        Sub: State + serde::Serialize,
+        Sub: State + serde::Serialize + for<'de> serde::Deserialize<'de>,
         Sub::Update: serde::Serialize,
         S: Clone,
     {
@@ -1291,6 +1291,16 @@ impl<S: State> StateGraph<S> {
         // Build trigger table
         let trigger_table = self.build_trigger_table();
 
+        // Convert subgraph mounts to SubgraphInfo for the compiled graph
+        let subgraph_info: Vec<super::compiled::SubgraphInfo> = self
+            .subgraphs
+            .iter()
+            .map(|mount| super::compiled::SubgraphInfo {
+                name: mount.name.clone(),
+                persistence: mount.config.persistence,
+            })
+            .collect();
+
         // Create compiled graph
         Ok(CompiledGraph::new(
             self.nodes.clone(),
@@ -1299,6 +1309,7 @@ impl<S: State> StateGraph<S> {
             config.interrupt_before,
             config.interrupt_after,
             checkpointer,
+            subgraph_info,
         ))
     }
 
@@ -1493,6 +1504,32 @@ mod tests {
     }
 
     #[test]
+    fn test_compile_wires_subgraph_info() {
+        use crate::subgraph::{SubgraphConfig, SubgraphMount, SubgraphPersistence};
+
+        let mut graph: StateGraph<StateDummy> = StateGraph::new();
+
+        let node = NodeFnUpdate(|_s| async move { Ok(StateDummyUpdate) }).into_node("sub");
+        let mount = SubgraphMount::new(
+            "my_subgraph",
+            SubgraphConfig {
+                persistence: SubgraphPersistence::PerThread,
+            },
+            node,
+        );
+
+        graph.add_subgraph(mount).unwrap();
+        graph.set_entry_point("my_subgraph");
+        graph.set_finish_point("my_subgraph");
+
+        let compiled = graph.compile().unwrap();
+        let subgraphs = compiled.get_subgraphs();
+        assert_eq!(subgraphs.len(), 1);
+        assert_eq!(subgraphs[0].name, "my_subgraph");
+        assert_eq!(subgraphs[0].persistence, SubgraphPersistence::PerThread);
+    }
+
+    #[test]
     fn test_add_subgraph_duplicate() {
         let mut graph: StateGraph<StateDummy> = StateGraph::new();
 
@@ -1511,6 +1548,96 @@ mod tests {
         );
 
         let result = graph.add_subgraph(mount);
+        assert!(matches!(result, Err(TopologyError::DuplicateNode { .. })));
+    }
+
+    /// Child state type for testing explicit-mapping subgraph mounting.
+    #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+    struct ChildState {
+        value: i32,
+    }
+
+    impl crate::State for ChildState {
+        type Update = ChildStateUpdate;
+        type FieldVersions = ();
+
+        fn apply(&mut self, update: Self::Update) -> crate::FieldsChanged {
+            if let Some(v) = update.value {
+                self.value = v;
+            }
+            crate::FieldsChanged(0)
+        }
+
+        fn reset_ephemeral(&mut self) {}
+    }
+
+    #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+    struct ChildStateUpdate {
+        value: Option<i32>,
+    }
+
+    #[test]
+    fn test_add_subgraph_with_config_registers_node() {
+        let mut child_graph: StateGraph<ChildState> = StateGraph::new();
+        child_graph
+            .add_node_simple(
+                "child_node",
+                crate::node::NodeFnUpdate(|_s: ChildState| async move {
+                    Ok(ChildStateUpdate { value: Some(42) })
+                }),
+            )
+            .unwrap();
+        child_graph.set_entry_point("child_node");
+        child_graph.set_finish_point("child_node");
+
+        let compiled_child = Arc::new(child_graph.compile().unwrap());
+
+        let mut parent_graph: StateGraph<StateDummy> = StateGraph::new();
+        parent_graph
+            .add_subgraph_with_config(
+                "explicit_subgraph",
+                compiled_child,
+                |_parent: &StateDummy| ChildState { value: 0 },
+                |_child: &ChildState| StateDummyUpdate,
+                crate::subgraph::SubgraphConfig::default(),
+            )
+            .unwrap();
+
+        assert!(parent_graph.nodes.contains_key("explicit_subgraph"));
+    }
+
+    #[test]
+    fn test_add_subgraph_with_config_duplicate_node() {
+        let mut child_graph: StateGraph<ChildState> = StateGraph::new();
+        child_graph
+            .add_node_simple(
+                "child_node",
+                crate::node::NodeFnUpdate(|_s: ChildState| async move {
+                    Ok(ChildStateUpdate { value: Some(42) })
+                }),
+            )
+            .unwrap();
+        child_graph.set_entry_point("child_node");
+        child_graph.set_finish_point("child_node");
+
+        let compiled_child = Arc::new(child_graph.compile().unwrap());
+
+        let mut parent_graph: StateGraph<StateDummy> = StateGraph::new();
+        parent_graph
+            .add_node_simple(
+                "explicit_subgraph",
+                crate::node::NodeFnUpdate(|_s| async move { Ok(StateDummyUpdate) }),
+            )
+            .unwrap();
+
+        let result = parent_graph.add_subgraph_with_config(
+            "explicit_subgraph",
+            compiled_child,
+            |_parent: &StateDummy| ChildState { value: 0 },
+            |_child: &ChildState| StateDummyUpdate,
+            crate::subgraph::SubgraphConfig::default(),
+        );
+
         assert!(matches!(result, Err(TopologyError::DuplicateNode { .. })));
     }
 

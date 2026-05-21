@@ -163,6 +163,39 @@ macro_rules! interrupt_with_ctx {
     }};
 }
 
+/// Parent command macro for subgraph-to-parent routing
+///
+/// Allows a node inside a subgraph to request routing to a specific node
+/// in the parent graph. This works as an exception mechanism: the macro
+/// returns a `JunctureError::parent_command(target)` which the
+/// `SubgraphNode` wrapper catches and converts to `Command::goto(target)`.
+///
+/// # Syntax
+///
+/// ```ignore
+/// parent_command!("target_node_name")
+/// ```
+///
+/// # Examples
+///
+/// ```ignore
+/// use juncture_core::parent_command;
+///
+/// async fn my_subgraph_node(state: SubState) -> Result<SubStateUpdate, JunctureError> {
+///     if should_exit() {
+///         // Route directly to "publish" node in the parent graph
+///         parent_command!("publish");
+///     }
+///     Ok(SubStateUpdate::default())
+/// }
+/// ```
+#[macro_export]
+macro_rules! parent_command {
+    ($target:expr) => {
+        return Err($crate::JunctureError::parent_command($target))
+    };
+}
+
 pub use chat::{ChatAnthropic, ChatOllama, ChatOpenAI};
 pub use checkpoint::{
     CHECKPOINT_NS_SEPARATOR, CheckpointNamespace, CheckpointSaver, NamespaceSegment,

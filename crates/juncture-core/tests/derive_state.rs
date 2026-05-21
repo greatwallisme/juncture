@@ -1,3 +1,4 @@
+use juncture_core::subgraph::StateSubset;
 use juncture_core::{FieldsChanged, State};
 use juncture_derive::State;
 use serde::{Deserialize, Serialize};
@@ -203,4 +204,124 @@ fn fields_changed_bitmask() {
     assert!(changed.has_field(0));
     assert!(changed.has_field(5));
     assert!(changed.has_field(10));
+}
+
+// --- StateSubset tests: shared-state subgraph mode (Mode 1) ---
+
+/// Parent state with name, age, and messages fields.
+/// Messages use append reducer for accumulated message history.
+#[derive(State, Clone, Debug, Serialize, Deserialize)]
+struct ParentState {
+    name: String,
+    age: u32,
+    #[reducer(append)]
+    messages: Vec<String>,
+}
+
+/// Child state that is a subset of `ParentState` (name + messages only).
+/// The `#[subset_of(ParentState)]` attribute generates the `StateSubset` impl.
+#[derive(State, Clone, Debug, Serialize, Deserialize)]
+#[subset_of(ParentState)]
+struct ChildState {
+    name: String,
+    #[reducer(append)]
+    messages: Vec<String>,
+}
+
+#[test]
+fn subset_extract_clones_shared_fields_from_parent() {
+    let parent = ParentState {
+        name: "Alice".to_string(),
+        age: 30,
+        messages: vec!["hello".to_string(), "world".to_string()],
+    };
+
+    let child = ChildState::extract(&parent);
+
+    assert_eq!(child.name, "Alice");
+    assert_eq!(child.messages, vec!["hello", "world"]);
+}
+
+#[test]
+fn subset_extract_omits_parent_only_fields() {
+    let parent = ParentState {
+        name: "Bob".to_string(),
+        age: 25,
+        messages: vec![],
+    };
+
+    let child = ChildState::extract(&parent);
+
+    // Child state has no age field -- only name and messages are visible
+    assert_eq!(child.name, "Bob");
+    assert!(child.messages.is_empty());
+}
+
+#[test]
+fn subset_map_update_projects_child_fields_into_parent_update() {
+    let child_update = ChildStateUpdate {
+        name: Some("Charlie".to_string()),
+        messages: Some(vec!["new message".to_string()]),
+    };
+
+    let parent_update = <ChildState as StateSubset<ParentState>>::map_update(child_update);
+
+    assert_eq!(parent_update.name, Some("Charlie".to_string()));
+    assert_eq!(
+        parent_update.messages,
+        Some(vec!["new message".to_string()])
+    );
+    // age is not part of the child state, so it maps to None
+    assert_eq!(parent_update.age, None);
+}
+
+#[test]
+fn subset_map_update_partial_child_update_only_messages() {
+    let child_update = ChildStateUpdate {
+        name: None,
+        messages: Some(vec!["msg1".to_string(), "msg2".to_string()]),
+    };
+
+    let parent_update = <ChildState as StateSubset<ParentState>>::map_update(child_update);
+
+    assert_eq!(parent_update.name, None);
+    assert_eq!(
+        parent_update.messages,
+        Some(vec!["msg1".to_string(), "msg2".to_string()])
+    );
+    assert_eq!(parent_update.age, None);
+}
+
+#[test]
+fn subset_roundtrip_extract_then_map_update() {
+    let parent = ParentState {
+        name: "Dana".to_string(),
+        age: 40,
+        messages: vec!["first".to_string()],
+    };
+
+    // Extract child state from parent
+    let mut child = ChildState::extract(&parent);
+    assert_eq!(child.name, "Dana");
+    assert_eq!(child.messages, vec!["first"]);
+
+    // Simulate subgraph modifying the child state via apply
+    let child_update = ChildStateUpdate {
+        name: Some("Dana Updated".to_string()),
+        messages: Some(vec!["second".to_string()]),
+    };
+    child.apply(child_update);
+    assert_eq!(child.name, "Dana Updated");
+    // Append reducer: original + new
+    assert_eq!(child.messages, vec!["first", "second"]);
+
+    // Map a final child update back to parent update
+    let final_child_update = ChildStateUpdate {
+        name: None,
+        messages: Some(vec!["third".to_string()]),
+    };
+    let parent_update = <ChildState as StateSubset<ParentState>>::map_update(final_child_update);
+
+    assert_eq!(parent_update.name, None);
+    assert_eq!(parent_update.messages, Some(vec!["third".to_string()]));
 }

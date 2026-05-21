@@ -15,6 +15,7 @@ For a struct `Foo` with fields `a: T1, b: T2, ...`:
 
 - `#[state_version(N)]` -- set schema version (default 1)
 - `#[migrate_from(N, path::to::func)]` -- migration from version N
+- `#[subset_of(ParentState)]` -- generate `StateSubset<ParentState>` impl for shared-state subgraph mode; generates `extract()` (clone fields from parent) and `map_update()` (project child Update fields into parent Update). Only one per struct. Child fields must exist in parent with matching types.
 
 ## Field attributes
 

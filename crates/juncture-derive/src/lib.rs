@@ -10,10 +10,10 @@ mod state_derive;
 /// - `FieldVersions` struct (each field becomes u64)
 /// - Field index constants
 /// - State trait implementation
-#[proc_macro_derive(State, attributes(reducer, state_version, migrate_from))]
+#[proc_macro_derive(State, attributes(reducer, state_version, migrate_from, subset_of))]
 pub fn derive_state(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     state_derive::derive_state_impl(input)
 }
 
-// Rust guideline compliant 2025-01-18
+// Rust guideline compliant 2026-05-21

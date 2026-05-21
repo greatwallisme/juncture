@@ -27,6 +27,7 @@ pub(crate) enum ErrorKind {
     },
     TaskPanicked(String),
     NodeTimeout(NodeTimeoutError),
+    ParentCommand(String),
 }
 
 /// Error code categorizing the error type
@@ -87,6 +88,8 @@ pub enum ErrorCode {
     Llm,
     /// Node timeout error
     NodeTimeout,
+    /// Subgraph-to-parent routing command
+    ParentCommand,
 }
 
 /// Invalid update error variants
@@ -290,6 +293,7 @@ impl JunctureError {
             ErrorKind::MultipleWriters { .. } => ErrorCode::MultipleWriters,
             ErrorKind::TaskPanicked(_) => ErrorCode::TaskPanicked,
             ErrorKind::NodeTimeout(_) => ErrorCode::NodeTimeout,
+            ErrorKind::ParentCommand(_) => ErrorCode::ParentCommand,
         }
     }
 
@@ -414,6 +418,45 @@ impl JunctureError {
         matches!(self.kind, ErrorKind::NodeTimeout(_))
     }
 
+    /// Subgraph-to-parent routing command
+    ///
+    /// Used by nodes inside a subgraph to request routing to a specific node
+    /// in the parent graph. The subgraph node returns this error as an
+    /// exception mechanism, which the `SubgraphNode` wrapper catches and
+    /// converts to a `Command::goto(target)`.
+    ///
+    /// # Arguments
+    ///
+    /// * `target` - Name of the target node in the parent graph
+    pub fn parent_command(target: impl Into<String>) -> Self {
+        Self {
+            kind: ErrorKind::ParentCommand(target.into()),
+            backtrace: Backtrace::capture(),
+        }
+    }
+
+    /// Check if this is a parent command routing signal
+    ///
+    /// Returns `true` when a subgraph node has requested routing to
+    /// a node in the parent graph.
+    #[must_use]
+    pub const fn is_parent_command(&self) -> bool {
+        matches!(self.kind, ErrorKind::ParentCommand(_))
+    }
+
+    /// Get the target node name for a parent command
+    ///
+    /// Returns `Some(target)` when this is a parent command error,
+    /// containing the name of the target node in the parent graph.
+    /// Returns `None` for all other error types.
+    #[must_use]
+    pub fn parent_command_target(&self) -> Option<&str> {
+        match &self.kind {
+            ErrorKind::ParentCommand(target) => Some(target),
+            _ => None,
+        }
+    }
+
     /// Get the error code categorizing this error (alias for `code()`)
     ///
     /// This method is an alias for [`code()`](Self::code) and exists for
@@ -495,6 +538,9 @@ impl std::fmt::Display for JunctureError {
             }
             ErrorKind::TaskPanicked(msg) => write!(f, "Task panicked: {msg}"),
             ErrorKind::NodeTimeout(err) => write!(f, "Node timeout: {err}"),
+            ErrorKind::ParentCommand(target) => {
+                write!(f, "Parent command: route to '{target}'")
+            }
         }
     }
 }
@@ -547,6 +593,10 @@ mod tests {
             })
             .code(),
             ErrorCode::NodeTimeout
+        );
+        assert_eq!(
+            JunctureError::parent_command("publish").code(),
+            ErrorCode::ParentCommand
         );
     }
 
@@ -650,6 +700,46 @@ mod tests {
         assert!(JunctureError::multiple_writers(0, vec![]).is_multiple_writers());
         assert!(JunctureError::task_panicked("x").is_task_panicked());
     }
+
+    #[test]
+    fn parent_command_construct_and_check() {
+        let err = JunctureError::parent_command("publish");
+        assert!(err.is_parent_command());
+        assert!(!err.is_execution());
+        assert!(!err.is_interrupt());
+        assert_eq!(err.code(), ErrorCode::ParentCommand);
+        assert_eq!(
+            err.parent_command_target(),
+            Some("publish"),
+            "target should be the provided node name"
+        );
+    }
+
+    #[test]
+    fn parent_command_target_returns_none_for_other_errors() {
+        let err = JunctureError::execution("something");
+        assert_eq!(err.parent_command_target(), None);
+    }
+
+    #[test]
+    fn parent_command_display() {
+        let err = JunctureError::parent_command("review");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("review"),
+            "display should contain target node name: {msg}"
+        );
+        assert!(
+            msg.contains("Parent command"),
+            "display should identify as parent command: {msg}"
+        );
+    }
+
+    #[test]
+    fn parent_command_error_code_equality() {
+        assert_eq!(ErrorCode::ParentCommand, ErrorCode::ParentCommand);
+        assert_ne!(ErrorCode::ParentCommand, ErrorCode::Execution);
+    }
 }
 
-// Rust guideline compliant 2026-05-20
+// Rust guideline compliant 2026-05-21

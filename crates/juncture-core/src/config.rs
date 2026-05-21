@@ -10,7 +10,9 @@ use std::time::Duration;
 
 use crate::checkpoint::CheckpointSaver;
 use crate::interrupt::ResumeValue;
-use crate::observability::{CachePolicy as LlmCachePolicy, GraphLifecycleCallback, MetricsCollector};
+use crate::observability::{
+    CachePolicy as LlmCachePolicy, GraphLifecycleCallback, MetricsCollector,
+};
 use crate::pregel::BudgetConfig;
 use crate::pregel::Durability;
 use crate::runtime::RuntimeStore;
@@ -142,7 +144,10 @@ impl std::fmt::Debug for RunnableConfig {
                     .as_ref()
                     .map(|_| "<GraphLifecycleCallback>"),
             )
-            .field("llm_cache_policy", &self.llm_cache_policy.as_ref().map(|_| "<CachePolicy>"))
+            .field(
+                "llm_cache_policy",
+                &self.llm_cache_policy.as_ref().map(|_| "<CachePolicy>"),
+            )
             .finish()
     }
 }
