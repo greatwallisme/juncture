@@ -166,9 +166,10 @@ impl SqliteSaver {
         // Add pending_interrupts column for databases created before this field existed.
         // SQLite does not support IF NOT EXISTS for ALTER TABLE ADD COLUMN, so we
         // must catch and ignore the "duplicate column name" error.
-        let alter_result = sqlx::query("ALTER TABLE checkpoints ADD COLUMN pending_interrupts BLOB")
-            .execute(&pool)
-            .await;
+        let alter_result =
+            sqlx::query("ALTER TABLE checkpoints ADD COLUMN pending_interrupts BLOB")
+                .execute(&pool)
+                .await;
         match alter_result {
             Ok(_) => {}
             Err(e) if e.to_string().contains("duplicate column name") => {}
@@ -264,9 +265,10 @@ impl SqliteSaver {
         // Add pending_interrupts column for databases created before this field existed.
         // SQLite does not support IF NOT EXISTS for ALTER TABLE ADD COLUMN, so we
         // must catch and ignore the "duplicate column name" error.
-        let alter_result = sqlx::query("ALTER TABLE checkpoints ADD COLUMN pending_interrupts BLOB")
-            .execute(&pool)
-            .await;
+        let alter_result =
+            sqlx::query("ALTER TABLE checkpoints ADD COLUMN pending_interrupts BLOB")
+                .execute(&pool)
+                .await;
         match alter_result {
             Ok(_) => {}
             Err(e) if e.to_string().contains("duplicate column name") => {}
@@ -298,9 +300,12 @@ impl SqliteSaver {
             .ok_or_else(|| CheckpointError::Storage("thread_id is required".to_string()))
     }
 
-    /// Get checkpoint namespace from config, defaulting to empty string
+    /// Get checkpoint namespace string from config, defaulting to empty string
     fn get_checkpoint_ns(config: &RunnableConfig) -> String {
-        config.checkpoint_ns.as_deref().unwrap_or("").to_string()
+        config
+            .checkpoint_ns
+            .as_ref()
+            .map_or_else(String::new, juncture_core::CheckpointNamespace::as_str)
     }
 
     /// Deserialize checkpoint from database row fields

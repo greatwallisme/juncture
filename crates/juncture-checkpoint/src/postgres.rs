@@ -205,9 +205,12 @@ impl PostgresSaver {
             .ok_or_else(|| CheckpointError::Storage("thread_id is required".to_string()))
     }
 
-    /// Get checkpoint namespace from config, defaulting to empty string
+    /// Get checkpoint namespace string from config, defaulting to empty string
     fn get_checkpoint_ns(config: &RunnableConfig) -> String {
-        config.checkpoint_ns.as_deref().unwrap_or("").to_string()
+        config
+            .checkpoint_ns
+            .as_ref()
+            .map_or_else(String::new, juncture_core::CheckpointNamespace::as_str)
     }
 
     /// Deserialize checkpoint from database row fields

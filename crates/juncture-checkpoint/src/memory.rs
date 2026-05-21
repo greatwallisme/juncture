@@ -77,10 +77,13 @@ impl MemorySaver {
         }
     }
 
-    /// Get checkpoint namespace from config, defaulting to empty string
+    /// Get checkpoint namespace string from config, defaulting to empty string
     #[must_use]
     fn get_checkpoint_ns(config: &RunnableConfig) -> String {
-        config.checkpoint_ns.as_deref().unwrap_or("").to_string()
+        config
+            .checkpoint_ns
+            .as_ref()
+            .map_or_else(String::new, juncture_core::CheckpointNamespace::as_str)
     }
 
     /// Get thread ID from config, returning error if not set
@@ -475,10 +478,10 @@ mod tests {
 
         let config_ns1 = RunnableConfig::default()
             .with_thread_id("thread1")
-            .with_checkpoint_ns("ns1");
+            .with_checkpoint_ns(juncture_core::checkpoint::CheckpointNamespace::parse("ns1"));
         let config_ns2 = RunnableConfig::default()
             .with_thread_id("thread1")
-            .with_checkpoint_ns("ns2");
+            .with_checkpoint_ns(juncture_core::checkpoint::CheckpointNamespace::parse("ns2"));
 
         let checkpoint1 = create_test_checkpoint("cp1", 0);
         let checkpoint2 = create_test_checkpoint("cp2", 0);

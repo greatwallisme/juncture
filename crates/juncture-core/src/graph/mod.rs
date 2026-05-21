@@ -40,7 +40,7 @@ pub use builder::{
 };
 pub use compiled::{
     CompiledGraph, DrawableEdge, DrawableGraph, DrawableNode, GraphOutput, GraphOutputMetadata,
-    InterruptInfo, StateFilter, StateUpdate, SubgraphInfo,
+    InterruptInfo, StateFilter, StateUpdate, StreamHandle, SubgraphInfo,
 };
 pub use remote::RemoteGraph;
 pub use topology::TopologyError;

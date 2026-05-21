@@ -50,6 +50,66 @@ fn stream_capacity(mode: &StreamMode) -> usize {
     }
 }
 
+/// Result of a streaming graph execution.
+///
+/// Contains the run identifier for tracking and resumption, alongside the
+/// event stream produced by the Pregel engine. Callers use [`run_id`](StreamHandle::run_id)
+/// to correlate events with a specific invocation or to resume a stream that was
+/// interrupted.
+///
+/// # Examples
+///
+/// ```ignore
+/// use juncture_core::{StateGraph, State, StreamMode};
+/// use futures::StreamExt;
+///
+/// let handle = compiled.stream(initial_state, &config, StreamMode::Values).await?;
+/// println!("run_id = {}", handle.run_id());
+///
+/// let mut stream = handle.stream;
+/// while let Some(result) = stream.next().await {
+///     // process events
+/// }
+/// ```
+pub struct StreamHandle<S: State> {
+    /// Unique run identifier for this execution.
+    run_id: String,
+    /// Stream of graph execution events.
+    pub stream: Pin<Box<dyn Stream<Item = Result<StreamEvent<S>, JunctureError>> + Send>>,
+}
+
+impl<S: State> std::fmt::Debug for StreamHandle<S> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StreamHandle")
+            .field("run_id", &self.run_id)
+            .field("stream", &"<stream>")
+            .finish()
+    }
+}
+
+impl<S: State> StreamHandle<S> {
+    /// Returns the unique run identifier for this streaming execution.
+    #[must_use]
+    pub fn run_id(&self) -> &str {
+        &self.run_id
+    }
+
+    /// Consumes the handle, returning the run ID and stream as a tuple.
+    #[must_use]
+    #[allow(
+        clippy::type_complexity,
+        reason = "return type mirrors StreamHandle fields"
+    )]
+    pub fn into_parts(
+        self,
+    ) -> (
+        String,
+        Pin<Box<dyn Stream<Item = Result<StreamEvent<S>, JunctureError>> + Send>>,
+    ) {
+        (self.run_id, self.stream)
+    }
+}
+
 /// Compiled and validated graph ready for execution
 ///
 /// This is the output of [`StateGraph::compile`] and contains all information
@@ -264,7 +324,7 @@ impl<S: State> CompiledGraph<S> {
         })
     }
 
-    /// Stream graph execution as a sequence of events
+    /// Stream graph execution as a sequence of events.
     ///
     /// Executes the graph and emits [`StreamEvent`](crate::stream::StreamEvent)s
     /// as each superstep completes, enabling real-time monitoring of execution progress.
@@ -280,7 +340,8 @@ impl<S: State> CompiledGraph<S> {
     ///
     /// # Returns
     ///
-    /// A pinned stream of results, where each result is either a `StreamEvent` or a `JunctureError`.
+    /// A [`StreamHandle`] containing the `run_id` and a pinned stream of results,
+    /// where each result is either a `StreamEvent` or a `JunctureError`.
     ///
     /// # Errors
     ///
@@ -293,7 +354,10 @@ impl<S: State> CompiledGraph<S> {
     /// use juncture_core::{StateGraph, State, StreamMode};
     /// use futures::StreamExt;
     ///
-    /// let mut stream = compiled.stream(initial_state, &config, StreamMode::Values).await?;
+    /// let handle = compiled.stream(initial_state, &config, StreamMode::Values).await?;
+    /// println!("run_id = {}", handle.run_id());
+    ///
+    /// let mut stream = handle.stream;
     /// while let Some(result) = stream.next().await {
     ///     match result? {
     ///         StreamEvent::Values { state, step } => {
@@ -312,10 +376,7 @@ impl<S: State> CompiledGraph<S> {
         input: S,
         config: &RunnableConfig,
         mode: StreamMode,
-    ) -> Result<
-        Pin<Box<dyn Stream<Item = Result<StreamEvent<S>, JunctureError>> + Send>>,
-        JunctureError,
-    >
+    ) -> Result<StreamHandle<S>, JunctureError>
     where
         S: Clone + Send + serde::Serialize + 'static,
         S::Update: serde::Serialize,
@@ -343,8 +404,8 @@ impl<S: State> CompiledGraph<S> {
     ///
     /// # Returns
     ///
-    /// A pinned stream of results, where each result is either a
-    /// [`StreamEvent`] or a [`JunctureError`].
+    /// A [`StreamHandle`] containing the `run_id` and a pinned stream of
+    /// results, where each result is either a [`StreamEvent`] or a [`JunctureError`].
     ///
     /// # Errors
     ///
@@ -360,7 +421,10 @@ impl<S: State> CompiledGraph<S> {
     /// let cfg = StreamConfig::new(StreamMode::Values)
     ///     .with_output_keys(vec!["messages".to_string()]);
     ///
-    /// let mut stream = compiled.stream_with_config(initial_state, &config, cfg).await?;
+    /// let handle = compiled.stream_with_config(initial_state, &config, cfg).await?;
+    /// println!("run_id = {}", handle.run_id());
+    ///
+    /// let mut stream = handle.stream;
     /// while let Some(result) = stream.next().await {
     ///     match result? {
     ///         StreamEvent::FilteredValues { data, step } => {
@@ -390,10 +454,7 @@ impl<S: State> CompiledGraph<S> {
         input: S,
         config: &RunnableConfig,
         stream_config: crate::stream::StreamConfig,
-    ) -> Result<
-        Pin<Box<dyn Stream<Item = Result<StreamEvent<S>, JunctureError>> + Send>>,
-        JunctureError,
-    >
+    ) -> Result<StreamHandle<S>, JunctureError>
     where
         S: Clone + Send + serde::Serialize + 'static,
         S::Update: serde::Serialize,
@@ -425,6 +486,9 @@ impl<S: State> CompiledGraph<S> {
             num_fields,
             error_handler_map,
         )?;
+
+        // Extract run_id before moving pregel into the spawned task
+        let run_id = pregel.run_id().to_string();
 
         // Create a separate channel for PregelLoop's internal stream events.
         // Unbounded is acceptable here because this is an internal relay between
@@ -572,9 +636,12 @@ impl<S: State> CompiledGraph<S> {
         });
 
         // Return stream using futures::stream::unfold to convert Receiver to Stream
-        Ok(Box::pin(stream::unfold(rx, |mut rx| async move {
-            rx.recv().await.map(|item| (item, rx))
-        })))
+        Ok(StreamHandle {
+            run_id,
+            stream: Box::pin(stream::unfold(rx, |mut rx| async move {
+                rx.recv().await.map(|item| (item, rx))
+            })),
+        })
     }
 
     /// Execute the graph with an externally-provided event emitter
@@ -862,7 +929,7 @@ impl<S: State> CompiledGraph<S> {
         self.resume(config, ResumeValue::Single(value)).await
     }
 
-    /// Resume execution from an interrupt checkpoint with streaming events
+    /// Resume execution from an interrupt checkpoint with streaming events.
     ///
     /// Like [`resume`](Self::resume) but returns a stream of events
     /// for monitoring execution progress in real time. Loads the checkpoint
@@ -880,7 +947,8 @@ impl<S: State> CompiledGraph<S> {
     ///
     /// # Returns
     ///
-    /// A pinned stream of results, where each result is either a
+    /// A [`StreamHandle`] containing the `run_id` and a pinned stream of
+    /// results, where each result is either a
     /// [`StreamEvent`](crate::stream::StreamEvent) or a [`JunctureError`].
     ///
     /// # Errors
@@ -896,12 +964,14 @@ impl<S: State> CompiledGraph<S> {
     /// use futures::StreamExt;
     /// use serde_json::json;
     ///
-    /// let mut stream = compiled.resume_stream(
+    /// let handle = compiled.resume_stream(
     ///     &config,
     ///     ResumeValue::Single(json!("approved")),
     ///     StreamMode::Values,
     /// ).await?;
+    /// println!("run_id = {}", handle.run_id());
     ///
+    /// let mut stream = handle.stream;
     /// while let Some(result) = stream.next().await {
     ///     match result? {
     ///         StreamEvent::Values { state, step } => {
@@ -920,10 +990,7 @@ impl<S: State> CompiledGraph<S> {
         config: &RunnableConfig,
         resume_value: ResumeValue,
         mode: StreamMode,
-    ) -> Result<
-        Pin<Box<dyn Stream<Item = Result<StreamEvent<S>, JunctureError>> + Send>>,
-        JunctureError,
-    >
+    ) -> Result<StreamHandle<S>, JunctureError>
     where
         S: Clone + Send + for<'de> serde::Deserialize<'de> + serde::Serialize + 'static,
         S::Update: serde::Serialize,
@@ -981,6 +1048,34 @@ impl<S: State> CompiledGraph<S> {
             pregel.set_checkpointer(cp);
         }
 
+        // Extract run_id before moving pregel into the spawned task
+        let run_id = pregel.run_id().to_string();
+
+        let (_handle, rx) = Self::spawn_streaming_loop(pregel, mode);
+
+        // Return stream using futures::stream::unfold to convert Receiver to Stream
+        Ok(StreamHandle {
+            run_id,
+            stream: Box::pin(stream::unfold(rx, |mut receiver| async move {
+                receiver.recv().await.map(|item| (item, receiver))
+            })),
+        })
+    }
+
+    /// Spawn the Pregel execution loop and event forwarding tasks for streaming.
+    ///
+    /// Returns the spawned task handle and the receiver end of the event channel.
+    fn spawn_streaming_loop(
+        mut pregel: PregelLoop<S>,
+        mode: StreamMode,
+    ) -> (
+        tokio::task::JoinHandle<()>,
+        mpsc::Receiver<Result<StreamEvent<S>, JunctureError>>,
+    )
+    where
+        S: Clone + Send + for<'de> serde::Deserialize<'de> + serde::Serialize + 'static,
+        S::Update: serde::Serialize,
+    {
         // Sized channel provides backpressure: 256 for Messages mode (high-throughput
         // LLM token chunks), 32 for all other modes. Per design doc 05-streaming 7.3.
         let capacity = stream_capacity(&mode);
@@ -993,8 +1088,7 @@ impl<S: State> CompiledGraph<S> {
         let (pregel_tx, mut pregel_rx) = mpsc::unbounded_channel();
         pregel.set_stream_sender(pregel_tx);
 
-        // Spawn graph execution in background task
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             // Task to forward PregelLoop events to the main stream
             let tx_forward = tx.clone();
             let mode_forward = mode.clone();
@@ -1027,7 +1121,6 @@ impl<S: State> CompiledGraph<S> {
                 match pregel.execute_superstep().await {
                     Ok(result) => {
                         if let Err(e) = pregel.after_tick(result).await {
-                            // Emit final state before error
                             let _ = tx
                                 .send(Ok(StreamEvent::End {
                                     output: pregel.snapshot_state(),
@@ -1038,7 +1131,6 @@ impl<S: State> CompiledGraph<S> {
                         }
                     }
                     Err(e) => {
-                        // Emit final state before error
                         let _ = tx
                             .send(Ok(StreamEvent::End {
                                 output: pregel.snapshot_state(),
@@ -1059,10 +1151,7 @@ impl<S: State> CompiledGraph<S> {
                 .await;
         });
 
-        // Return stream using futures::stream::unfold to convert Receiver to Stream
-        Ok(Box::pin(stream::unfold(rx, |mut receiver| async move {
-            receiver.recv().await.map(|item| (item, receiver))
-        })))
+        (handle, rx)
     }
 
     /// Get the current state snapshot for a thread
@@ -2647,13 +2736,14 @@ mod tests {
         );
         let config = RunnableConfig::new();
 
-        let mut stream = compiled
+        let handle = compiled
             .stream(StateDummy, &config, StreamMode::Values)
             .await
             .expect("stream should succeed");
 
         // Collect events
         let mut events = Vec::new();
+        let mut stream = handle.stream;
         while let Some(result) = stream.next().await {
             events.push(result.expect("stream event should be Ok"));
         }
@@ -2697,13 +2787,14 @@ mod tests {
         );
         let config = RunnableConfig::new();
 
-        let mut stream = compiled
+        let handle = compiled
             .stream(StateDummy, &config, StreamMode::Updates)
             .await
             .expect("stream should succeed");
 
         // Collect events
         let mut events = Vec::new();
+        let mut stream = handle.stream;
         while let Some(result) = stream.next().await {
             events.push(result.expect("stream event should be Ok"));
         }
@@ -2747,13 +2838,14 @@ mod tests {
         );
         let config = RunnableConfig::new();
 
-        let mut stream = compiled
+        let handle = compiled
             .stream(StateDummy, &config, StreamMode::Debug)
             .await
             .expect("stream should succeed");
 
         // Collect events
         let mut events = Vec::new();
+        let mut stream = handle.stream;
         while let Some(result) = stream.next().await {
             events.push(result.expect("stream event should be Ok"));
         }
@@ -2797,13 +2889,14 @@ mod tests {
         );
         let config = RunnableConfig::new();
 
-        let mut stream = compiled
+        let handle = compiled
             .stream(StateDummy, &config, StreamMode::Values)
             .await
             .expect("stream should succeed");
 
         // Collect events
         let mut events = Vec::new();
+        let mut stream = handle.stream;
         while let Some(result) = stream.next().await {
             events.push(result.expect("stream event should be Ok"));
         }
@@ -3139,7 +3232,7 @@ mod tests {
 
         let stream_config = crate::stream::StreamConfig::new(StreamMode::Values);
 
-        let mut stream = compiled
+        let handle = compiled
             .stream_with_config(
                 MultiFieldState {
                     messages: vec![],
@@ -3153,6 +3246,7 @@ mod tests {
             .expect("stream_with_config should succeed");
 
         let mut events = Vec::new();
+        let mut stream = handle.stream;
         while let Some(result) = stream.next().await {
             events.push(result.expect("stream event should be Ok"));
         }
@@ -3174,7 +3268,7 @@ mod tests {
         let stream_config = crate::stream::StreamConfig::new(StreamMode::Values)
             .with_output_keys(vec!["messages".to_string()]);
 
-        let mut stream = compiled
+        let handle = compiled
             .stream_with_config(
                 MultiFieldState {
                     messages: vec![],
@@ -3188,6 +3282,7 @@ mod tests {
             .expect("stream_with_config should succeed");
 
         let mut events = Vec::new();
+        let mut stream = handle.stream;
         while let Some(result) = stream.next().await {
             events.push(result.expect("stream event should be Ok"));
         }
@@ -3235,7 +3330,7 @@ mod tests {
 
         // stream() with StreamMode should behave identically to
         // stream_with_config(StreamConfig::new(mode))
-        let mut stream = compiled
+        let handle = compiled
             .stream(
                 MultiFieldState {
                     messages: vec![],
@@ -3249,6 +3344,7 @@ mod tests {
             .expect("stream should succeed");
 
         let mut events = Vec::new();
+        let mut stream = handle.stream;
         while let Some(result) = stream.next().await {
             events.push(result.expect("stream event should be Ok"));
         }
@@ -3274,7 +3370,7 @@ mod tests {
         let stream_config = crate::stream::StreamConfig::new(StreamMode::Values)
             .with_output_keys(vec!["messages".to_string(), "count".to_string()]);
 
-        let mut stream = compiled
+        let handle = compiled
             .stream_with_config(
                 MultiFieldState {
                     messages: vec![],
@@ -3288,6 +3384,7 @@ mod tests {
             .expect("stream_with_config should succeed");
 
         let mut events = Vec::new();
+        let mut stream = handle.stream;
         while let Some(result) = stream.next().await {
             events.push(result.expect("stream event should be Ok"));
         }
@@ -3328,7 +3425,7 @@ mod tests {
         let stream_config = crate::stream::StreamConfig::new(StreamMode::Updates)
             .with_output_keys(vec!["messages".to_string()]);
 
-        let mut stream = compiled
+        let handle = compiled
             .stream_with_config(
                 MultiFieldState {
                     messages: vec![],
@@ -3342,6 +3439,7 @@ mod tests {
             .expect("stream_with_config should succeed");
 
         let mut events = Vec::new();
+        let mut stream = handle.stream;
         while let Some(result) = stream.next().await {
             events.push(result.expect("stream event should be Ok"));
         }
@@ -3706,7 +3804,7 @@ mod tests {
         let config = RunnableConfig::new();
         let stream_config = crate::stream::StreamConfig::new(StreamMode::Values);
 
-        let mut stream = compiled
+        let handle = compiled
             .stream_with_config(
                 MultiFieldState {
                     messages: vec![],
@@ -3720,6 +3818,7 @@ mod tests {
             .expect("stream_with_config should succeed");
 
         let mut events = Vec::new();
+        let mut stream = handle.stream;
         while let Some(result) = stream.next().await {
             events.push(result.expect("stream event should be Ok"));
         }
@@ -3800,7 +3899,7 @@ mod tests {
         let stream_config =
             crate::stream::StreamConfig::new(StreamMode::Values).with_resumption(resumption);
 
-        let mut stream = compiled
+        let handle = compiled
             .stream_with_config(
                 MultiFieldState {
                     messages: vec![],
@@ -3814,6 +3913,7 @@ mod tests {
             .expect("stream_with_config should succeed");
 
         let mut events = Vec::new();
+        let mut stream = handle.stream;
         while let Some(result) = stream.next().await {
             events.push(result.expect("stream event should be Ok"));
         }
@@ -3849,7 +3949,7 @@ mod tests {
         let stream_config =
             crate::stream::StreamConfig::new(StreamMode::Values).with_resumption(resumption);
 
-        let mut stream = compiled
+        let handle = compiled
             .stream_with_config(
                 MultiFieldState {
                     messages: vec![],
@@ -3863,6 +3963,7 @@ mod tests {
             .expect("stream_with_config should succeed");
 
         let mut events = Vec::new();
+        let mut stream = handle.stream;
         while let Some(result) = stream.next().await {
             events.push(result.expect("stream event should be Ok"));
         }
@@ -3901,7 +4002,7 @@ mod tests {
         let stream_config =
             crate::stream::StreamConfig::new(StreamMode::Values).with_resumption(resumption);
 
-        let mut stream = compiled
+        let handle = compiled
             .stream_with_config(
                 MultiFieldState {
                     messages: vec![],
@@ -3915,6 +4016,7 @@ mod tests {
             .expect("stream_with_config should succeed");
 
         let mut events = Vec::new();
+        let mut stream = handle.stream;
         while let Some(result) = stream.next().await {
             events.push(result.expect("stream event should be Ok"));
         }
@@ -3944,7 +4046,7 @@ mod tests {
         let stream_config =
             crate::stream::StreamConfig::new(StreamMode::Updates).with_resumption(resumption);
 
-        let mut stream = compiled
+        let handle = compiled
             .stream_with_config(
                 MultiFieldState {
                     messages: vec![],
@@ -3958,6 +4060,7 @@ mod tests {
             .expect("stream_with_config should succeed");
 
         let mut events = Vec::new();
+        let mut stream = handle.stream;
         while let Some(result) = stream.next().await {
             events.push(result.expect("stream event should be Ok"));
         }
@@ -3993,7 +4096,7 @@ mod tests {
         // No resumption set (default StreamConfig)
         let stream_config = crate::stream::StreamConfig::new(StreamMode::Values);
 
-        let mut stream = compiled
+        let handle = compiled
             .stream_with_config(
                 MultiFieldState {
                     messages: vec![],
@@ -4007,6 +4110,7 @@ mod tests {
             .expect("stream_with_config should succeed");
 
         let mut events = Vec::new();
+        let mut stream = handle.stream;
         while let Some(result) = stream.next().await {
             events.push(result.expect("stream event should be Ok"));
         }

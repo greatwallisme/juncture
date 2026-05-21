@@ -211,7 +211,7 @@ pub use error::{ErrorCode, InvalidUpdateError, JunctureError, NodeTimeoutError};
 pub use graph::{
     CompiledGraph, DrawableEdge, DrawableGraph, DrawableNode, ErrorHandlerNode, GraphOutput,
     GraphOutputMetadata, InterruptInfo, NodeMetadata, RemoteGraph, RetryPolicy, RetryingNode,
-    StateFilter, StateGraph, StateUpdate, SubgraphInfo, TopologyError,
+    StateFilter, StateGraph, StateUpdate, StreamHandle, SubgraphInfo, TopologyError,
 };
 pub use interrupt::{
     HIDDEN_TAG, InterruptContext, InterruptSignal, ResumeValue, Scratchpad, generate_interrupt_id,

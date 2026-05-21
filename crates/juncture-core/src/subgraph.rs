@@ -4,7 +4,7 @@
 //! Subgraphs enable modular composition and reusable graph components.
 
 use crate::{
-    State, checkpoint::CHECKPOINT_NS_SEPARATOR, command::Command, config::RunnableConfig,
+    State, checkpoint::CheckpointNamespace, command::Command, config::RunnableConfig,
     error::JunctureError, node::Node,
 };
 use std::sync::Arc;
@@ -17,24 +17,20 @@ use std::sync::Arc;
 fn compute_child_namespace(
     persistence: SubgraphPersistence,
     name: &str,
-    parent_ns: Option<&str>,
+    parent_ns: Option<&CheckpointNamespace>,
     thread_id: Option<&str>,
-) -> Option<String> {
+) -> Option<CheckpointNamespace> {
     match persistence {
         SubgraphPersistence::Stateless => None,
         SubgraphPersistence::PerThread => {
             let thread_key = thread_id.unwrap_or("default");
-            Some(parent_ns.map_or_else(
-                || format!("{CHECKPOINT_NS_SEPARATOR}{name}:{thread_key}"),
-                |ns| format!("{ns}{CHECKPOINT_NS_SEPARATOR}{name}:{thread_key}"),
-            ))
+            let base = parent_ns.cloned().unwrap_or_default();
+            Some(base.child(name, thread_key))
         }
         SubgraphPersistence::Inherit => {
             let invocation_id = uuid::Uuid::new_v4().to_string();
-            Some(parent_ns.map_or_else(
-                || format!("{CHECKPOINT_NS_SEPARATOR}{name}:{invocation_id}"),
-                |ns| format!("{ns}{CHECKPOINT_NS_SEPARATOR}{name}:{invocation_id}"),
-            ))
+            let base = parent_ns.cloned().unwrap_or_default();
+            Some(base.child(name, &invocation_id))
         }
     }
 }
@@ -310,7 +306,7 @@ where
             let child_ns = compute_child_namespace(
                 persistence,
                 &name,
-                config.checkpoint_ns.as_deref(),
+                config.checkpoint_ns.as_ref(),
                 config.thread_id.as_deref(),
             );
 
@@ -506,10 +502,11 @@ mod tests {
 
     #[test]
     fn test_stateless_namespace_is_none_even_with_parent_ns() {
+        let parent = CheckpointNamespace::parse("|parent:abc");
         let ns = compute_child_namespace(
             SubgraphPersistence::Stateless,
             "my_sub",
-            Some("|parent:abc"),
+            Some(&parent),
             Some("thread-42"),
         );
         assert_eq!(ns, None);
@@ -524,26 +521,27 @@ mod tests {
             Some("thread-42"),
         );
         let ns = ns.expect("PerThread should produce a namespace");
-        assert_eq!(ns, "|my_sub:thread-42");
+        assert_eq!(ns.as_str(), "|my_sub:thread-42");
     }
 
     #[test]
     fn test_perthread_namespace_appends_to_parent_ns() {
+        let parent = CheckpointNamespace::parse("|parent:abc");
         let ns = compute_child_namespace(
             SubgraphPersistence::PerThread,
             "my_sub",
-            Some("|parent:abc"),
+            Some(&parent),
             Some("thread-42"),
         );
         let ns = ns.expect("PerThread should produce a namespace");
-        assert_eq!(ns, "|parent:abc|my_sub:thread-42");
+        assert_eq!(ns.as_str(), "|parent:abc|my_sub:thread-42");
     }
 
     #[test]
     fn test_perthread_namespace_falls_back_to_default() {
         let ns = compute_child_namespace(SubgraphPersistence::PerThread, "my_sub", None, None);
         let ns = ns.expect("PerThread should produce a namespace");
-        assert_eq!(ns, "|my_sub:default");
+        assert_eq!(ns.as_str(), "|my_sub:default");
     }
 
     #[test]
@@ -563,9 +561,10 @@ mod tests {
             Some("thread-42"),
         );
         let ns = ns.expect("Inherit should produce a namespace");
-        assert!(ns.starts_with("|my_sub:"));
+        let rendered = ns.as_str();
+        assert!(rendered.starts_with("|my_sub:"));
         // The suffix after "|my_sub:" must be a valid UUID
-        let uuid_part = ns.strip_prefix("|my_sub:").expect("prefix present");
+        let uuid_part = rendered.strip_prefix("|my_sub:").expect("prefix present");
         assert!(
             uuid::Uuid::parse_str(uuid_part).is_ok(),
             "suffix should be a valid UUID, got: {uuid_part}"
@@ -574,15 +573,17 @@ mod tests {
 
     #[test]
     fn test_inherit_namespace_appends_to_parent_ns() {
+        let parent = CheckpointNamespace::parse("|parent:abc");
         let ns = compute_child_namespace(
             SubgraphPersistence::Inherit,
             "my_sub",
-            Some("|parent:abc"),
+            Some(&parent),
             Some("thread-42"),
         );
         let ns = ns.expect("Inherit should produce a namespace");
-        assert!(ns.starts_with("|parent:abc|my_sub:"));
-        let uuid_part = ns
+        let rendered = ns.as_str();
+        assert!(rendered.starts_with("|parent:abc|my_sub:"));
+        let uuid_part = rendered
             .strip_prefix("|parent:abc|my_sub:")
             .expect("prefix present");
         assert!(
@@ -606,7 +607,7 @@ mod tests {
         // the same subgraph node. Each must get a distinct checkpoint namespace
         // so that concurrent subgraph executions do not collide.
         let count = 10;
-        let namespaces: Vec<Option<String>> = (0..count)
+        let namespaces: Vec<Option<CheckpointNamespace>> = (0..count)
             .map(|_| {
                 compute_child_namespace(SubgraphPersistence::Inherit, "worker", None, Some("t1"))
             })
@@ -619,9 +620,12 @@ mod tests {
         );
 
         // All namespaces must be unique (UUID guarantees this)
-        let unique: std::collections::HashSet<&str> = namespaces
+        let unique: std::collections::HashSet<String> = namespaces
             .iter()
-            .map(|ns| ns.as_deref().unwrap_or(""))
+            .map(|ns| {
+                ns.as_ref()
+                    .map_or_else(String::new, CheckpointNamespace::as_str)
+            })
             .collect();
         assert_eq!(
             unique.len(),
@@ -631,12 +635,14 @@ mod tests {
 
         // Each namespace must follow the |name:uuid format
         for ns in &namespaces {
-            let ns = ns.as_deref().unwrap_or("");
+            let rendered = ns
+                .as_ref()
+                .map_or_else(String::new, CheckpointNamespace::as_str);
             assert!(
-                ns.starts_with("|worker:"),
-                "namespace should start with '|worker:', got: {ns}"
+                rendered.starts_with("|worker:"),
+                "namespace should start with '|worker:', got: {rendered}"
             );
-            let uuid_part = ns.strip_prefix("|worker:").unwrap_or("");
+            let uuid_part = rendered.strip_prefix("|worker:").unwrap_or("");
             assert!(
                 uuid::Uuid::parse_str(uuid_part).is_ok(),
                 "suffix must be a valid UUID, got: {uuid_part}"
@@ -1042,18 +1048,19 @@ mod tests {
     #[test]
     fn nested_compute_child_namespace_chains_correctly() {
         // Start with a parent namespace that already has two segments
-        let parent = "|review:uuid-1|detail:uuid-2";
+        let parent = CheckpointNamespace::parse("|review:uuid-1|detail:uuid-2");
 
         // Inherit mode: appends a fresh UUID-based child segment
         let child_inherit = compute_child_namespace(
             SubgraphPersistence::Inherit,
             "sub",
-            Some(parent),
+            Some(&parent),
             Some("thread-1"),
         );
         let child_inherit = child_inherit.expect("Inherit should produce a namespace");
-        assert!(child_inherit.starts_with("|review:uuid-1|detail:uuid-2|sub:"));
-        let uuid_part = child_inherit
+        let rendered = child_inherit.as_str();
+        assert!(rendered.starts_with("|review:uuid-1|detail:uuid-2|sub:"));
+        let uuid_part = rendered
             .strip_prefix("|review:uuid-1|detail:uuid-2|sub:")
             .expect("prefix present");
         assert!(
@@ -1065,12 +1072,12 @@ mod tests {
         let child_perthread = compute_child_namespace(
             SubgraphPersistence::PerThread,
             "sub",
-            Some(parent),
+            Some(&parent),
             Some("thread-42"),
         );
         let child_perthread = child_perthread.expect("PerThread should produce a namespace");
         assert_eq!(
-            child_perthread,
+            child_perthread.as_str(),
             "|review:uuid-1|detail:uuid-2|sub:thread-42"
         );
 
@@ -1078,7 +1085,7 @@ mod tests {
         let child_stateless = compute_child_namespace(
             SubgraphPersistence::Stateless,
             "sub",
-            Some(parent),
+            Some(&parent),
             Some("thread-1"),
         );
         assert_eq!(child_stateless, None);

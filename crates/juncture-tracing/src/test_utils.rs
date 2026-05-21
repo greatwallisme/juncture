@@ -31,7 +31,10 @@ pub struct TestMetricsCollector {
     histogram_values: Arc<Mutex<HashMap<String, Vec<f64>>>>,
     gauge_values: Arc<Mutex<HashMap<String, f64>>>,
     /// Labeled counters: `metric_name` -> (sorted labels -> value)
-    #[allow(clippy::type_complexity, reason = "labeled metric storage requires nested HashMap")]
+    #[allow(
+        clippy::type_complexity,
+        reason = "labeled metric storage requires nested HashMap"
+    )]
     labeled_counters: Arc<Mutex<HashMap<String, HashMap<Vec<(String, String)>, u64>>>>,
 }
 
@@ -375,7 +378,12 @@ impl TestMetricsCollector {
         clippy::significant_drop_tightening,
         reason = "MutexGuard is needed for entry API; tightening would complicate the code"
     )]
-    pub fn increment_counter_with_labels(&self, name: &str, value: u64, labels: &[(impl ToString, impl ToString)]) {
+    pub fn increment_counter_with_labels(
+        &self,
+        name: &str,
+        value: u64,
+        labels: &[(impl ToString, impl ToString)],
+    ) {
         let key = labels_to_key(labels);
         let mut labeled = self.labeled_counters.lock().unwrap();
         let entry = labeled
@@ -394,7 +402,11 @@ impl TestMetricsCollector {
     ///
     /// Panics if the internal mutex is poisoned (should not happen in normal usage).
     #[must_use]
-    pub fn get_counter_with_labels(&self, name: &str, labels: &[(impl ToString, impl ToString)]) -> u64 {
+    pub fn get_counter_with_labels(
+        &self,
+        name: &str,
+        labels: &[(impl ToString, impl ToString)],
+    ) -> u64 {
         let key = labels_to_key(labels);
         let labeled = self.labeled_counters.lock().unwrap();
         labeled
@@ -541,9 +553,18 @@ mod tests {
         metrics.increment_counter_with_labels("juncture.llm.calls", 1, &[("model", "gpt-4")]);
         metrics.increment_counter_with_labels("juncture.llm.calls", 1, &[("model", "claude")]);
 
-        assert_eq!(metrics.get_counter_with_labels("juncture.llm.calls", &[("model", "gpt-4")]), 2);
-        assert_eq!(metrics.get_counter_with_labels("juncture.llm.calls", &[("model", "claude")]), 1);
-        assert_eq!(metrics.get_counter_with_labels("juncture.llm.calls", &[("model", "llama")]), 0);
+        assert_eq!(
+            metrics.get_counter_with_labels("juncture.llm.calls", &[("model", "gpt-4")]),
+            2
+        );
+        assert_eq!(
+            metrics.get_counter_with_labels("juncture.llm.calls", &[("model", "claude")]),
+            1
+        );
+        assert_eq!(
+            metrics.get_counter_with_labels("juncture.llm.calls", &[("model", "llama")]),
+            0
+        );
     }
 
     #[test]
@@ -551,7 +572,10 @@ mod tests {
         let metrics = TestMetricsCollector::new();
 
         metrics.increment_counter_with_labels("test", 1, &[("b", "2"), ("a", "1")]);
-        assert_eq!(metrics.get_counter_with_labels("test", &[("a", "1"), ("b", "2")]), 1);
+        assert_eq!(
+            metrics.get_counter_with_labels("test", &[("a", "1"), ("b", "2")]),
+            1
+        );
     }
 }
 

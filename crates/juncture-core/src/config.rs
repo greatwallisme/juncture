@@ -47,7 +47,7 @@ pub struct RunnableConfig {
     pub run_id: Option<String>,
 
     /// Checkpoint namespace (for subgraph isolation)
-    pub checkpoint_ns: Option<String>,
+    pub checkpoint_ns: Option<crate::checkpoint::CheckpointNamespace>,
 
     /// Cache configuration
     pub cache: Option<CacheConfig>,
@@ -207,8 +207,8 @@ impl RunnableConfig {
 
     /// Set the checkpoint namespace for subgraph isolation
     #[must_use]
-    pub fn with_checkpoint_ns(mut self, ns: impl Into<String>) -> Self {
-        self.checkpoint_ns = Some(ns.into());
+    pub fn with_checkpoint_ns(mut self, ns: crate::checkpoint::CheckpointNamespace) -> Self {
+        self.checkpoint_ns = Some(ns);
         self
     }
 
