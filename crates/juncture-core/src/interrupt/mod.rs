@@ -122,7 +122,7 @@ pub fn generate_interrupt_id(node_name: &str, index: usize) -> String {
 ///
 /// Two-step check:
 /// 1. **Version gating**: Only fire if any channel was updated since the last
-///    interrupt (comparing `channel_versions` against `versions_seen`).
+///    interrupt (comparing `channel_versions` against `versions_seen_for_interrupt`).
 /// 2. **Node name check**: Verify that a pending task targets a node listed
 ///    in `interrupt_before` or `interrupt_after`.
 ///
@@ -135,7 +135,8 @@ pub fn generate_interrupt_id(node_name: &str, index: usize) -> String {
 /// * `interrupt_before` - Nodes that should interrupt before execution
 /// * `interrupt_after` - Nodes that should interrupt after execution
 /// * `channel_versions` - Current field version map (channel -> version)
-/// * `versions_seen` - Last-seen versions at the time of the previous interrupt
+/// * `versions_seen_for_interrupt` - Last-seen channel versions at the time of
+///   the previous interrupt (flat map: channel -> single version)
 ///
 /// # Returns
 ///
@@ -150,17 +151,14 @@ pub fn should_interrupt<S: crate::State>(
     interrupt_before: &HashSet<String>,
     interrupt_after: &HashSet<String>,
     channel_versions: &HashMap<String, u64>,
-    versions_seen: &HashMap<String, Vec<u64>>,
+    versions_seen_for_interrupt: &HashMap<String, u64>,
 ) -> Option<Vec<InterruptSignal>> {
     // Step 1: Version gate -- skip interrupt if no channels updated since last
-    let any_updates = channel_versions.iter().any(|(chan, ver)| {
-        let max_seen: u64 = versions_seen
-            .get(chan)
-            .map_or(0, |vers| vers.iter().copied().max().unwrap_or(0));
-        ver > &max_seen
-    });
+    let any_updates = channel_versions
+        .iter()
+        .any(|(chan, ver)| ver > versions_seen_for_interrupt.get(chan).unwrap_or(&0));
 
-    if !any_updates && !versions_seen.is_empty() {
+    if !any_updates && !versions_seen_for_interrupt.is_empty() {
         return None;
     }
 

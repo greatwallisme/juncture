@@ -171,6 +171,11 @@ pub struct PregelLoop<S: State> {
     /// Scratchpad for tracking processed interrupts and transient data
     scratchpad: crate::interrupt::Scratchpad,
 
+    /// Channel versions snapshot at the time of the last interrupt.
+    /// Used by `should_interrupt` to prevent infinite interrupt loops when no
+    /// state actually changed between interrupts.
+    interrupt_versions_seen: HashMap<String, u64>,
+
     /// Superstep start time for duration tracking
     ///
     /// Set at the beginning of [`execute_superstep`], read in [`after_tick`].
@@ -198,6 +203,7 @@ impl<S: State> std::fmt::Debug for PregelLoop<S> {
             .field("interrupt_rx", &self.interrupt_rx.is_some())
             .field("pending_interrupts", &self.pending_interrupts.len())
             .field("scratchpad", &self.scratchpad)
+            .field("interrupt_versions_seen", &self.interrupt_versions_seen)
             .field("superstep_start", &self.superstep_start.is_some())
             .finish()
     }
@@ -269,6 +275,7 @@ impl<S: State> PregelLoop<S> {
             interrupt_rx: None,
             pending_interrupts: Vec::new(),
             scratchpad: crate::interrupt::Scratchpad::new(),
+            interrupt_versions_seen: HashMap::new(),
             superstep_start: None,
         })
     }
@@ -413,23 +420,14 @@ impl<S: State> PregelLoop<S> {
                 .map(|(idx, ver)| (format!("field_{idx}"), *ver))
                 .collect();
 
-            // Build versions_seen map for should_interrupt
-            let versions_seen_map: HashMap<String, Vec<u64>> = self
-                .nodes
-                .keys()
-                .map(|node_name| {
-                    let versions = self.versions_seen.get_versions(node_name);
-                    (node_name.clone(), versions.to_vec())
-                })
-                .collect();
-
             if let Some(signals) = should_interrupt(
                 &self.pending_tasks,
                 &interrupt_before_set,
                 &HashSet::new(), // interrupt_after not checked here
                 &channel_versions,
-                &versions_seen_map,
+                &self.interrupt_versions_seen,
             ) {
+                self.interrupt_versions_seen = channel_versions;
                 self.pending_interrupts.clone_from(&signals);
                 self.status = LoopStatus::InterruptBefore(signals);
                 return Ok(false);
@@ -718,23 +716,14 @@ impl<S: State> PregelLoop<S> {
                 .map(|(idx, ver)| (format!("field_{idx}"), *ver))
                 .collect();
 
-            // Build versions_seen map for should_interrupt
-            let versions_seen_map: HashMap<String, Vec<u64>> = self
-                .nodes
-                .keys()
-                .map(|node_name| {
-                    let versions = self.versions_seen.get_versions(node_name);
-                    (node_name.clone(), versions.to_vec())
-                })
-                .collect();
-
             if let Some(signals) = should_interrupt(
                 &self.pending_tasks,
                 &HashSet::new(), // interrupt_before not checked here
                 &interrupt_after_set,
                 &channel_versions,
-                &versions_seen_map,
+                &self.interrupt_versions_seen,
             ) {
+                self.interrupt_versions_seen = channel_versions;
                 self.pending_interrupts.clone_from(&signals);
                 self.status = LoopStatus::InterruptAfter(signals.clone());
 
