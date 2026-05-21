@@ -30,6 +30,14 @@ pub enum DebugEvent {
         pending_nodes: Vec<String>,
     },
 
+    /// A superstep has completed
+    SuperstepEnd {
+        /// Step number
+        step: usize,
+        /// Superstep execution duration in milliseconds
+        duration_ms: u64,
+    },
+
     /// A node has started execution
     NodeStart {
         /// Node name
@@ -235,6 +243,24 @@ impl DebugEvent {
     #[must_use]
     pub const fn is_superstep_start(&self) -> bool {
         matches!(self, Self::SuperstepStart { .. })
+    }
+
+    /// Check if this event is a superstep end event
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use juncture_tracing::debug::DebugEvent;
+    ///
+    /// let event = DebugEvent::SuperstepEnd {
+    ///     step: 0,
+    ///     duration_ms: 42,
+    /// };
+    /// assert!(event.is_superstep_end());
+    /// ```
+    #[must_use]
+    pub const fn is_superstep_end(&self) -> bool {
+        matches!(self, Self::SuperstepEnd { .. })
     }
 
     /// Check if this event is a checkpoint saved event
