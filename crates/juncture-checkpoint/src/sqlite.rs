@@ -332,6 +332,108 @@ impl SqliteSaver {
         })
     }
 
+    /// Deserialize a single database row into a `CheckpointTuple`
+    ///
+    /// Extracts raw bytes from each column, deserializes checkpoint and metadata,
+    /// and assembles a complete `CheckpointTuple` without pending writes.
+    fn row_to_tuple(
+        row: &sqlx::sqlite::SqliteRow,
+        config: &RunnableConfig,
+    ) -> Result<CheckpointTuple, CoreCheckpointError> {
+        let channel_values_bytes: Vec<u8> = row
+            .try_get("channel_values")
+            .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
+        let channel_versions_bytes: Vec<u8> = row
+            .try_get("channel_versions")
+            .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
+        let versions_seen_bytes: Vec<u8> = row
+            .try_get("versions_seen")
+            .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
+        let pending_tasks_bytes: Option<Vec<u8>> = row
+            .try_get("pending_tasks")
+            .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
+        let pending_sends_bytes: Option<Vec<u8>> = row
+            .try_get("pending_sends")
+            .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
+        let schema_version: i64 = row
+            .try_get("schema_version")
+            .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
+        let metadata_bytes: Vec<u8> = row
+            .try_get("metadata")
+            .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
+        let checkpoint_id: String = row
+            .try_get("checkpoint_id")
+            .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
+        let created_at: String = row
+            .try_get("created_at")
+            .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
+
+        let checkpoint = Self::deserialize_checkpoint(
+            &channel_values_bytes,
+            &channel_versions_bytes,
+            &versions_seen_bytes,
+            pending_tasks_bytes.as_deref(),
+            pending_sends_bytes.as_deref(),
+            schema_version,
+            checkpoint_id,
+            created_at,
+        )
+        .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
+
+        let metadata: CheckpointMetadata = deserialize_auto(&metadata_bytes)
+            .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
+
+        Ok(CheckpointTuple {
+            config: config.clone(),
+            checkpoint,
+            metadata,
+            pending_writes: vec![],
+            parent_config: None,
+        })
+    }
+
+    /// Apply `CheckpointFilter` to a list of deserialized tuples
+    ///
+    /// Filters by source, step range, and `checkpoint_id` position (before/after),
+    /// then applies the final limit. This runs in Rust because the metadata fields
+    /// (source, step) are stored as serialized BLOBs that cannot be filtered at
+    /// the SQL level.
+    fn apply_list_filter(
+        tuples: Vec<CheckpointTuple>,
+        filter: &CheckpointFilter,
+    ) -> Vec<CheckpointTuple> {
+        let mut results = tuples;
+
+        if let Some(source) = &filter.source {
+            results.retain(|t| t.metadata.source == *source);
+        }
+        if let Some(min_step) = filter.step_gte {
+            results.retain(|t| t.metadata.step >= min_step);
+        }
+        if let Some(max_step) = filter.step_lte {
+            results.retain(|t| t.metadata.step <= max_step);
+        }
+        // before: only checkpoints newer than (before) the given id
+        if let Some(before_id) = &filter.before {
+            let before_pos = results.iter().position(|t| t.checkpoint.id == *before_id);
+            if let Some(pos) = before_pos {
+                results.truncate(pos);
+            }
+        }
+        // after: only checkpoints older than (after) the given id
+        if let Some(after_id) = &filter.after {
+            let after_pos = results.iter().position(|t| t.checkpoint.id == *after_id);
+            if let Some(pos) = after_pos {
+                results = results.into_iter().skip(pos + 1).collect();
+            }
+        }
+        if let Some(limit) = filter.limit {
+            results.truncate(limit);
+        }
+
+        results
+    }
+
     /// Load pending writes for a checkpoint from the database
     ///
     /// Helper function to load and deserialize pending writes associated
@@ -422,61 +524,13 @@ impl juncture_core::checkpoint::CheckpointSaver for SqliteSaver {
         .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
 
         match row {
-            Some(row) => {
-                // Extract raw bytes from database row
-                let channel_values_bytes: Vec<u8> = row
-                    .try_get("channel_values")
-                    .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
-                let channel_versions_bytes: Vec<u8> = row
-                    .try_get("channel_versions")
-                    .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
-                let versions_seen_bytes: Vec<u8> = row
-                    .try_get("versions_seen")
-                    .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
-                let pending_tasks_bytes: Option<Vec<u8>> = row
-                    .try_get("pending_tasks")
-                    .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
-                let pending_sends_bytes: Option<Vec<u8>> = row
-                    .try_get("pending_sends")
-                    .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
-                let schema_version: i64 = row
-                    .try_get("schema_version")
-                    .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
-                let metadata_bytes: Vec<u8> = row
-                    .try_get("metadata")
-                    .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
-                let checkpoint_id: String = row
-                    .try_get("checkpoint_id")
-                    .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
-
-                // Deserialize checkpoint using helper function
-                let checkpoint = Self::deserialize_checkpoint(
-                    &channel_values_bytes,
-                    &channel_versions_bytes,
-                    &versions_seen_bytes,
-                    pending_tasks_bytes.as_deref(),
-                    pending_sends_bytes.as_deref(),
-                    schema_version,
-                    checkpoint_id.clone(),
-                    row.try_get("created_at")
-                        .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?,
-                )?;
-
-                let metadata: CheckpointMetadata = deserialize_auto(&metadata_bytes)
-                    .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
-
-                // Load pending writes for this checkpoint
+            Some(ref row) => {
+                let mut tuple = Self::row_to_tuple(row, config)?;
                 let pending_writes = self
-                    .load_pending_writes(&thread_id, &checkpoint_ns, &checkpoint_id)
+                    .load_pending_writes(&thread_id, &checkpoint_ns, &tuple.checkpoint.id)
                     .await?;
-
-                Ok(Some(CheckpointTuple {
-                    config: config.clone(),
-                    checkpoint,
-                    metadata,
-                    pending_writes,
-                    parent_config: None,
-                }))
+                tuple.pending_writes = pending_writes;
+                Ok(Some(tuple))
             }
             None => Ok(None),
         }
@@ -491,79 +545,69 @@ impl juncture_core::checkpoint::CheckpointSaver for SqliteSaver {
             Self::get_thread_id(config).map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
         let checkpoint_ns = Self::get_checkpoint_ns(config);
 
-        let limit = i64::try_from(filter.as_ref().and_then(|f| f.limit).unwrap_or(10))
-            .expect("limit value fits in i64");
+        // When non-limit filters are active, metadata fields (source, step) require
+        // deserialization so we must fetch all rows and filter in Rust.
+        let has_non_limit_filter = filter.as_ref().is_some_and(|f| {
+            f.source.is_some()
+                || f.step_gte.is_some()
+                || f.step_lte.is_some()
+                || f.before.is_some()
+                || f.after.is_some()
+        });
 
-        let rows = sqlx::query(
-            "SELECT channel_values, channel_versions, versions_seen,
-                    pending_tasks, pending_sends, schema_version, metadata,
-                    checkpoint_id, created_at
-             FROM checkpoints
-             WHERE thread_id = ? AND checkpoint_ns = ?
-             ORDER BY created_at DESC
-             LIMIT ?",
-        )
-        .bind(&thread_id)
-        .bind(&checkpoint_ns)
-        .bind(limit)
-        .fetch_all(&*self.pool)
-        .await
-        .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
+        let rows = if has_non_limit_filter {
+            sqlx::query(
+                "SELECT channel_values, channel_versions, versions_seen,
+                        pending_tasks, pending_sends, schema_version, metadata,
+                        checkpoint_id, created_at
+                 FROM checkpoints
+                 WHERE thread_id = ? AND checkpoint_ns = ?
+                 ORDER BY created_at DESC",
+            )
+            .bind(&thread_id)
+            .bind(&checkpoint_ns)
+            .fetch_all(&*self.pool)
+            .await
+            .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?
+        } else {
+            let limit = i64::try_from(filter.as_ref().and_then(|f| f.limit).unwrap_or(10))
+                .expect("limit value fits in i64");
+            sqlx::query(
+                "SELECT channel_values, channel_versions, versions_seen,
+                        pending_tasks, pending_sends, schema_version, metadata,
+                        checkpoint_id, created_at
+                 FROM checkpoints
+                 WHERE thread_id = ? AND checkpoint_ns = ?
+                 ORDER BY created_at DESC
+                 LIMIT ?",
+            )
+            .bind(&thread_id)
+            .bind(&checkpoint_ns)
+            .bind(limit)
+            .fetch_all(&*self.pool)
+            .await
+            .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?
+        };
 
-        let mut results = Vec::new();
-        for row in rows {
-            // Extract raw bytes from database row
-            let channel_values_bytes: Vec<u8> = row
-                .try_get("channel_values")
-                .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
-            let channel_versions_bytes: Vec<u8> = row
-                .try_get("channel_versions")
-                .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
-            let versions_seen_bytes: Vec<u8> = row
-                .try_get("versions_seen")
-                .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
-            let pending_tasks_bytes: Option<Vec<u8>> = row
-                .try_get("pending_tasks")
-                .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
-            let pending_sends_bytes: Option<Vec<u8>> = row
-                .try_get("pending_sends")
-                .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
-            let schema_version: i64 = row
-                .try_get("schema_version")
-                .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
-            let metadata_bytes: Vec<u8> = row
-                .try_get("metadata")
-                .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
-            let checkpoint_id: String = row
-                .try_get("checkpoint_id")
-                .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
-            let created_at: String = row
-                .try_get("created_at")
-                .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
+        let tuples: Vec<CheckpointTuple> = rows
+            .iter()
+            .map(|row| Self::row_to_tuple(row, config))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
 
-            // Deserialize checkpoint using helper function
-            let checkpoint = Self::deserialize_checkpoint(
-                &channel_values_bytes,
-                &channel_versions_bytes,
-                &versions_seen_bytes,
-                pending_tasks_bytes.as_deref(),
-                pending_sends_bytes.as_deref(),
-                schema_version,
-                checkpoint_id,
-                created_at,
-            )?;
-
-            let metadata: CheckpointMetadata = deserialize_auto(&metadata_bytes)
-                .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
-
-            results.push(CheckpointTuple {
-                config: config.clone(),
-                checkpoint,
-                metadata,
-                pending_writes: vec![],
-                parent_config: None,
-            });
-        }
+        let results = match filter {
+            Some(ref f) if has_non_limit_filter => Self::apply_list_filter(tuples, f),
+            Some(ref f) => {
+                // Only limit was active; SQL already applied it, but for consistency
+                // with the filter contract, still truncate (no-op if SQL limit matched).
+                let mut out = tuples;
+                if let Some(limit) = f.limit {
+                    out.truncate(limit);
+                }
+                out
+            }
+            None => tuples,
+        };
 
         Ok(results)
     }
@@ -1002,6 +1046,208 @@ mod tests {
 
         // Verify that the serializer is indeed MessagePack (default), proving auto-detection works
         assert_eq!(saver.serializer.format(), SerializationFormat::MessagePack);
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "sqlite")]
+    async fn test_sqlite_saver_list_filter_by_source() {
+        let saver = SqliteSaver::from_connection_string("sqlite::memory:")
+            .await
+            .unwrap();
+        let config = create_test_config("thread-filter-source");
+
+        // Insert checkpoints with different sources
+        let metadata_input = CheckpointMetadata {
+            source: CheckpointSource::Input,
+            step: 0,
+            ..create_test_metadata()
+        };
+        let cp_input = create_test_checkpoint("cp-input");
+        saver.put(&config, cp_input, metadata_input).await.unwrap();
+
+        let metadata_loop = CheckpointMetadata {
+            source: CheckpointSource::Loop,
+            step: 1,
+            ..create_test_metadata()
+        };
+        let cp_loop = create_test_checkpoint("cp-loop");
+        saver.put(&config, cp_loop, metadata_loop).await.unwrap();
+
+        // Filter by Loop source
+        let filtered = saver
+            .list(
+                &config,
+                Some(CheckpointFilter {
+                    source: Some(CheckpointSource::Loop),
+                    ..Default::default()
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(filtered.len(), 1);
+        assert!(matches!(
+            filtered[0].metadata.source,
+            CheckpointSource::Loop
+        ));
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "sqlite")]
+    async fn test_sqlite_saver_list_filter_by_step_range() {
+        let saver = SqliteSaver::from_connection_string("sqlite::memory:")
+            .await
+            .unwrap();
+        let config = create_test_config("thread-filter-step");
+
+        // Insert checkpoints at steps 0..5
+        for step in 0..5 {
+            let metadata = CheckpointMetadata {
+                source: CheckpointSource::Loop,
+                step,
+                ..create_test_metadata()
+            };
+            let checkpoint = create_test_checkpoint(&format!("cp-step-{step}"));
+            saver.put(&config, checkpoint, metadata).await.unwrap();
+        }
+
+        // Filter step >= 2
+        let filtered_gte = saver
+            .list(
+                &config,
+                Some(CheckpointFilter {
+                    step_gte: Some(2),
+                    ..Default::default()
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(filtered_gte.len(), 3);
+
+        // Filter step <= 2
+        let filtered_lte = saver
+            .list(
+                &config,
+                Some(CheckpointFilter {
+                    step_lte: Some(2),
+                    ..Default::default()
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(filtered_lte.len(), 3);
+
+        // Filter step 1..=3
+        let filtered_range = saver
+            .list(
+                &config,
+                Some(CheckpointFilter {
+                    step_gte: Some(1),
+                    step_lte: Some(3),
+                    ..Default::default()
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(filtered_range.len(), 3);
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "sqlite")]
+    async fn test_sqlite_saver_list_filter_before_after() {
+        let saver = SqliteSaver::from_connection_string("sqlite::memory:")
+            .await
+            .unwrap();
+        let config = create_test_config("thread-filter-before-after");
+
+        // Insert 5 checkpoints; they are sorted by created_at DESC in list()
+        for i in 0..5 {
+            let metadata = CheckpointMetadata {
+                source: CheckpointSource::Loop,
+                step: i,
+                ..create_test_metadata()
+            };
+            let checkpoint = create_test_checkpoint(&format!("cp-ba-{i}"));
+            saver.put(&config, checkpoint, metadata).await.unwrap();
+        }
+
+        // "before" cp-ba-2: items newer than cp-ba-2 (positions before it)
+        let before = saver
+            .list(
+                &config,
+                Some(CheckpointFilter {
+                    before: Some("cp-ba-2".to_string()),
+                    ..Default::default()
+                }),
+            )
+            .await
+            .unwrap();
+        assert!(before.len() < 5);
+        assert!(before.iter().all(|t| t.checkpoint.id != "cp-ba-2"));
+
+        // "after" cp-ba-2: items older than cp-ba-2 (positions after it)
+        let after = saver
+            .list(
+                &config,
+                Some(CheckpointFilter {
+                    after: Some("cp-ba-2".to_string()),
+                    ..Default::default()
+                }),
+            )
+            .await
+            .unwrap();
+        assert!(after.len() < 5);
+        assert!(after.iter().all(|t| t.checkpoint.id != "cp-ba-2"));
+
+        // "before" + "after" combined narrows the range
+        let combo = saver
+            .list(
+                &config,
+                Some(CheckpointFilter {
+                    before: Some("cp-ba-3".to_string()),
+                    after: Some("cp-ba-1".to_string()),
+                    ..Default::default()
+                }),
+            )
+            .await
+            .unwrap();
+        // Should exclude cp-ba-3 (the before pivot) and cp-ba-1 (the after pivot)
+        assert!(!combo.iter().any(|t| t.checkpoint.id == "cp-ba-3"));
+        assert!(!combo.iter().any(|t| t.checkpoint.id == "cp-ba-1"));
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "sqlite")]
+    async fn test_sqlite_saver_list_filter_with_limit() {
+        let saver = SqliteSaver::from_connection_string("sqlite::memory:")
+            .await
+            .unwrap();
+        let config = create_test_config("thread-filter-limit");
+
+        // Insert 10 checkpoints
+        for step in 0..10 {
+            let metadata = CheckpointMetadata {
+                source: CheckpointSource::Loop,
+                step,
+                ..create_test_metadata()
+            };
+            let checkpoint = create_test_checkpoint(&format!("cp-limit-{step}"));
+            saver.put(&config, checkpoint, metadata).await.unwrap();
+        }
+
+        // Filter step >= 3 with limit 2 should return at most 2 items
+        let filtered = saver
+            .list(
+                &config,
+                Some(CheckpointFilter {
+                    step_gte: Some(3),
+                    limit: Some(2),
+                    ..Default::default()
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(filtered.len(), 2);
+        assert!(filtered.iter().all(|t| t.metadata.step >= 3));
     }
 }
 

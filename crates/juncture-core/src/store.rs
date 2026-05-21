@@ -1268,7 +1268,10 @@ mod tests {
         };
 
         let serialized = serde_json::to_string(&filter).expect("serialization failed");
-        assert!(serialized.contains("\"$not\""), "serialized form must contain $not tag");
+        assert!(
+            serialized.contains("\"$not\""),
+            "serialized form must contain $not tag"
+        );
 
         let deserialized: FilterExpr =
             serde_json::from_str(&serialized).expect("deserialization failed");

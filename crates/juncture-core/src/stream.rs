@@ -548,8 +548,7 @@ pub async fn call_llm_streaming<S: State, M: crate::llm::ChatModel>(
                 match &mut tc.arguments {
                     serde_json::Value::String(s) => s.push_str(&tc_chunk.args_delta),
                     serde_json::Value::Null => {
-                        tc.arguments =
-                            serde_json::Value::String(tc_chunk.args_delta.clone());
+                        tc.arguments = serde_json::Value::String(tc_chunk.args_delta.clone());
                     }
                     other => {
                         let mut s = match std::mem::replace(other, serde_json::Value::Null) {

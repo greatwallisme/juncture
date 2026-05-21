@@ -155,10 +155,7 @@ impl CheckpointNamespace {
             Self::root()
         } else {
             Self {
-                segments: s
-                    .split(CHECKPOINT_NS_SEPARATOR)
-                    .map(String::from)
-                    .collect(),
+                segments: s.split(CHECKPOINT_NS_SEPARATOR).map(String::from).collect(),
             }
         }
     }

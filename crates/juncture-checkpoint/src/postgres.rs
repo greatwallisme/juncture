@@ -239,6 +239,108 @@ impl PostgresSaver {
         })
     }
 
+    /// Deserialize a single database row into a `CheckpointTuple`
+    ///
+    /// Extracts raw bytes from each column, deserializes checkpoint and metadata,
+    /// and assembles a complete `CheckpointTuple` without pending writes.
+    fn row_to_tuple(
+        row: &sqlx::postgres::PgRow,
+        config: &RunnableConfig,
+    ) -> Result<CheckpointTuple, CoreCheckpointError> {
+        let channel_values_bytes: Vec<u8> = row
+            .try_get("channel_values")
+            .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
+        let channel_versions_bytes: Vec<u8> = row
+            .try_get("channel_versions")
+            .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
+        let versions_seen_bytes: Vec<u8> = row
+            .try_get("versions_seen")
+            .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
+        let pending_tasks_bytes: Option<Vec<u8>> = row
+            .try_get("pending_tasks")
+            .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
+        let pending_sends_bytes: Option<Vec<u8>> = row
+            .try_get("pending_sends")
+            .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
+        let schema_version: i64 = row
+            .try_get("schema_version")
+            .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
+        let metadata_bytes: Vec<u8> = row
+            .try_get("metadata")
+            .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
+        let checkpoint_id: String = row
+            .try_get("checkpoint_id")
+            .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
+        let created_at: String = row
+            .try_get("created_at")
+            .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
+
+        let checkpoint = Self::deserialize_checkpoint(
+            &channel_values_bytes,
+            &channel_versions_bytes,
+            &versions_seen_bytes,
+            pending_tasks_bytes.as_deref(),
+            pending_sends_bytes.as_deref(),
+            schema_version,
+            checkpoint_id,
+            created_at,
+        )
+        .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
+
+        let metadata: CheckpointMetadata = deserialize_auto(&metadata_bytes)
+            .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
+
+        Ok(CheckpointTuple {
+            config: config.clone(),
+            checkpoint,
+            metadata,
+            pending_writes: vec![],
+            parent_config: None,
+        })
+    }
+
+    /// Apply `CheckpointFilter` to a list of deserialized tuples
+    ///
+    /// Filters by source, step range, and `checkpoint_id` position (before/after),
+    /// then applies the final limit. This runs in Rust because the metadata fields
+    /// (source, step) are stored as serialized BYTEAs that cannot be filtered at
+    /// the SQL level.
+    fn apply_list_filter(
+        tuples: Vec<CheckpointTuple>,
+        filter: &CheckpointFilter,
+    ) -> Vec<CheckpointTuple> {
+        let mut results = tuples;
+
+        if let Some(source) = &filter.source {
+            results.retain(|t| t.metadata.source == *source);
+        }
+        if let Some(min_step) = filter.step_gte {
+            results.retain(|t| t.metadata.step >= min_step);
+        }
+        if let Some(max_step) = filter.step_lte {
+            results.retain(|t| t.metadata.step <= max_step);
+        }
+        // before: only checkpoints newer than (before) the given id
+        if let Some(before_id) = &filter.before {
+            let before_pos = results.iter().position(|t| t.checkpoint.id == *before_id);
+            if let Some(pos) = before_pos {
+                results.truncate(pos);
+            }
+        }
+        // after: only checkpoints older than (after) the given id
+        if let Some(after_id) = &filter.after {
+            let after_pos = results.iter().position(|t| t.checkpoint.id == *after_id);
+            if let Some(pos) = after_pos {
+                results = results.into_iter().skip(pos + 1).collect();
+            }
+        }
+        if let Some(limit) = filter.limit {
+            results.truncate(limit);
+        }
+
+        results
+    }
+
     /// Load pending writes for a checkpoint from the database
     ///
     /// Helper function to load and deserialize pending writes associated
@@ -329,63 +431,13 @@ impl juncture_core::checkpoint::CheckpointSaver for PostgresSaver {
         .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
 
         match row {
-            Some(row) => {
-                // Extract raw bytes from database row
-                let channel_values_bytes: Vec<u8> = row
-                    .try_get("channel_values")
-                    .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
-                let channel_versions_bytes: Vec<u8> = row
-                    .try_get("channel_versions")
-                    .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
-                let versions_seen_bytes: Vec<u8> = row
-                    .try_get("versions_seen")
-                    .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
-                let pending_tasks_bytes: Option<Vec<u8>> = row
-                    .try_get("pending_tasks")
-                    .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
-                let pending_sends_bytes: Option<Vec<u8>> = row
-                    .try_get("pending_sends")
-                    .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
-                let schema_version: i64 = row
-                    .try_get("schema_version")
-                    .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
-                let metadata_bytes: Vec<u8> = row
-                    .try_get("metadata")
-                    .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
-                let checkpoint_id: String = row
-                    .try_get("checkpoint_id")
-                    .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
-                let created_at: String = row
-                    .try_get("created_at")
-                    .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
-
-                // Deserialize checkpoint using helper function
-                let checkpoint = Self::deserialize_checkpoint(
-                    &channel_values_bytes,
-                    &channel_versions_bytes,
-                    &versions_seen_bytes,
-                    pending_tasks_bytes.as_deref(),
-                    pending_sends_bytes.as_deref(),
-                    schema_version,
-                    checkpoint_id.clone(),
-                    created_at,
-                )?;
-
-                let metadata: CheckpointMetadata = deserialize_auto(&metadata_bytes)
-                    .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
-
-                // Load pending writes for this checkpoint
+            Some(ref row) => {
+                let mut tuple = Self::row_to_tuple(row, config)?;
                 let pending_writes = self
-                    .load_pending_writes(&thread_id, &checkpoint_ns, &checkpoint_id)
+                    .load_pending_writes(&thread_id, &checkpoint_ns, &tuple.checkpoint.id)
                     .await?;
-
-                Ok(Some(CheckpointTuple {
-                    config: config.clone(),
-                    checkpoint,
-                    metadata,
-                    pending_writes,
-                    parent_config: None,
-                }))
+                tuple.pending_writes = pending_writes;
+                Ok(Some(tuple))
             }
             None => Ok(None),
         }
@@ -400,79 +452,67 @@ impl juncture_core::checkpoint::CheckpointSaver for PostgresSaver {
             Self::get_thread_id(config).map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
         let checkpoint_ns = Self::get_checkpoint_ns(config);
 
-        let limit = i64::try_from(filter.as_ref().and_then(|f| f.limit).unwrap_or(10))
-            .expect("limit value fits in i64");
+        // When non-limit filters are active, metadata fields (source, step) require
+        // deserialization so we must fetch all rows and filter in Rust.
+        let has_non_limit_filter = filter.as_ref().is_some_and(|f| {
+            f.source.is_some()
+                || f.step_gte.is_some()
+                || f.step_lte.is_some()
+                || f.before.is_some()
+                || f.after.is_some()
+        });
 
-        let rows = sqlx::query(
-            "SELECT channel_values, channel_versions, versions_seen,
-                    pending_tasks, pending_sends, schema_version, metadata,
-                    checkpoint_id, created_at
-             FROM checkpoints
-             WHERE thread_id = $1 AND checkpoint_ns = $2
-             ORDER BY created_at DESC
-             LIMIT $3",
-        )
-        .bind(&thread_id)
-        .bind(&checkpoint_ns)
-        .bind(limit)
-        .fetch_all(&*self.pool)
-        .await
-        .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
+        let rows = if has_non_limit_filter {
+            sqlx::query(
+                "SELECT channel_values, channel_versions, versions_seen,
+                        pending_tasks, pending_sends, schema_version, metadata,
+                        checkpoint_id, created_at
+                 FROM checkpoints
+                 WHERE thread_id = $1 AND checkpoint_ns = $2
+                 ORDER BY created_at DESC",
+            )
+            .bind(&thread_id)
+            .bind(&checkpoint_ns)
+            .fetch_all(&*self.pool)
+            .await
+            .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?
+        } else {
+            let limit = i64::try_from(filter.as_ref().and_then(|f| f.limit).unwrap_or(10))
+                .expect("limit value fits in i64");
+            sqlx::query(
+                "SELECT channel_values, channel_versions, versions_seen,
+                        pending_tasks, pending_sends, schema_version, metadata,
+                        checkpoint_id, created_at
+                 FROM checkpoints
+                 WHERE thread_id = $1 AND checkpoint_ns = $2
+                 ORDER BY created_at DESC
+                 LIMIT $3",
+            )
+            .bind(&thread_id)
+            .bind(&checkpoint_ns)
+            .bind(limit)
+            .fetch_all(&*self.pool)
+            .await
+            .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?
+        };
 
-        let mut results = Vec::new();
-        for row in rows {
-            // Extract raw bytes from database row
-            let channel_values_bytes: Vec<u8> = row
-                .try_get("channel_values")
-                .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
-            let channel_versions_bytes: Vec<u8> = row
-                .try_get("channel_versions")
-                .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
-            let versions_seen_bytes: Vec<u8> = row
-                .try_get("versions_seen")
-                .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
-            let pending_tasks_bytes: Option<Vec<u8>> = row
-                .try_get("pending_tasks")
-                .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
-            let pending_sends_bytes: Option<Vec<u8>> = row
-                .try_get("pending_sends")
-                .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
-            let schema_version: i64 = row
-                .try_get("schema_version")
-                .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
-            let metadata_bytes: Vec<u8> = row
-                .try_get("metadata")
-                .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
-            let checkpoint_id: String = row
-                .try_get("checkpoint_id")
-                .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
-            let created_at: String = row
-                .try_get("created_at")
-                .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
+        let tuples: Vec<CheckpointTuple> = rows
+            .iter()
+            .map(|row| Self::row_to_tuple(row, config))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
 
-            // Deserialize checkpoint using helper function
-            let checkpoint = Self::deserialize_checkpoint(
-                &channel_values_bytes,
-                &channel_versions_bytes,
-                &versions_seen_bytes,
-                pending_tasks_bytes.as_deref(),
-                pending_sends_bytes.as_deref(),
-                schema_version,
-                checkpoint_id,
-                created_at,
-            )?;
-
-            let metadata: CheckpointMetadata = deserialize_auto(&metadata_bytes)
-                .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
-
-            results.push(CheckpointTuple {
-                config: config.clone(),
-                checkpoint,
-                metadata,
-                pending_writes: vec![],
-                parent_config: None,
-            });
-        }
+        let results = match filter {
+            Some(ref f) if has_non_limit_filter => Self::apply_list_filter(tuples, f),
+            Some(ref f) => {
+                let mut out = tuples;
+                if let Some(limit) = f.limit {
+                    out.truncate(limit);
+                }
+                out
+            }
+            None => tuples,
+        };
 
         Ok(results)
     }
