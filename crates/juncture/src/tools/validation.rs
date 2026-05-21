@@ -383,12 +383,18 @@ mod tests {
             if messages.len() <= 2 {
                 Ok(())
             } else {
-                Err(ToolError::validation_failed("Too many messages".to_string()))
+                Err(ToolError::validation_failed(
+                    "Too many messages".to_string(),
+                ))
             }
         });
 
         let state = MessagesState {
-            messages: vec![Message::human("a"), Message::human("b"), Message::human("c")],
+            messages: vec![
+                Message::human("a"),
+                Message::human("b"),
+                Message::human("c"),
+            ],
         };
         let config = RunnableConfig::default();
 

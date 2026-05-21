@@ -3,6 +3,7 @@
 //! A Channel wraps a value with specific update and checkpoint semantics.
 //! Different channel types control how values are updated, persisted, and consumed.
 
+use crate::error::InvalidUpdateError;
 use serde::de::DeserializeOwned;
 use serde::ser::SerializeStruct;
 
@@ -12,33 +13,44 @@ use serde::ser::SerializeStruct;
 /// writes in the same superstep are combined.
 pub trait Reducer<T> {
     /// Merge a single value (fast path avoiding Vec allocation)
-    fn reduce_one(current: &mut T, value: T) {
-        Self::reduce(current, vec![value]);
+    ///
+    /// # Errors
+    ///
+    /// Returns `InvalidUpdateError` if the merge violates reducer constraints.
+    fn reduce_one(current: &mut T, value: T) -> Result<(), InvalidUpdateError> {
+        Self::reduce(current, vec![value])
     }
 
     /// Merge multiple values into current
     ///
     /// Values are provided in the order tasks completed (not task spawn order).
     /// For deterministic results, use associative reducers like `AppendReducer`.
-    fn reduce(current: &mut T, values: Vec<T>);
+    ///
+    /// # Errors
+    ///
+    /// Returns `InvalidUpdateError` if the merge violates reducer constraints
+    /// (e.g., multiple writers on a replace channel).
+    fn reduce(current: &mut T, values: Vec<T>) -> Result<(), InvalidUpdateError>;
 }
 
 /// Replace reducer: only one writer per superstep (default)
 ///
 /// Equivalent to `LangGraph`'s `LastValue` channel.
-/// Panics if multiple nodes write to the same field in one superstep.
+/// Returns an error if multiple nodes write to the same field in one superstep.
 #[derive(Debug)]
 pub struct ReplaceReducer;
 
 impl<T> Reducer<T> for ReplaceReducer {
-    fn reduce(current: &mut T, values: Vec<T>) {
-        assert!(
-            values.len() <= 1,
-            "Replace reducer: multiple writes in same superstep"
-        );
+    fn reduce(current: &mut T, values: Vec<T>) -> Result<(), InvalidUpdateError> {
+        if values.len() > 1 {
+            return Err(InvalidUpdateError::MultipleOverwrite {
+                field: "unknown".to_string(),
+            });
+        }
         if let Some(v) = values.into_iter().next() {
             *current = v;
         }
+        Ok(())
     }
 }
 
@@ -50,14 +62,16 @@ impl<T> Reducer<T> for ReplaceReducer {
 pub struct AppendReducer;
 
 impl<T> Reducer<Vec<T>> for AppendReducer {
-    fn reduce_one(current: &mut Vec<T>, value: Vec<T>) {
+    fn reduce_one(current: &mut Vec<T>, value: Vec<T>) -> Result<(), InvalidUpdateError> {
         current.extend(value);
+        Ok(())
     }
 
-    fn reduce(current: &mut Vec<T>, values: Vec<Vec<T>>) {
+    fn reduce(current: &mut Vec<T>, values: Vec<Vec<T>>) -> Result<(), InvalidUpdateError> {
         for v in values {
             current.extend(v);
         }
+        Ok(())
     }
 }
 
@@ -69,7 +83,7 @@ impl<T> Reducer<Vec<T>> for AppendReducer {
 pub struct AnyValueReducer;
 
 impl<T: PartialEq + Clone> Reducer<T> for AnyValueReducer {
-    fn reduce(current: &mut T, values: Vec<T>) {
+    fn reduce(current: &mut T, values: Vec<T>) -> Result<(), InvalidUpdateError> {
         if let Some(last) = values.last() {
             // Semantic check: all values should be equal
             if let Some(first) = values.first() {
@@ -80,6 +94,7 @@ impl<T: PartialEq + Clone> Reducer<T> for AnyValueReducer {
             }
             *current = last.clone();
         }
+        Ok(())
     }
 }
 
@@ -90,10 +105,11 @@ impl<T: PartialEq + Clone> Reducer<T> for AnyValueReducer {
 pub struct LastWriteWinsReducer;
 
 impl<T> Reducer<T> for LastWriteWinsReducer {
-    fn reduce(current: &mut T, values: Vec<T>) {
+    fn reduce(current: &mut T, values: Vec<T>) -> Result<(), InvalidUpdateError> {
         if let Some(v) = values.into_iter().last() {
             *current = v;
         }
+        Ok(())
     }
 }
 
@@ -135,7 +151,12 @@ impl<'de, T: serde::Deserialize<'de>> serde::Deserialize<'de> for Overwrite<T> {
 /// Different channel types control how values are updated, persisted, and consumed.
 pub trait Channel<T>: Send + Sync + 'static {
     /// Update the channel with new values. Returns true if the value changed.
-    fn update(&mut self, values: Vec<T>) -> bool;
+    ///
+    /// # Errors
+    ///
+    /// Returns `InvalidUpdateError` if the update violates reducer constraints
+    /// (e.g., multiple writers on a replace channel).
+    fn update(&mut self, values: Vec<T>) -> Result<bool, InvalidUpdateError>;
 
     /// Get the current value
     fn get(&self) -> &T;
@@ -182,12 +203,12 @@ impl<T, R: Reducer<T>> UntrackedChannel<T, R> {
 impl<T: Default + Send + Sync + 'static, R: Reducer<T> + Send + Sync + 'static> Channel<T>
     for UntrackedChannel<T, R>
 {
-    fn update(&mut self, values: Vec<T>) -> bool {
+    fn update(&mut self, values: Vec<T>) -> Result<bool, InvalidUpdateError> {
         if values.is_empty() {
-            return false;
+            return Ok(false);
         }
-        R::reduce(&mut self.value, values);
-        true
+        R::reduce(&mut self.value, values)?;
+        Ok(true)
     }
 
     fn get(&self) -> &T {
@@ -233,13 +254,13 @@ impl<T, R: Reducer<T>> EphemeralChannel<T, R> {
 impl<T: Default + Send + Sync + 'static, R: Reducer<T> + Send + Sync + 'static> Channel<T>
     for EphemeralChannel<T, R>
 {
-    fn update(&mut self, values: Vec<T>) -> bool {
+    fn update(&mut self, values: Vec<T>) -> Result<bool, InvalidUpdateError> {
         if values.is_empty() {
-            return false;
+            return Ok(false);
         }
         self.consumed = false;
-        R::reduce(&mut self.value, values);
-        true
+        R::reduce(&mut self.value, values)?;
+        Ok(true)
     }
 
     fn get(&self) -> &T {
@@ -302,15 +323,15 @@ where
     T: Default + Clone + Send + Sync + serde::Serialize + DeserializeOwned + 'static,
     R: Reducer<T> + Send + Sync + 'static,
 {
-    fn update(&mut self, values: Vec<T>) -> bool {
+    fn update(&mut self, values: Vec<T>) -> Result<bool, InvalidUpdateError> {
         if values.is_empty() {
-            return false;
+            return Ok(false);
         }
-        R::reduce(&mut self.value, values);
+        R::reduce(&mut self.value, values)?;
         if self.is_finished {
             self.finished_value = Some(self.value.clone());
         }
-        true
+        Ok(true)
     }
 
     fn get(&self) -> &T {
@@ -375,12 +396,17 @@ impl<T, R: Reducer<T>> DeltaChannel<T, R> {
     }
 
     /// Replay a sequence of writes to restore state from a checkpoint
-    pub fn replay_writes(&mut self, values: Vec<T>) {
+    ///
+    /// # Errors
+    ///
+    /// Returns `InvalidUpdateError` if the replay violates reducer constraints.
+    pub fn replay_writes(&mut self, values: Vec<T>) -> Result<(), InvalidUpdateError> {
         if values.is_empty() {
-            return;
+            return Ok(());
         }
-        R::reduce(&mut self.value, values);
+        R::reduce(&mut self.value, values)?;
         self.update_count_since_snapshot = 0;
+        Ok(())
     }
 
     /// Check if a snapshot is due based on the update count
@@ -395,13 +421,13 @@ where
     T: Default + Clone + Send + Sync + serde::Serialize + DeserializeOwned + 'static,
     R: Reducer<T> + Send + Sync + 'static,
 {
-    fn update(&mut self, values: Vec<T>) -> bool {
+    fn update(&mut self, values: Vec<T>) -> Result<bool, InvalidUpdateError> {
         if values.is_empty() {
-            return false;
+            return Ok(false);
         }
-        R::reduce(&mut self.value, values);
+        R::reduce(&mut self.value, values)?;
         self.update_count_since_snapshot += 1;
-        true
+        Ok(true)
     }
 
     fn get(&self) -> &T {
@@ -458,8 +484,11 @@ mod tests {
     #[test]
     fn untracked_channel_update_returns_true_on_change() {
         let mut ch: UntrackedChannel<i32, ReplaceReducer> = UntrackedChannel::new(0);
-        assert!(!ch.update(vec![]));
-        assert!(ch.update(vec![42]));
+        assert!(!ch.update(vec![]).expect("empty update should succeed"));
+        assert!(
+            ch.update(vec![42])
+                .expect("single value update should succeed")
+        );
         assert_eq!(*ch.get(), 42);
     }
 
@@ -493,7 +522,7 @@ mod tests {
     fn ephemeral_channel_update_resets_consumed() {
         let mut ch: EphemeralChannel<i32, ReplaceReducer> = EphemeralChannel::new(0);
         assert!(!ch.consume());
-        assert!(ch.update(vec![7]));
+        assert!(ch.update(vec![7]).expect("update should succeed"));
         assert!(!ch.consume()); // consumed was reset by update
     }
 
@@ -539,7 +568,8 @@ mod tests {
     #[test]
     fn delta_channel_replay_writes_restores_state() {
         let mut ch: DeltaChannel<Vec<i32>, AppendReducer> = DeltaChannel::new(vec![], 10);
-        ch.replay_writes(vec![vec![1, 2], vec![3, 4]]);
+        ch.replay_writes(vec![vec![1, 2], vec![3, 4]])
+            .expect("replay should succeed");
         assert_eq!(*ch.get(), vec![1, 2, 3, 4]);
         assert_eq!(ch.update_count_since_snapshot, 0);
     }
@@ -555,9 +585,9 @@ mod tests {
     fn delta_channel_should_snapshot() {
         let mut ch: DeltaChannel<i32, ReplaceReducer> = DeltaChannel::new(0, 2);
         assert!(!ch.should_snapshot());
-        ch.update(vec![1]);
+        ch.update(vec![1]).expect("update should succeed");
         assert!(!ch.should_snapshot());
-        ch.update(vec![2]);
+        ch.update(vec![2]).expect("update should succeed");
         assert!(ch.should_snapshot());
     }
 
@@ -607,6 +637,44 @@ mod tests {
         let ov = Overwrite(42);
         let debug_str = format!("{ov:?}");
         assert_eq!(debug_str, "Overwrite(42)");
+    }
+
+    #[test]
+    fn replace_reducer_single_value_succeeds() {
+        let mut val = 0;
+        ReplaceReducer::reduce(&mut val, vec![42]).expect("single value should succeed");
+        assert_eq!(val, 42);
+    }
+
+    #[test]
+    fn replace_reducer_empty_values_succeeds() {
+        let mut val = 99;
+        ReplaceReducer::reduce(&mut val, vec![]).expect("empty values should succeed");
+        assert_eq!(val, 99);
+    }
+
+    #[test]
+    fn replace_reducer_multiple_values_returns_error() {
+        let mut val = 0;
+        let result = ReplaceReducer::reduce(&mut val, vec![1, 2]);
+        assert!(result.is_err());
+        let err = result.expect_err("multiple values should error");
+        assert!(
+            matches!(err, InvalidUpdateError::MultipleOverwrite { .. }),
+            "expected MultipleOverwrite error, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn untracked_channel_multiple_writes_returns_error() {
+        let mut ch: UntrackedChannel<i32, ReplaceReducer> = UntrackedChannel::new(0);
+        let result = ch.update(vec![1, 2]);
+        assert!(result.is_err());
+        let err = result.expect_err("multiple writes should error");
+        assert!(
+            matches!(err, InvalidUpdateError::MultipleOverwrite { .. }),
+            "expected MultipleOverwrite error, got {err:?}"
+        );
     }
 }
 

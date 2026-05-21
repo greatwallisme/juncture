@@ -1,3 +1,4 @@
+use crate::error::InvalidUpdateError;
 use std::sync::Arc;
 
 /// State trait for graph state management
@@ -13,6 +14,21 @@ pub trait State: Clone + Send + Sync + std::fmt::Debug + 'static {
 
     /// Apply an update to this state, returning which fields changed
     fn apply(&mut self, update: Self::Update) -> FieldsChanged;
+
+    /// Apply an update to this state, returning which fields changed or an error
+    ///
+    /// Unlike `apply()`, this method returns a structured error when reducer
+    /// constraints are violated (e.g., multiple writers on a replace channel).
+    /// The default implementation delegates to `apply()` for backward compatibility.
+    ///
+    /// # Errors
+    ///
+    /// Returns `InvalidUpdateError` if the update violates reducer constraints,
+    /// such as `InvalidUpdateError::MultipleOverwrite` when multiple nodes
+    /// write to a replace channel in the same superstep.
+    fn try_apply(&mut self, update: Self::Update) -> Result<FieldsChanged, InvalidUpdateError> {
+        Ok(self.apply(update))
+    }
 
     /// Reset ephemeral fields (called after each superstep)
     fn reset_ephemeral(&mut self);
@@ -150,6 +166,24 @@ impl<S: State> CowState<S> {
             Arc::new(state)
         } else {
             self.shared
+        }
+    }
+
+    /// Commit updates and return new shared state, propagating reducer errors
+    ///
+    /// Unlike `commit()`, this method returns a structured error when reducer
+    /// constraints are violated (e.g., multiple writers on a replace channel).
+    ///
+    /// # Errors
+    ///
+    /// Returns `InvalidUpdateError` if the update violates reducer constraints.
+    pub fn try_commit(self) -> Result<Arc<S>, InvalidUpdateError> {
+        if let Some(pending) = self.pending {
+            let mut state = (*self.shared).clone();
+            let _changed = state.try_apply(pending)?;
+            Ok(Arc::new(state))
+        } else {
+            Ok(self.shared)
         }
     }
 }

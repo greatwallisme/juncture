@@ -153,6 +153,25 @@ impl crate::State for MessagesState {
     }
 }
 
+impl MessagesState {
+    /// Apply an update with structured error propagation for reducer violations
+    ///
+    /// The messages reducer is an append+merge+delete reducer that never
+    /// conflicts, so this always succeeds. Provided for trait consistency.
+    ///
+    /// # Errors
+    ///
+    /// This method never returns an error, as the messages reducer has no
+    /// write-conflict semantics. The `Result` return type is for API
+    /// consistency with `State::try_apply()`.
+    pub fn try_apply_messages(
+        &mut self,
+        update: MessagesStateUpdate,
+    ) -> Result<crate::FieldsChanged, crate::error::InvalidUpdateError> {
+        Ok(crate::State::apply(self, update))
+    }
+}
+
 /// Messages reducer with append+merge+delete semantics
 ///
 /// Handles message updates, deletions, and appends.

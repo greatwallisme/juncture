@@ -561,7 +561,10 @@ impl<S: State> PregelLoop<S> {
 
         for task_output in &result.task_outputs {
             if let Some(ref update) = task_output.command.update {
-                let changed = self.state.apply(update.clone());
+                let changed = self
+                    .state
+                    .try_apply(update.clone())
+                    .map_err(|e| JunctureError::invalid_update(e.to_string()))?;
                 total_changed.merge(&changed);
             }
         }
@@ -854,8 +857,18 @@ impl<S: State> PregelLoop<S> {
         );
 
         if let Some(ref update) = cmd.update {
-            let changed = self.state.apply(update.clone());
-            self.field_versions.bump_all(&changed);
+            let changed = self.state.try_apply(update.clone());
+            match changed {
+                Ok(changed) => self.field_versions.bump_all(&changed),
+                Err(err) => {
+                    tracing::warn!(
+                        name: "juncture.subgraph.parent_command.apply_failed",
+                        step = self.step,
+                        error = %err,
+                        "Failed to apply parent command from subgraph"
+                    );
+                }
+            }
         }
     }
 

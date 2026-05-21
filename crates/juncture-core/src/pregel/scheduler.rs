@@ -459,6 +459,11 @@ async fn process_edge<S: State>(
 /// * `task_outputs` - Outputs from completed tasks in the superstep
 /// * `field_versions` - Version tracker to bump for changed fields
 ///
+/// # Errors
+///
+/// Returns `JunctureError` if a reducer constraint is violated, such as
+/// multiple nodes writing to a replace channel in the same superstep.
+///
 /// # Examples
 ///
 /// ```ignore
@@ -466,13 +471,13 @@ async fn process_edge<S: State>(
 ///
 /// let mut state = MyState::default();
 /// let mut tracker = FieldVersionTracker::new(3);
-/// let changed = apply_writes(&mut state, &task_outputs, &mut tracker);
+/// let changed = apply_writes(&mut state, &task_outputs, &mut tracker)?;
 /// ```
 pub fn apply_writes<S: State>(
     state: &mut S,
     task_outputs: &[crate::pregel::types::TaskOutput<S>],
     field_versions: &mut FieldVersionTracker,
-) -> FieldsChanged {
+) -> Result<FieldsChanged, JunctureError> {
     let mut total_changed = FieldsChanged(0);
 
     // Sort indices by path-based ordering for deterministic merge
@@ -504,7 +509,9 @@ pub fn apply_writes<S: State>(
     for idx in sorted_indices {
         let output = &task_outputs[idx];
         if let Some(ref update) = output.command.update {
-            let changed = state.apply(update.clone());
+            let changed = state
+                .try_apply(update.clone())
+                .map_err(|e| JunctureError::invalid_update(e.to_string()))?;
             total_changed.merge(&changed);
         }
     }
@@ -512,7 +519,7 @@ pub fn apply_writes<S: State>(
     // Bump field versions for all changed fields
     field_versions.bump_all(&total_changed);
 
-    total_changed
+    Ok(total_changed)
 }
 
 /// Channel-to-node reverse mapping for efficient scheduling
@@ -853,7 +860,8 @@ mod scheduler_tests {
         let mut tracker = FieldVersionTracker::new(3);
         let outputs: Vec<crate::pregel::types::TaskOutput<TestState>> = Vec::new();
 
-        let changed = apply_writes(&mut state, &outputs, &mut tracker);
+        let changed =
+            apply_writes(&mut state, &outputs, &mut tracker).expect("empty outputs should succeed");
         assert_eq!(changed.0, 0);
     }
 
