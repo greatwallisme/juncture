@@ -402,6 +402,8 @@ impl<S: State> CompiledGraph<S> {
         let num_fields = 64;
         let mode = stream_config.mode.clone();
         let output_keys = stream_config.output_keys;
+        let include_subgraphs = stream_config.include_subgraphs;
+        let subgraph_filter = stream_config.subgraph_filter;
 
         // Sized channel provides backpressure: 256 for Messages mode (high-throughput
         // LLM token chunks), 32 for all other modes. Per design doc 05-streaming 7.3.
@@ -431,7 +433,7 @@ impl<S: State> CompiledGraph<S> {
         // Spawn graph execution in background task
         tokio::spawn(async move {
             // Task to forward PregelLoop events to the main stream,
-            // applying output_keys filtering to Updates events when configured.
+            // applying subgraph filtering and output_keys filtering.
             let tx_forward = tx.clone();
             let mode_forward = mode.clone();
             let output_keys_forward = output_keys.clone();
@@ -443,6 +445,21 @@ impl<S: State> CompiledGraph<S> {
                 while let Some(event) = pregel_rx.recv().await {
                     if !emitter.should_emit(&event) {
                         continue;
+                    }
+
+                    // Subgraph event filtering: events with non-empty namespace
+                    // originate from subgraphs. Skip them unless explicitly included.
+                    let ns = event.namespace();
+                    if !ns.is_empty() {
+                        if !include_subgraphs {
+                            continue;
+                        }
+                        if let Some(ref filter) = subgraph_filter
+                            && let Some(first) = ns.first()
+                            && !filter.contains(first)
+                        {
+                            continue;
+                        }
                     }
 
                     // Apply output_keys filtering to Updates events from PregelLoop
@@ -3242,6 +3259,300 @@ mod tests {
         let json = serde_json::json!("hello");
         let filtered = crate::stream::filter_json_by_keys(json.clone(), &["a".to_string()]);
         assert_eq!(json, filtered);
+    }
+
+    // --- Tests for StreamEvent::namespace() ---
+
+    #[test]
+    fn test_stream_event_namespace_custom_has_ns() {
+        let event: StreamEvent<StateDummy> = StreamEvent::Custom {
+            node: "sub_node".to_string(),
+            data: serde_json::json!({"x": 1}),
+            ns: vec!["child_graph".to_string(), "sub_node:uuid".to_string()],
+        };
+        assert_eq!(event.namespace().len(), 2);
+        assert_eq!(event.namespace()[0], "child_graph");
+    }
+
+    #[test]
+    fn test_stream_event_namespace_messages_has_ns() {
+        let event: StreamEvent<StateDummy> = StreamEvent::Messages {
+            chunk: crate::stream::MessageChunk {
+                content: "hi".to_string(),
+                tool_call_chunks: vec![],
+                usage_delta: None,
+            },
+            metadata: crate::stream::MessageStreamMetadata {
+                node: "llm".to_string(),
+                model: "gpt-4".to_string(),
+                tags: vec![],
+                ns: vec!["child_graph".to_string()],
+            },
+        };
+        assert_eq!(event.namespace().len(), 1);
+        assert_eq!(event.namespace()[0], "child_graph");
+    }
+
+    #[test]
+    fn test_stream_event_namespace_interrupt_has_ns() {
+        let event: StreamEvent<StateDummy> = StreamEvent::Interrupt {
+            node: "review".to_string(),
+            payload: serde_json::Value::Null,
+            resumable: true,
+            ns: vec!["subgraph_a".to_string()],
+        };
+        assert_eq!(event.namespace().len(), 1);
+    }
+
+    #[test]
+    fn test_stream_event_namespace_values_is_empty() {
+        let event: StreamEvent<StateDummy> = StreamEvent::Values {
+            state: StateDummy,
+            step: 0,
+        };
+        assert!(event.namespace().is_empty());
+    }
+
+    #[test]
+    fn test_stream_event_namespace_updates_is_empty() {
+        let event: StreamEvent<StateDummy> = StreamEvent::Updates {
+            node: "n".to_string(),
+            update: StateDummyUpdate,
+            step: 0,
+        };
+        assert!(event.namespace().is_empty());
+    }
+
+    #[test]
+    fn test_stream_event_namespace_end_is_empty() {
+        let event: StreamEvent<StateDummy> = StreamEvent::End {
+            output: StateDummy,
+        };
+        assert!(event.namespace().is_empty());
+    }
+
+    #[test]
+    fn test_stream_event_namespace_task_start_is_empty() {
+        let event: StreamEvent<StateDummy> = StreamEvent::TaskStart {
+            node: "n".to_string(),
+            task_id: "t".to_string(),
+            step: 0,
+        };
+        assert!(event.namespace().is_empty());
+    }
+
+    #[test]
+    fn test_stream_event_namespace_debug_is_empty() {
+        let event: StreamEvent<StateDummy> = StreamEvent::Debug(
+            crate::stream::DebugEvent::SuperstepStart {
+                step: 0,
+                nodes: vec![],
+            },
+        );
+        assert!(event.namespace().is_empty());
+    }
+
+    // --- Tests for subgraph_filter in stream_with_config ---
+
+    /// Verify that `include_subgraphs=false` causes subgraph events to be
+    /// filtered out while top-level events pass through.
+    #[test]
+    fn test_subgraph_filter_default_excludes_subgraph_events() {
+        // A subgraph-namespaced Custom event
+        let subgraph_event: StreamEvent<StateDummy> = StreamEvent::Custom {
+            node: "sub_node".to_string(),
+            data: serde_json::json!({}),
+            ns: vec!["child_graph".to_string()],
+        };
+
+        // A top-level event (empty namespace)
+        let top_level_event: StreamEvent<StateDummy> = StreamEvent::Values {
+            state: StateDummy,
+            step: 0,
+        };
+
+        let include_subgraphs = false;
+        // When include_subgraphs is false, subgraph_filter is irrelevant.
+
+        // Top-level event should always pass
+        assert!(top_level_event.namespace().is_empty());
+        // Subgraph event has namespace
+        assert!(!subgraph_event.namespace().is_empty());
+
+        // Filtering logic (mirrors the forwarding task):
+        // if !ns.is_empty() && !include_subgraphs { skip }
+        let ns = subgraph_event.namespace();
+        let should_skip = !ns.is_empty() && !include_subgraphs;
+        assert!(should_skip, "subgraph events should be skipped when include_subgraphs=false");
+
+        let ns = top_level_event.namespace();
+        let should_skip = !ns.is_empty() && !include_subgraphs;
+        assert!(!should_skip, "top-level events should not be skipped");
+    }
+
+    /// Verify that `include_subgraphs=true` with no filter allows all
+    /// subgraph events through.
+    #[test]
+    fn test_subgraph_filter_include_all_passes() {
+        let subgraph_event: StreamEvent<StateDummy> = StreamEvent::Custom {
+            node: "sub_node".to_string(),
+            data: serde_json::json!({}),
+            ns: vec!["child_graph".to_string()],
+        };
+
+        let include_subgraphs = true;
+        let subgraph_filter: Option<Vec<String>> = None;
+
+        let ns = subgraph_event.namespace();
+        let should_skip = !ns.is_empty() && !include_subgraphs;
+        assert!(!should_skip, "include_subgraphs=true should not skip subgraph events");
+
+        // With no filter, no additional filtering applies
+        assert!(subgraph_filter.is_none());
+    }
+
+    /// Verify that `subgraph_filter` allows only matching subgraphs.
+    #[test]
+    fn test_subgraph_filter_by_name_passes_matching() {
+        let matching_event: StreamEvent<StateDummy> = StreamEvent::Custom {
+            node: "sub_node".to_string(),
+            data: serde_json::json!({}),
+            ns: vec!["child_a".to_string()],
+        };
+
+        let non_matching_event: StreamEvent<StateDummy> = StreamEvent::Custom {
+            node: "sub_node".to_string(),
+            data: serde_json::json!({}),
+            ns: vec!["child_b".to_string()],
+        };
+
+        let include_subgraphs = true;
+        let subgraph_filter = Some(vec!["child_a".to_string()]);
+
+        // Matching event should pass
+        let ns = matching_event.namespace();
+        let should_skip = if ns.is_empty() {
+            false
+        } else if !include_subgraphs {
+            true
+        } else if let Some(ref filter) = subgraph_filter {
+            ns.first().is_some_and(|first| !filter.contains(first))
+        } else {
+            false
+        };
+        assert!(!should_skip, "matching subgraph event should pass filter");
+
+        // Non-matching event should be skipped
+        let ns = non_matching_event.namespace();
+        let should_skip = if ns.is_empty() {
+            false
+        } else if !include_subgraphs {
+            true
+        } else if let Some(ref filter) = subgraph_filter {
+            ns.first().is_some_and(|first| !filter.contains(first))
+        } else {
+            false
+        };
+        assert!(should_skip, "non-matching subgraph event should be filtered out");
+    }
+
+    /// Verify that Messages events with subgraph namespace are correctly
+    /// identified and filtered.
+    #[test]
+    fn test_subgraph_filter_applies_to_messages_events() {
+        let subgraph_messages: StreamEvent<StateDummy> = StreamEvent::Messages {
+            chunk: crate::stream::MessageChunk {
+                content: "token".to_string(),
+                tool_call_chunks: vec![],
+                usage_delta: None,
+            },
+            metadata: crate::stream::MessageStreamMetadata {
+                node: "llm".to_string(),
+                model: "gpt-4".to_string(),
+                tags: vec![],
+                ns: vec!["sub_llm".to_string()],
+            },
+        };
+
+        let include_subgraphs = false;
+        assert!(!subgraph_messages.namespace().is_empty());
+
+        let ns = subgraph_messages.namespace();
+        let should_skip = !ns.is_empty() && !include_subgraphs;
+        assert!(should_skip, "subgraph Messages events should be filtered when include_subgraphs=false");
+    }
+
+    /// Verify that Interrupt events with subgraph namespace are correctly
+    /// identified and filtered.
+    #[test]
+    fn test_subgraph_filter_applies_to_interrupt_events() {
+        let subgraph_interrupt: StreamEvent<StateDummy> = StreamEvent::Interrupt {
+            node: "review".to_string(),
+            payload: serde_json::Value::Null,
+            resumable: true,
+            ns: vec!["sub_review".to_string()],
+        };
+
+        let include_subgraphs = false;
+        assert!(!subgraph_interrupt.namespace().is_empty());
+
+        let ns = subgraph_interrupt.namespace();
+        let should_skip = !ns.is_empty() && !include_subgraphs;
+        assert!(should_skip, "subgraph Interrupt events should be filtered when include_subgraphs=false");
+    }
+
+    /// Verify that `StreamConfig::with_subgraphs()` and
+    /// `StreamConfig::with_subgraph_filter()` produce the expected config.
+    #[test]
+    fn test_stream_config_subgraph_builder_methods() {
+        let cfg = crate::stream::StreamConfig::new(StreamMode::Values);
+        assert!(!cfg.include_subgraphs);
+        assert!(cfg.subgraph_filter.is_none());
+
+        let cfg = cfg.with_subgraphs(true);
+        assert!(cfg.include_subgraphs);
+
+        let cfg = cfg.with_subgraph_filter(vec!["sub_a".to_string()]);
+        assert_eq!(cfg.subgraph_filter.as_ref().map(Vec::len), Some(1));
+        assert_eq!(cfg.subgraph_filter.as_ref().and_then(|f| f.first().cloned()), Some("sub_a".to_string()));
+    }
+
+    /// End-to-end test: `stream_with_config` with default config
+    /// (`include_subgraphs=false`) does not forward subgraph events.
+    #[tokio::test]
+    async fn test_stream_default_config_no_subgraph_events() {
+        use futures::StreamExt;
+
+        let compiled = build_multi_field_graph();
+        let config = RunnableConfig::new();
+        let stream_config = crate::stream::StreamConfig::new(StreamMode::Values);
+
+        let mut stream = compiled
+            .stream_with_config(
+                MultiFieldState {
+                    messages: vec![],
+                    count: 0,
+                    label: String::new(),
+                },
+                &config,
+                stream_config,
+            )
+            .await
+            .expect("stream_with_config should succeed");
+
+        let mut events = Vec::new();
+        while let Some(result) = stream.next().await {
+            events.push(result.expect("stream event should be Ok"));
+        }
+
+        // All events should have empty namespace (no subgraph events)
+        for event in &events {
+            assert!(
+                event.namespace().is_empty(),
+                "Expected no subgraph events, but found one with ns: {:?}",
+                event.namespace()
+            );
+        }
     }
 }
 

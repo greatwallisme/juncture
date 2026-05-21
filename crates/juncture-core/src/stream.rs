@@ -135,6 +135,39 @@ pub enum StreamEvent<S: State> {
     },
 }
 
+impl<S: State> StreamEvent<S> {
+    /// Return the namespace segment list attached to this event, if any.
+    ///
+    /// Events originating from subgraphs carry a non-empty `ns` field (the
+    /// nesting path). Top-level graph events return an empty slice.
+    /// This is used by stream filtering to decide whether to forward or
+    /// suppress subgraph events.
+    #[must_use]
+    #[allow(
+        clippy::match_same_arms,
+        reason = "each arm is explicit for clarity even when some return the same value"
+    )]
+    pub fn namespace(&self) -> &[String] {
+        match self {
+            Self::Custom { ns, .. } => ns,
+            Self::Messages { metadata, .. } => &metadata.ns,
+            Self::Interrupt { ns, .. } => ns,
+            Self::Values { .. }
+            | Self::FilteredValues { .. }
+            | Self::Updates { .. }
+            | Self::FilteredUpdates { .. }
+            | Self::TaskStart { .. }
+            | Self::TaskEnd { .. }
+            | Self::BudgetExceeded { .. }
+            | Self::End { .. }
+            | Self::Debug(_)
+            | Self::Tools(_)
+            | Self::CheckpointSaved { .. }
+            | Self::TaskDetail { .. } => &[],
+        }
+    }
+}
+
 /// Message chunk for streaming
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct MessageChunk {
