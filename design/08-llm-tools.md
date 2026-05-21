@@ -566,6 +566,8 @@ pub enum ToolError {
 // > `ToolNotFound { name: String }` ——当 AI 返回的 tool_call.name 不在已注册工具列表中时返回；
 // > `ValidationError { errors: Vec<String> }` ——当工具输入不符合 JSON Schema 验证时返回。
 // > 这些变体使调用方能够区分"工具不存在"和"工具执行失败"等不同错误场景。
+// >
+// > **Implementation Note (D-08-9)**: `ValidationError` uses `String` (single error) instead of `Vec<String>` (multiple errors), which is a simplification from the design spec.
 ```
 
 ### 4.2 ToolNode
@@ -794,6 +796,8 @@ pub fn create_react_agent<M: ChatModel>(
     graph.compile_ephemeral()
 }
 ```
+
+> **Implementation Note (D-08-8)**: `create_react_agent` is implemented in the facade crate (`juncture`) rather than `juncture-core`, following the layered architecture principle where the facade provides convenience functions.
 
 ### 5.2 create_react_agent 高级选项
 

@@ -830,6 +830,8 @@ fn apply_writes<S: State>(
 
 > **IndexMap trade-off note (M-1)**：早期设计依赖 IndexMap 的插入顺序来保证 merge 确定性。实际实现中，path-based sorting（PULL 按名字、PUSH 按索引）提供更强的确定性保证，与 LangGraph 的 `prepare_single_task` 行为一致。IndexMap 仍用于节点注册表以保持 O(1) 查找 + 有序迭代。
 
+> **Implementation Note (D-03-9)**: The actual `apply_writes()` does not take a `nodes` parameter. Instead, it sorts task outputs by trigger type (PULL by node name, PUSH by send index) to provide deterministic merge order that matches LangGraph semantics.
+
 ### 5.2 多写入冲突检测
 
 对于 `Replace` reducer 的字段，同一 superstep 内只允许一个节点写入。检测逻辑：
@@ -892,6 +894,8 @@ fn consume_triggered_channels<S: State>(
     }
 }
 ```
+
+> **Implementation Note (D-03-10)**: The current implementation resets all ephemeral fields each superstep via `reset_ephemeral()` instead of selectively consuming only triggered channels. This is functionally correct but less optimized than the fine-grained `consume_triggered_channels` approach described above.
 
 ### 5.5 finish() 通知
 
@@ -979,6 +983,8 @@ impl TriggerToNodes {
     }
 }
 ```
+
+> **Implementation Note (D-03-11)**: `TriggerToNodes` is defined with `from_trigger_table()` and `triggered_nodes()` methods but `compute_next_tasks()` doesn't use it -- it iterates through all completed tasks directly. The optimization is available but not yet integrated into the scheduling path.
 
 ```rust
 // juncture-core/src/pregel/scheduler.rs

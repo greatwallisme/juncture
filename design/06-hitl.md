@@ -405,6 +405,12 @@ for node_id in &pending_nodes {
         return Ok(ExecutionResult::Interrupted { ... });
     }
 }
+```
+
+> **Implementation Note (D-06-4)**: The implementation populates the `interrupt_before` payload with node name and reason instead of leaving it empty, which is an enhancement over the design spec.
+
+```rust
+// 节点执行完成后，merge 之前
 
 // 节点执行完成后，merge 之前
 for (node_id, output) in &step_outputs {
