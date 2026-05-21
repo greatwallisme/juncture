@@ -1111,7 +1111,7 @@ mod tests {
         }
 
         // Filter step >= 2
-        let filtered_gte = saver
+        let result_min_step = saver
             .list(
                 &config,
                 Some(CheckpointFilter {
@@ -1121,10 +1121,10 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(filtered_gte.len(), 3);
+        assert_eq!(result_min_step.len(), 3);
 
         // Filter step <= 2
-        let filtered_lte = saver
+        let result_max_step = saver
             .list(
                 &config,
                 Some(CheckpointFilter {
@@ -1134,10 +1134,10 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(filtered_lte.len(), 3);
+        assert_eq!(result_max_step.len(), 3);
 
         // Filter step 1..=3
-        let filtered_range = saver
+        let result_step_range = saver
             .list(
                 &config,
                 Some(CheckpointFilter {
@@ -1148,7 +1148,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(filtered_range.len(), 3);
+        assert_eq!(result_step_range.len(), 3);
     }
 
     #[tokio::test]
