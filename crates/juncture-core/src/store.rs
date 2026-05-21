@@ -307,6 +307,39 @@ pub enum StoreResult {
     None,
 }
 
+/// Configuration for time-to-live (TTL) behavior on [`MemoryStore`].
+///
+/// Controls automatic expiration of items using lazy evaluation on read.
+/// Unlike the standalone `juncture-store` crate, this implementation does
+/// not use a background sweep task -- expired items are detected and removed
+/// during `get()` and `search()` operations.
+///
+/// # Examples
+///
+/// ```
+/// use juncture_core::store::{MemoryStore, TTLConfig};
+/// use std::time::Duration;
+///
+/// let store = MemoryStore::new().with_ttl_config(TTLConfig {
+///     default_ttl: Some(Duration::from_secs(300)),
+///     refresh_on_read: true,
+/// });
+/// ```
+#[derive(Clone, Debug, Default)]
+pub struct TTLConfig {
+    /// Default TTL duration applied to items inserted via `put()`.
+    ///
+    /// When `None`, items never expire (the default).
+    /// When `Some(duration)`, each `put()` sets `expires_at = now + duration`.
+    pub default_ttl: Option<std::time::Duration>,
+    /// Whether to extend an item's expiration time when it is read via `get()`.
+    ///
+    /// When `true` and `default_ttl` is set, a successful `get()` will update
+    /// the item's `expires_at` to `now + default_ttl`, effectively resetting
+    /// its TTL timer.
+    pub refresh_on_read: bool,
+}
+
 /// In-memory store implementation
 ///
 /// Thread-safe in-memory store using `RwLock` for concurrent access.
@@ -316,6 +349,8 @@ pub struct MemoryStore {
     data: Arc<tokio::sync::RwLock<HashMap<String, HashMap<String, Item>>>>,
     /// Vector index configuration
     index_config: Option<IndexConfig>,
+    /// TTL configuration for item expiration.
+    ttl_config: TTLConfig,
 }
 
 /// Trait for computing embeddings for vector search.
@@ -377,6 +412,7 @@ impl MemoryStore {
         Self {
             data: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             index_config: None,
+            ttl_config: TTLConfig::default(),
         }
     }
 
@@ -390,13 +426,74 @@ impl MemoryStore {
         self.index_config = Some(config);
         self
     }
+
+    /// Configure TTL behavior for item expiration.
+    ///
+    /// # Arguments
+    ///
+    /// * `config` - TTL configuration
+    #[must_use]
+    pub const fn with_ttl_config(mut self, config: TTLConfig) -> Self {
+        self.ttl_config = config;
+        self
+    }
 }
 
 #[async_trait]
 impl Store for MemoryStore {
+    #[allow(
+        clippy::significant_drop_tightening,
+        reason = "Read lock is scoped tightly; write lock acquired after release"
+    )]
     async fn get(&self, namespace: &str, key: &str) -> Result<Option<Item>, StoreError> {
+        // Phase 1: read lock -- check if item exists and whether it is expired
+        let is_expired = {
+            let data = self.data.read().await;
+            let Some(ns) = data.get(namespace) else {
+                return Ok(None);
+            };
+            let Some(item) = ns.get(key) else {
+                return Ok(None);
+            };
+            item.is_expired()
+        };
+
+        if is_expired {
+            // Phase 2a: write lock -- lazily remove expired item
+            let mut data = self.data.write().await;
+            if let Some(ns_map) = data.get_mut(namespace) {
+                ns_map.remove(key);
+            }
+            drop(data);
+            return Ok(None);
+        }
+
+        if self.ttl_config.refresh_on_read && self.ttl_config.default_ttl.is_some() {
+            // Phase 2b: write lock -- refresh TTL and return item
+            let ttl = self.ttl_config.default_ttl.expect("checked is_some above");
+            let now = Utc::now();
+            let new_expires =
+                now + chrono::Duration::from_std(ttl).unwrap_or(chrono::Duration::MAX);
+
+            let mut data = self.data.write().await;
+            if let Some(ns_map) = data.get_mut(namespace)
+                && let Some(item) = ns_map.get_mut(key)
+            {
+                item.expires_at = Some(new_expires);
+                item.updated_at = now;
+                let cloned = item.clone();
+                drop(data);
+                return Ok(Some(cloned));
+            }
+            drop(data);
+            // Item was removed between read and write phases
+            return Ok(None);
+        }
+
+        // Phase 2c: read lock -- return item without modification
         let data = self.data.read().await;
-        Ok(data.get(namespace).and_then(|ns| ns.get(key).cloned()))
+        let item = data.get(namespace).and_then(|ns| ns.get(key).cloned());
+        Ok(item)
     }
 
     #[allow(
@@ -411,6 +508,11 @@ impl Store for MemoryStore {
         _index: Option<Vec<String>>,
     ) -> Result<(), StoreError> {
         let now = Utc::now();
+        let expires_at = self
+            .ttl_config
+            .default_ttl
+            .map(|ttl| now + chrono::Duration::from_std(ttl).unwrap_or(chrono::Duration::MAX));
+
         let mut data = self.data.write().await;
 
         let namespace_map = data
@@ -424,7 +526,7 @@ impl Store for MemoryStore {
             value,
             created_at: existing.map_or(now, |i| i.created_at),
             updated_at: now,
-            expires_at: None,
+            expires_at,
         };
 
         namespace_map.insert(key.to_string(), item);
@@ -454,6 +556,10 @@ impl Store for MemoryStore {
         for (namespace, namespace_map) in data.iter() {
             if namespace.starts_with(&query.namespace_prefix) {
                 for item in namespace_map.values() {
+                    if item.is_expired() {
+                        continue;
+                    }
+
                     if query
                         .filter
                         .as_ref()
@@ -1298,5 +1404,215 @@ mod tests {
         };
         assert!(evaluate_filter(&filter, &active_value()));
         assert!(!evaluate_filter(&filter, &inactive_value()));
+    }
+
+    // --- TTL tests ---
+
+    #[tokio::test]
+    async fn test_ttl_expiration_on_get() {
+        let store = MemoryStore::new().with_ttl_config(TTLConfig {
+            default_ttl: Some(std::time::Duration::from_millis(50)),
+            refresh_on_read: false,
+        });
+
+        store
+            .put("ns", "key1", json!({"v": 1}), None)
+            .await
+            .expect("put failed");
+
+        // Item should be visible immediately
+        let item = store
+            .get("ns", "key1")
+            .await
+            .expect("get failed")
+            .expect("item should exist");
+        assert_eq!(item.key, "key1");
+
+        // Wait for TTL to expire
+        tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+
+        // Item should be expired and lazily removed
+        let result = store.get("ns", "key1").await.expect("get failed");
+        assert!(result.is_none(), "item should have expired");
+    }
+
+    #[tokio::test]
+    async fn test_ttl_refresh_on_read() {
+        let store = MemoryStore::new().with_ttl_config(TTLConfig {
+            default_ttl: Some(std::time::Duration::from_millis(100)),
+            refresh_on_read: true,
+        });
+
+        store
+            .put("ns", "key1", json!({"v": 1}), None)
+            .await
+            .expect("put failed");
+
+        // Read the item multiple times, each read should refresh TTL
+        for _ in 0..3 {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            let item = store
+                .get("ns", "key1")
+                .await
+                .expect("get failed")
+                .expect("item should still exist after refresh");
+            assert_eq!(item.key, "key1");
+        }
+
+        // After 3 reads at 50ms each (~150ms total), the item should still be alive
+        // because each read reset the TTL (100ms).
+        let result = store.get("ns", "key1").await.expect("get failed");
+        assert!(
+            result.is_some(),
+            "item should still exist after TTL refreshes"
+        );
+
+        // Now wait longer than the TTL without reading -- it should expire
+        tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+        let result = store.get("ns", "key1").await.expect("get failed");
+        assert!(result.is_none(), "item should have expired after no reads");
+    }
+
+    #[tokio::test]
+    async fn test_ttl_search_filters_expired() {
+        let store = MemoryStore::new().with_ttl_config(TTLConfig {
+            default_ttl: Some(std::time::Duration::from_millis(50)),
+            refresh_on_read: false,
+        });
+
+        store
+            .put("ns", "key1", json!({"v": 1}), None)
+            .await
+            .expect("put failed");
+        store
+            .put("ns", "key2", json!({"v": 2}), None)
+            .await
+            .expect("put failed");
+
+        // Both items should appear in search
+        let query = SearchQuery {
+            namespace_prefix: "ns".to_string(),
+            filter: None,
+            query: None,
+            limit: 10,
+            offset: 0,
+        };
+        let result = store.search(query).await.expect("search failed");
+        assert_eq!(result.total_count, 2);
+
+        // Wait for items to expire
+        tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+
+        // Search should return zero items
+        let query = SearchQuery {
+            namespace_prefix: "ns".to_string(),
+            filter: None,
+            query: None,
+            limit: 10,
+            offset: 0,
+        };
+        let result = store.search(query).await.expect("search failed");
+        assert_eq!(
+            result.total_count, 0,
+            "expired items should be filtered from search"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_no_ttl_items_never_expire() {
+        let store = MemoryStore::new();
+
+        store
+            .put("ns", "key1", json!({"v": 1}), None)
+            .await
+            .expect("put failed");
+
+        // Item should have no expiration -- read internal data to verify
+        let has_no_expiry = {
+            let data = store.data.read().await;
+            data.get("ns")
+                .and_then(|ns| ns.get("key1"))
+                .is_some_and(|item| item.expires_at.is_none())
+        };
+        assert!(has_no_expiry, "item should have no expiration set");
+
+        // Even after a delay, item should remain
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        let result = store.get("ns", "key1").await.expect("get failed");
+        assert!(result.is_some(), "item without TTL should never expire");
+    }
+
+    #[tokio::test]
+    async fn test_ttl_lazy_cleanup_removes_from_underlying_storage() {
+        let store = MemoryStore::new().with_ttl_config(TTLConfig {
+            default_ttl: Some(std::time::Duration::from_millis(30)),
+            refresh_on_read: false,
+        });
+
+        store
+            .put("ns", "key1", json!({"v": 1}), None)
+            .await
+            .expect("put failed");
+
+        // Verify item is in storage
+        let exists_before = {
+            let data = store.data.read().await;
+            data.get("ns").is_some_and(|ns| ns.contains_key("key1"))
+        };
+        assert!(exists_before, "item should exist in storage initially");
+
+        // Wait for expiration
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // Trigger lazy cleanup via get
+        let _ = store.get("ns", "key1").await;
+
+        // Verify item was removed from underlying storage
+        let exists_after = {
+            let data = store.data.read().await;
+            data.get("ns").is_some_and(|ns| ns.contains_key("key1"))
+        };
+        assert!(!exists_after, "expired item should be removed from storage");
+    }
+
+    #[tokio::test]
+    async fn test_ttl_refresh_updates_expires_at() {
+        let store = MemoryStore::new().with_ttl_config(TTLConfig {
+            default_ttl: Some(std::time::Duration::from_millis(200)),
+            refresh_on_read: true,
+        });
+
+        store
+            .put("ns", "key1", json!({"v": 1}), None)
+            .await
+            .expect("put failed");
+
+        let original_expires = {
+            let data = store.data.read().await;
+            data.get("ns")
+                .and_then(|ns| ns.get("key1"))
+                .expect("item")
+                .expires_at
+                .expect("should have expires_at")
+        };
+
+        // Small delay so updated_at differs
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+        let _ = store.get("ns", "key1").await;
+
+        let refreshed_expires = {
+            let data = store.data.read().await;
+            data.get("ns")
+                .and_then(|ns| ns.get("key1"))
+                .expect("item")
+                .expires_at
+                .expect("should have expires_at")
+        };
+
+        assert!(
+            refreshed_expires > original_expires,
+            "refresh_on_read should advance the expiration time: {refreshed_expires} should be > {original_expires}"
+        );
     }
 }

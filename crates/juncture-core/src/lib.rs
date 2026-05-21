@@ -209,7 +209,7 @@ pub use state::{
 };
 pub use store::{
     EmbeddingFunc, FilterExpr, IndexConfig, Item, MemoryStore, SearchItem, SearchQuery,
-    SearchResult, Store, StoreError, StoreOp, StoreResult,
+    SearchResult, Store, StoreError, StoreOp, StoreResult, TTLConfig,
 };
 pub use stream::{
     BatchTransformer, DebugEvent, EventEmitter, FilterFieldsTransformer, JsonParseTransformer,
