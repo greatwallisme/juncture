@@ -35,6 +35,7 @@ use tracing::{Level, event};
 /// * `checkpointer` - Optional checkpointer for immediate write persistence
 /// * `pending_interrupts` - Interrupt signals from prior supersteps (for multi-interrupt matching)
 /// * `scratchpad` - Scratchpad tracking processed interrupts (for null-resume detection)
+/// * `step` - Current superstep number (for observability span attribute `juncture.step`)
 ///
 /// # Returns
 ///
@@ -77,6 +78,7 @@ use tracing::{Level, event};
 ///     None::<Arc<dyn CheckpointSaver>>,
 ///     &pending_interrupts,
 ///     &scratchpad,
+///     0, // step
 /// ).await?;
 /// ```
 #[expect(
@@ -101,6 +103,7 @@ pub async fn execute_superstep<S: State>(
     pending_interrupts: &[InterruptSignal],
     scratchpad: &Scratchpad,
     error_handler_map: &HashMap<String, String>,
+    step: usize,
 ) -> Result<
     (
         SuperstepResult<S>,
@@ -151,7 +154,11 @@ where
             "juncture.node.execute",
             node_name = %node_name,
             task_id = %task_id,
+            "juncture.step" = step,
+            "juncture.thread.id" = %config.thread_id.as_deref().unwrap_or(""),
             "juncture.node.output_type" = tracing::field::Empty,
+            "juncture.node.duration_ms" = tracing::field::Empty,
+            "juncture.node.error" = tracing::field::Empty,
         );
 
         join_set.spawn(
@@ -172,6 +179,8 @@ where
                 let result = tokio::select! {
                     biased;
                     () = token.cancelled() => {
+                        tracing::Span::current().record("juncture.node.error", "cancelled");
+                        tracing::Span::current().record("otel.status_code", "ERROR");
                         return Err((node_name.clone(), JunctureError::execution("Task cancelled")));
                     }
                     result = crate::interrupt::INTERRUPT_CONTEXT.scope(ctx, async move {
@@ -208,6 +217,17 @@ where
 
                 // Record output type in span
                 tracing::Span::current().record("juncture.node.output_type", output_type);
+
+                // Record duration in span
+                let duration_ms = u64::try_from(duration.as_millis()).unwrap_or(u64::MAX);
+                tracing::Span::current().record("juncture.node.duration_ms", duration_ms);
+
+                // Record error attributes when task execution failed
+                if let Err(ref e) = result {
+                    tracing::Span::current()
+                        .record("juncture.node.error", tracing::field::display(e));
+                    tracing::Span::current().record("otel.status_code", "ERROR");
+                }
 
                 #[cfg(feature = "otel")]
                 {
@@ -461,6 +481,7 @@ mod tests {
             &pending_interrupts,
             &scratchpad,
             &HashMap::new(),
+            0,
         )
         .await
         .unwrap();
@@ -497,6 +518,7 @@ mod tests {
             &pending_interrupts,
             &scratchpad,
             &HashMap::new(),
+            0,
         )
         .await
         .unwrap();
@@ -537,6 +559,7 @@ mod tests {
             &pending_interrupts,
             &scratchpad,
             &HashMap::new(),
+            0,
         )
         .await
         .unwrap();
@@ -581,6 +604,7 @@ mod tests {
             &pending_interrupts,
             &scratchpad,
             &HashMap::new(),
+            0,
         )
         .await;
 
@@ -612,6 +636,7 @@ mod tests {
             &pending_interrupts,
             &scratchpad,
             &HashMap::new(),
+            0,
         )
         .await;
 

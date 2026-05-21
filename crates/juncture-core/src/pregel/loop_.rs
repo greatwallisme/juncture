@@ -502,6 +502,9 @@ impl<S: State> PregelLoop<S> {
 
     /// Execute one superstep
     ///
+    /// Delegates to [`runner::execute_superstep`] with the current [`step`](Self::step)
+    /// number for observability span attributes.
+    ///
     /// # Errors
     ///
     /// Returns an error if:
@@ -565,6 +568,7 @@ impl<S: State> PregelLoop<S> {
             &self.pending_interrupts,
             &self.scratchpad,
             &self.error_handler_map,
+            self.step,
         )
         .await?;
 
