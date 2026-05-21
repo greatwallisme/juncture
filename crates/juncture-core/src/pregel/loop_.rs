@@ -417,6 +417,7 @@ impl<S: State> PregelLoop<S> {
         // Check recursion limit
         if self.step >= self.runnable_config.recursion_limit {
             self.status = LoopStatus::OutOfSteps;
+            self.emit_counter("juncture.graph.errors", 1);
             return Err(JunctureError::recursion_limit(
                 self.step,
                 self.runnable_config.recursion_limit,
@@ -434,9 +435,23 @@ impl<S: State> PregelLoop<S> {
             && let Some(reason) = tracker.check()
         {
             self.status = LoopStatus::BudgetExceeded;
+            self.emit_counter("juncture.graph.errors", 1);
             return Err(JunctureError::execution(format!(
                 "Budget exceeded: {reason}"
             )));
+        }
+
+        // Emit budget gauges when a collector is configured
+        if let Some(ref tracker) = self.budget_tracker {
+            let usage = tracker.current_usage();
+            if let Some(ref budget) = self.runnable_config.budget
+                && let Some(max_tokens) = budget.max_tokens
+            {
+                self.emit_gauge(
+                    "juncture.budget.remaining_tokens",
+                    max_tokens.saturating_sub(usage.tokens_used),
+                );
+            }
         }
 
         // Compute next tasks if pending is empty
@@ -533,6 +548,7 @@ impl<S: State> PregelLoop<S> {
         }
 
         // Emit graph invocation counter metric
+        self.emit_counter("juncture.graph.invocations", 1);
         tracing::debug!(
             name: "juncture.graph.invocations",
             step = self.step,
@@ -566,6 +582,17 @@ impl<S: State> PregelLoop<S> {
 
         let duration = start.elapsed().as_millis();
         tracing::Span::current().record("juncture.step.duration_ms", duration);
+
+        // Emit superstep duration histogram metric
+        // duration is u128 from as_millis(), but realistic superstep durations
+        // fit in u64 (millisecond precision, max ~584 million years).
+        let duration_ms = u64::try_from(duration).unwrap_or(u64::MAX);
+        #[allow(
+            clippy::cast_precision_loss,
+            reason = "millisecond durations fit well within f64 precision for histogram recording"
+        )]
+        let duration_f64 = duration_ms as f64;
+        self.emit_histogram("juncture.superstep.duration_ms", duration_f64);
 
         // Emit superstep duration metric
         tracing::debug!(
@@ -1277,6 +1304,34 @@ impl<S: State> PregelLoop<S> {
         let field_count = self.field_versions.len();
         for field_idx in 0..field_count {
             self.state.finish_field(field_idx);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Metric emission helpers
+    // -----------------------------------------------------------------------
+
+    /// Increment a counter metric if a collector is configured.
+    #[inline]
+    fn emit_counter(&self, name: &str, value: u64) {
+        if let Some(ref collector) = self.runnable_config.metrics_collector {
+            collector.inc_counter(name, value);
+        }
+    }
+
+    /// Record a histogram value if a collector is configured.
+    #[inline]
+    fn emit_histogram(&self, name: &str, value: f64) {
+        if let Some(ref collector) = self.runnable_config.metrics_collector {
+            collector.record_histogram(name, value);
+        }
+    }
+
+    /// Set a gauge value if a collector is configured.
+    #[inline]
+    fn emit_gauge(&self, name: &str, value: u64) {
+        if let Some(ref collector) = self.runnable_config.metrics_collector {
+            collector.set_gauge(name, value);
         }
     }
 }

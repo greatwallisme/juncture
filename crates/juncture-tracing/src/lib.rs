@@ -66,7 +66,9 @@ pub use types::{LlmCacheKeyInput, LlmCachePolicy, ServerInfo};
 #[cfg(feature = "otel")]
 pub use config::{TracingConfig, init};
 #[cfg(feature = "otel")]
-pub use metrics::{CounterBuilder, GaugeBuilder, HistogramBuilder, MetricsRegistry};
+pub use metrics::{
+    CounterBuilder, GaugeBuilder, HistogramBuilder, MetricsRegistry, RegistryMetricsCollector,
+};
 
 // Re-export span constants
 pub use spans::{attrs, names};

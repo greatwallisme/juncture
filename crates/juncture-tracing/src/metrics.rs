@@ -696,6 +696,56 @@ impl Default for MetricsRegistry {
     }
 }
 
+/// Adapter that implements [`MetricsCollector`] using a [`MetricsRegistry`].
+///
+/// Use this to wire a `MetricsRegistry` into `RunnableConfig::with_metrics_collector`
+/// so the Pregel engine can emit `OTel` metrics through the registry.
+///
+/// # Examples
+///
+/// ```ignore
+/// use std::sync::Arc;
+/// use juncture_tracing::metrics::{MetricsRegistry, RegistryMetricsCollector};
+/// use juncture_core::config::RunnableConfig;
+///
+/// let registry = MetricsRegistry::new();
+/// let collector = RegistryMetricsCollector::new(registry);
+/// let config = RunnableConfig::new()
+///     .with_metrics_collector(Arc::new(collector));
+/// ```
+#[cfg(feature = "otel")]
+#[derive(Clone, Debug)]
+pub struct RegistryMetricsCollector {
+    registry: MetricsRegistry,
+}
+
+#[cfg(feature = "otel")]
+impl RegistryMetricsCollector {
+    /// Create a new collector backed by the given registry.
+    #[must_use]
+    pub const fn new(registry: MetricsRegistry) -> Self {
+        Self { registry }
+    }
+}
+
+#[cfg(feature = "otel")]
+impl juncture_core::observability::MetricsCollector for RegistryMetricsCollector {
+    fn inc_counter(&self, name: &str, value: u64) {
+        let counter = self.registry.counter(name, |b| b);
+        counter.inc_by(value);
+    }
+
+    fn record_histogram(&self, name: &str, value: f64) {
+        let histogram = self.registry.histogram(name, |b| b);
+        histogram.record(value);
+    }
+
+    fn set_gauge(&self, name: &str, value: u64) {
+        let gauge = self.registry.gauge(name, |b| b);
+        gauge.set(value);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

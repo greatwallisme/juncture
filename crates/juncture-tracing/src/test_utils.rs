@@ -38,6 +38,25 @@ impl Default for TestMetricsCollector {
     }
 }
 
+impl juncture_core::observability::MetricsCollector for TestMetricsCollector {
+    fn inc_counter(&self, name: &str, value: u64) {
+        self.increment_counter(name, value);
+    }
+
+    fn record_histogram(&self, name: &str, value: f64) {
+        self.record_histogram(name, value);
+    }
+
+    fn set_gauge(&self, name: &str, value: u64) {
+        #[allow(
+            clippy::cast_precision_loss,
+            reason = "gauge values from OTel are u64, stored as f64 in test utility"
+        )]
+        let fval = value as f64;
+        self.set_gauge(name, fval);
+    }
+}
+
 impl TestMetricsCollector {
     /// Create a new test metrics collector
     ///

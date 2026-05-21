@@ -230,4 +230,39 @@ impl CachePolicy {
     }
 }
 
+// ---------------------------------------------------------------------------
+// MetricsCollector trait
+// ---------------------------------------------------------------------------
+
+/// Trait for collecting metrics during graph execution.
+///
+/// Implementations can forward to OpenTelemetry, in-memory stores, or any
+/// other metrics backend. Injected via [`RunnableConfig::with_metrics_collector`].
+///
+/// The trait lives in `juncture-core` so the Pregel engine can emit metrics
+/// without depending on `juncture-tracing`. The `juncture-tracing` crate
+/// provides concrete implementations (`TestMetricsCollector`, `RegistryMetricsCollector`).
+///
+/// # Examples
+///
+/// ```ignore
+/// use std::sync::Arc;
+/// use juncture_core::observability::MetricsCollector;
+/// use juncture_core::config::RunnableConfig;
+///
+/// let collector: Arc<dyn MetricsCollector> = /* ... */;
+/// let config = RunnableConfig::new()
+///     .with_metrics_collector(collector);
+/// ```
+pub trait MetricsCollector: Send + Sync + 'static {
+    /// Increment a counter metric by `value`.
+    fn inc_counter(&self, name: &str, value: u64);
+
+    /// Record `value` to a histogram metric.
+    fn record_histogram(&self, name: &str, value: f64);
+
+    /// Set a gauge metric to `value`.
+    fn set_gauge(&self, name: &str, value: u64);
+}
+
 // Rust guideline compliant 2026-05-21

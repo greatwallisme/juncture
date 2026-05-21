@@ -10,6 +10,7 @@ use std::time::Duration;
 
 use crate::checkpoint::CheckpointSaver;
 use crate::interrupt::ResumeValue;
+use crate::observability::MetricsCollector;
 use crate::pregel::BudgetConfig;
 use crate::pregel::Durability;
 use crate::runtime::RuntimeStore;
@@ -82,6 +83,9 @@ pub struct RunnableConfig {
 
     /// Nodes that should interrupt after execution (HITL)
     pub interrupt_after: Option<Vec<String>>,
+
+    /// Optional metrics collector for OpenTelemetry or in-memory metrics
+    pub metrics_collector: Option<Arc<dyn MetricsCollector>>,
 }
 
 impl std::fmt::Debug for RunnableConfig {
@@ -114,6 +118,13 @@ impl std::fmt::Debug for RunnableConfig {
             .field("resume_value", &self.resume_value)
             .field("interrupt_before", &self.interrupt_before)
             .field("interrupt_after", &self.interrupt_after)
+            .field(
+                "metrics_collector",
+                &self
+                    .metrics_collector
+                    .as_ref()
+                    .map(|_| "<MetricsCollector>"),
+            )
             .finish()
     }
 }
@@ -242,6 +253,25 @@ impl RunnableConfig {
     #[must_use]
     pub fn with_interrupt_after(mut self, nodes: Vec<String>) -> Self {
         self.interrupt_after = Some(nodes);
+        self
+    }
+
+    /// Set the metrics collector for observability
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// use std::sync::Arc;
+    /// use juncture_core::config::RunnableConfig;
+    /// use juncture_core::observability::MetricsCollector;
+    ///
+    /// let collector: Arc<dyn MetricsCollector> = /* ... */;
+    /// let config = RunnableConfig::new()
+    ///     .with_metrics_collector(collector);
+    /// ```
+    #[must_use]
+    pub fn with_metrics_collector(mut self, collector: Arc<dyn MetricsCollector>) -> Self {
+        self.metrics_collector = Some(collector);
         self
     }
 }
