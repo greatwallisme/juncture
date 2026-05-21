@@ -12,7 +12,9 @@ use crate::{
         budget::BudgetTracker,
         context::ExecutionContext,
         runner::execute_superstep,
-        scheduler::{FieldVersionTracker, VersionsSeen, compute_next_tasks},
+        scheduler::{
+            FieldVersionTracker, VersionsSeen, compute_next_tasks, schedule_error_handlers,
+        },
         types::{BubbleUp, LoopStatus, PendingTask, SuperstepResult},
     },
     stream::{DebugEvent, StreamEvent},
@@ -180,6 +182,13 @@ pub struct PregelLoop<S: State> {
     ///
     /// Set at the beginning of [`execute_superstep`], read in [`after_tick`].
     superstep_start: Option<Instant>,
+
+    /// Maps node names to their registered error handler node names.
+    ///
+    /// Extracted from builder metadata during `PregelLoop` construction. When a
+    /// task fails and its node has a handler in this map, the engine creates
+    /// a recovery task targeting the handler instead of canceling all tasks.
+    error_handler_map: HashMap<String, String>,
 }
 
 impl<S: State> std::fmt::Debug for PregelLoop<S> {
@@ -205,6 +214,7 @@ impl<S: State> std::fmt::Debug for PregelLoop<S> {
             .field("scratchpad", &self.scratchpad)
             .field("interrupt_versions_seen", &self.interrupt_versions_seen)
             .field("superstep_start", &self.superstep_start.is_some())
+            .field("error_handler_map", &self.error_handler_map.len())
             .finish()
     }
 }
@@ -245,6 +255,43 @@ impl<S: State> PregelLoop<S> {
         config: crate::config::RunnableConfig,
         num_fields: usize,
     ) -> Result<Self, JunctureError> {
+        Self::with_error_handlers(
+            state,
+            nodes,
+            trigger_table,
+            config,
+            num_fields,
+            HashMap::new(),
+        )
+    }
+
+    /// Create a new Pregel loop with error handler mappings
+    ///
+    /// Like [`new`](Self::new) but accepts a pre-built error handler map
+    /// extracted from builder metadata. Nodes with entries in this map
+    /// will have their failures routed to the named handler instead of
+    /// canceling the entire superstep.
+    ///
+    /// # Arguments
+    ///
+    /// * `state` - Initial state
+    /// * `nodes` - Graph nodes
+    /// * `trigger_table` - Trigger table for routing
+    /// * `config` - Execution configuration
+    /// * `num_fields` - Number of fields in the state
+    /// * `error_handler_map` - Maps node names to error handler node names
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the trigger table is invalid.
+    pub fn with_error_handlers(
+        state: S,
+        nodes: IndexMap<String, Arc<dyn Node<S>>>,
+        trigger_table: TriggerTable<S>,
+        config: crate::config::RunnableConfig,
+        num_fields: usize,
+        error_handler_map: HashMap<String, String>,
+    ) -> Result<Self, JunctureError> {
         let node_names: Vec<String> = nodes.keys().cloned().collect();
         let field_versions = FieldVersionTracker::new(num_fields);
         let versions_seen = VersionsSeen::new(&node_names, num_fields);
@@ -277,6 +324,7 @@ impl<S: State> PregelLoop<S> {
             scratchpad: crate::interrupt::Scratchpad::new(),
             interrupt_versions_seen: HashMap::new(),
             superstep_start: None,
+            error_handler_map,
         })
     }
 
@@ -500,6 +548,7 @@ impl<S: State> PregelLoop<S> {
             self.checkpointer.as_ref(),
             &self.pending_interrupts,
             &self.scratchpad,
+            &self.error_handler_map,
         )
         .await?;
 
@@ -551,6 +600,10 @@ impl<S: State> PregelLoop<S> {
     #[expect(
         clippy::too_many_lines,
         reason = "after_tick requires multiple steps: apply writes, bump versions, emit events, compute tasks, drain interrupts, check interrupts, finish channels, increment step"
+    )]
+    #[expect(
+        clippy::cognitive_complexity,
+        reason = "after_tick orchestrates multiple sequential phases: error handler scheduling, stream events, interrupt checking. Splitting would obscure the control flow."
     )]
     pub async fn after_tick(&mut self, result: SuperstepResult<S>) -> Result<(), JunctureError>
     where
@@ -636,6 +689,21 @@ impl<S: State> PregelLoop<S> {
         // Compute next pending tasks
         self.pending_tasks =
             compute_next_tasks(&result.task_outputs, &self.trigger_table, &self.state).await?;
+
+        // Schedule error handler recovery tasks for any failed nodes that have
+        // a registered error handler. These tasks run the handler node which
+        // receives the error context and returns a recovery Command.
+        let recovery_tasks =
+            schedule_error_handlers(&result.task_outputs, &self.nodes, &self.error_handler_map);
+        if !recovery_tasks.is_empty() {
+            tracing::debug!(
+                name: "juncture.error_handler.recovery_tasks",
+                step = self.step,
+                count = recovery_tasks.len(),
+                "Scheduling error handler recovery tasks"
+            );
+            self.pending_tasks.extend(recovery_tasks);
+        }
 
         // Emit RouteDecision debug event after computing next tasks
         if let Some(ref tx) = self.stream_tx {

@@ -9,6 +9,7 @@ use crate::{
     interrupt::{InterruptContext, InterruptSignal, ResumeValue, Scratchpad},
     pregel::types::{PendingTask, SuperstepResult, TaskOutput},
 };
+use std::collections::HashMap;
 use std::{sync::Arc, time::Instant};
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
@@ -84,7 +85,11 @@ use tracing::{Level, event};
 )]
 #[expect(
     clippy::too_many_arguments,
-    reason = "execute_superstep requires: tasks, state, nodes, config, cancellation token, checkpointer, pending interrupts, and scratchpad. All are necessary for the multi-interrupt matching algorithm."
+    reason = "execute_superstep requires: tasks, state, nodes, config, cancellation token, checkpointer, pending interrupts, scratchpad, and error handler map. All are necessary for the multi-interrupt matching algorithm and error recovery."
+)]
+#[expect(
+    clippy::implicit_hasher,
+    reason = "error_handler_map uses std::collections::HashMap as the canonical type matching the builder metadata extraction; no alternative hasher is needed."
 )]
 pub async fn execute_superstep<S: State>(
     pending_tasks: &[PendingTask<S>],
@@ -95,6 +100,7 @@ pub async fn execute_superstep<S: State>(
     checkpointer: Option<&Arc<dyn crate::checkpoint::CheckpointSaver>>,
     pending_interrupts: &[InterruptSignal],
     scratchpad: &Scratchpad,
+    error_handler_map: &HashMap<String, String>,
 ) -> Result<
     (
         SuperstepResult<S>,
@@ -138,6 +144,7 @@ where
         let permit = Arc::clone(&semaphore);
         let token = cancellation_token.clone();
         let ctx = Arc::clone(&interrupt_context);
+        let has_error_handler = error_handler_map.contains_key(&node_name);
 
         // Create span before moving values into the async block
         let span = tracing::info_span!(
@@ -165,7 +172,7 @@ where
                 let result = tokio::select! {
                     biased;
                     () = token.cancelled() => {
-                        return Err(JunctureError::execution("Task cancelled"));
+                        return Err((node_name.clone(), JunctureError::execution("Task cancelled")));
                     }
                     result = crate::interrupt::INTERRUPT_CONTEXT.scope(ctx, async move {
                         node.call(task_state, &task_config).await
@@ -175,22 +182,29 @@ where
                 let duration = start.elapsed();
 
                 // Determine and record output type
-                // Priority: interrupt > send > end > goto > update
-                let output_type = result.as_ref().map_or("error", |command| {
-                    if command.resume.is_some() {
-                        "interrupt"
-                    } else if matches!(command.goto, crate::command::Goto::Send(_)) {
-                        "send"
-                    } else if matches!(command.goto, crate::command::Goto::End) {
-                        "end"
-                    } else if !matches!(command.goto, crate::command::Goto::None) {
-                        "goto"
-                    } else if command.update.is_some() {
-                        "update"
+                // Priority: error_handler > interrupt > send > end > goto > update
+                let output_type = result.as_ref().map_or(
+                    if has_error_handler {
+                        "error_handler"
                     } else {
-                        "none"
-                    }
-                });
+                        "error"
+                    },
+                    |command| {
+                        if command.resume.is_some() {
+                            "interrupt"
+                        } else if matches!(command.goto, crate::command::Goto::Send(_)) {
+                            "send"
+                        } else if matches!(command.goto, crate::command::Goto::End) {
+                            "end"
+                        } else if !matches!(command.goto, crate::command::Goto::None) {
+                            "goto"
+                        } else if command.update.is_some() {
+                            "update"
+                        } else {
+                            "none"
+                        }
+                    },
+                );
 
                 // Record output type in span
                 tracing::Span::current().record("juncture.node.output_type", output_type);
@@ -208,19 +222,23 @@ where
                     );
                 };
 
-                result.map(|command| TaskOutput {
-                    task_id,
-                    node_name,
-                    command,
-                    duration,
-                    trigger: task_trigger,
-                })
+                result
+                    .map(|command| TaskOutput {
+                        task_id,
+                        node_name: node_name.clone(),
+                        command,
+                        duration,
+                        trigger: task_trigger,
+                        error: None,
+                    })
+                    .map_err(|e| (node_name, e))
             }
             .instrument(span),
         );
     }
 
-    // Collect results as they complete
+    // Collect results as they complete. Errors carry the node_name so the
+    // error handler map can be consulted without relying on the error message.
     let mut task_outputs = Vec::new();
 
     while let Some(result) = join_set.join_next().await {
@@ -241,12 +259,34 @@ where
 
                 task_outputs.push(output);
             }
-            Ok(Err(error)) => {
-                // Task failed, cancel remaining tasks
-                cancellation_token.cancel();
-                join_set.shutdown().await;
+            Ok(Err((failed_node_name, error))) => {
+                // Task failed. Check if the node has a registered error handler.
+                // If so, record the error in the output and continue executing
+                // remaining tasks. If not, cancel all remaining tasks.
+                if let Some(handler_name) = error_handler_map.get(&failed_node_name) {
+                    tracing::warn!(
+                        name: "juncture.node.error.handler_scheduled",
+                        node_name = %failed_node_name,
+                        handler = %handler_name,
+                        error = %error,
+                        "Node failed with error handler registered, scheduling recovery"
+                    );
 
-                return Err(error);
+                    task_outputs.push(TaskOutput {
+                        task_id: uuid::Uuid::new_v4().to_string(),
+                        node_name: failed_node_name,
+                        command: crate::Command::default(),
+                        duration: std::time::Duration::ZERO,
+                        trigger: crate::pregel::types::TaskTrigger::Pull,
+                        error: Some(error),
+                    });
+                } else {
+                    // No error handler, cancel remaining tasks
+                    cancellation_token.cancel();
+                    join_set.shutdown().await;
+
+                    return Err(error);
+                }
             }
             Err(join_error) => {
                 // Task panicked
@@ -420,6 +460,7 @@ mod tests {
             None,
             &pending_interrupts,
             &scratchpad,
+            &HashMap::new(),
         )
         .await
         .unwrap();
@@ -455,6 +496,7 @@ mod tests {
             None,
             &pending_interrupts,
             &scratchpad,
+            &HashMap::new(),
         )
         .await
         .unwrap();
@@ -494,6 +536,7 @@ mod tests {
             None,
             &pending_interrupts,
             &scratchpad,
+            &HashMap::new(),
         )
         .await
         .unwrap();
@@ -537,6 +580,7 @@ mod tests {
             None,
             &pending_interrupts,
             &scratchpad,
+            &HashMap::new(),
         )
         .await;
 
@@ -567,6 +611,7 @@ mod tests {
             None,
             &pending_interrupts,
             &scratchpad,
+            &HashMap::new(),
         )
         .await;
 

@@ -96,7 +96,8 @@ pub struct SuperstepResult<S: State> {
 /// Output from a single completed task
 ///
 /// Contains the task ID, node name, command returned by the node,
-/// trigger type, and execution duration.
+/// trigger type, execution duration, and optional error information
+/// when the node has a registered error handler.
 pub struct TaskOutput<S: State> {
     /// Task identifier
     pub task_id: String,
@@ -112,6 +113,12 @@ pub struct TaskOutput<S: State> {
 
     /// What triggered this task
     pub trigger: TaskTrigger,
+
+    /// Error that occurred during execution, if the node has a registered
+    /// error handler. When present, `command` contains the error handler's
+    /// output. When absent but the task failed, the error propagates
+    /// immediately (no recovery).
+    pub error: Option<crate::JunctureError>,
 }
 
 impl<S: State> std::fmt::Debug for TaskOutput<S> {
@@ -122,6 +129,7 @@ impl<S: State> std::fmt::Debug for TaskOutput<S> {
             .field("command", &"<command>")
             .field("duration", &self.duration)
             .field("trigger", &self.trigger)
+            .field("error", &self.error)
             .finish()
     }
 }
@@ -137,6 +145,13 @@ where
             command: self.command.clone(),
             duration: self.duration,
             trigger: self.trigger.clone(),
+            // JunctureError is not Clone (contains Backtrace). For cloned
+            // TaskOutputs the error is reconstructed from the display string
+            // so that recovery scheduling still works after cloning.
+            error: self
+                .error
+                .as_ref()
+                .map(|e| crate::JunctureError::execution(e.to_string())),
         }
     }
 }
@@ -429,7 +444,9 @@ impl<T> SyncAsyncFuture<T> {
     ///
     /// Use this when the result requires computation (e.g., cache miss,
     /// network call, or LLM invocation).
-    pub fn pending(fut: impl std::future::Future<Output = Result<T, crate::JunctureError>> + Send + 'static) -> Self {
+    pub fn pending(
+        fut: impl std::future::Future<Output = Result<T, crate::JunctureError>> + Send + 'static,
+    ) -> Self {
         Self::Future(Box::pin(fut))
     }
 
@@ -485,24 +502,27 @@ mod tests {
             .result()
             .await
             .expect_err("Ready(None) should yield Err");
-        assert!(err.is_empty_channel(), "expected EmptyChannel error, got {err:?}");
+        assert!(
+            err.is_empty_channel(),
+            "expected EmptyChannel error, got {err:?}"
+        );
     }
 
     #[tokio::test]
     async fn from_trait_creates_ready_some() {
         let saf = SyncAsyncFuture::from("hello");
         assert!(saf.is_ready());
-        assert_eq!(saf.result().await.expect("From<T> should yield Ok"), "hello");
+        assert_eq!(
+            saf.result().await.expect("From<T> should yield Ok"),
+            "hello"
+        );
     }
 
     #[tokio::test]
     async fn pending_future_returns_ok() {
         let saf = SyncAsyncFuture::pending(async { Ok::<_, JunctureError>(99_u64) });
         assert!(!saf.is_ready());
-        assert_eq!(
-            saf.result().await.expect("pending Ok should yield Ok"),
-            99
-        );
+        assert_eq!(saf.result().await.expect("pending Ok should yield Ok"), 99);
     }
 
     #[tokio::test]
@@ -515,10 +535,7 @@ mod tests {
             .result()
             .await
             .expect_err("pending Err should yield Err");
-        assert!(
-            err.is_execution(),
-            "expected Execution error, got {err:?}"
-        );
+        assert!(err.is_execution(), "expected Execution error, got {err:?}");
         assert_eq!(format!("{error}"), format!("{err}"));
     }
 

@@ -64,6 +64,15 @@ pub struct NodeMetadata {
 
     /// Retry policies for this node
     pub retry_policies: Vec<RetryPolicy>,
+
+    /// Optional error handler node name for engine-level error recovery.
+    ///
+    /// When a task executing this node fails, the Pregel engine checks this
+    /// field. If set, the engine creates a recovery task targeting the named
+    /// handler node instead of canceling all remaining tasks. The error
+    /// handler node receives a [`NodeError`] and returns a [`Command`] whose
+    /// update is applied normally.
+    pub error_handler: Option<String>,
 }
 
 /// Retry policy for node execution
@@ -709,6 +718,7 @@ impl<S: State> StateGraph<S> {
                 metadata,
                 destinations,
                 retry_policies,
+                error_handler: None,
             },
         );
 

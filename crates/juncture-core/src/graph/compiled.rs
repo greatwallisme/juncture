@@ -104,6 +104,22 @@ impl<S: State> CompiledGraph<S> {
         }
     }
 
+    /// Extract error handler map from builder metadata.
+    ///
+    /// Builds a `HashMap<String, String>` mapping node names to their
+    /// registered error handler node names by scanning builder metadata.
+    fn build_error_handler_map(&self) -> std::collections::HashMap<String, String> {
+        self.inner
+            .builder_metadata
+            .iter()
+            .filter_map(|(node_name, meta)| {
+                meta.error_handler
+                    .as_ref()
+                    .map(|handler| (node_name.clone(), handler.clone()))
+            })
+            .collect()
+    }
+
     /// Merge compile-time interrupt defaults with runtime config.
     ///
     /// Runtime values (from `RunnableConfig`) take precedence when present.
@@ -208,13 +224,17 @@ impl<S: State> CompiledGraph<S> {
         // Maximum number of fields supported (u64 bitmask in FieldsChanged)
         let num_fields = 64;
 
+        // Extract error handler map from builder metadata
+        let error_handler_map = self.build_error_handler_map();
+
         // Create Pregel loop
-        let mut pregel = PregelLoop::new(
+        let mut pregel = PregelLoop::with_error_handlers(
             input,
             self.inner.nodes.clone(),
             self.inner.trigger_table.clone(),
             config.clone(),
             num_fields,
+            error_handler_map,
         )?;
 
         // Execute the loop
@@ -309,13 +329,17 @@ impl<S: State> CompiledGraph<S> {
         let capacity = stream_capacity(&mode);
         let (tx, rx) = mpsc::channel(capacity);
 
+        // Extract error handler map from builder metadata
+        let error_handler_map = self.build_error_handler_map();
+
         // Create Pregel loop
-        let mut pregel = PregelLoop::new(
+        let mut pregel = PregelLoop::with_error_handlers(
             input,
             self.inner.nodes.clone(),
             self.inner.trigger_table.clone(),
             effective,
             num_fields,
+            error_handler_map,
         )?;
 
         // Create a separate channel for PregelLoop's internal stream events.
@@ -461,12 +485,15 @@ impl<S: State> CompiledGraph<S> {
             exec_config.run_id = Some(uuid::Uuid::new_v4().to_string());
         }
 
-        let mut pregel = PregelLoop::new(
+        let error_handler_map = self.build_error_handler_map();
+
+        let mut pregel = PregelLoop::with_error_handlers(
             input,
             self.inner.nodes.clone(),
             self.inner.trigger_table.clone(),
             exec_config,
             num_fields,
+            error_handler_map,
         )?;
 
         if let Some(cp) = self.inner.checkpointer.clone() {
@@ -607,12 +634,14 @@ impl<S: State> CompiledGraph<S> {
 
         // Create Pregel loop with restored state
         let num_fields = 64; // Maximum number of fields
-        let mut pregel = crate::pregel::PregelLoop::new(
+        let error_handler_map = self.build_error_handler_map();
+        let mut pregel = crate::pregel::PregelLoop::with_error_handlers(
             state,
             self.inner.nodes.clone(),
             self.inner.trigger_table.clone(),
             resume_config,
             num_fields,
+            error_handler_map,
         )?;
 
         // Set checkpointer
@@ -785,12 +814,14 @@ impl<S: State> CompiledGraph<S> {
 
         // Create Pregel loop with restored state
         let num_fields = 64;
-        let mut pregel = PregelLoop::new(
+        let error_handler_map = self.build_error_handler_map();
+        let mut pregel = PregelLoop::with_error_handlers(
             state,
             self.inner.nodes.clone(),
             self.inner.trigger_table.clone(),
             resume_config,
             num_fields,
+            error_handler_map,
         )?;
 
         // Set checkpointer on the Pregel loop

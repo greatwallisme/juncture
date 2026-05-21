@@ -716,78 +716,104 @@ pub const fn consume_triggered_channels<S: State>(state: &mut S, triggered_chann
 
 /// Schedule error handler tasks for failed nodes
 ///
-/// When a node fails during execution, an error handler node can be
-/// scheduled to handle the error and potentially recover. This function
-/// scans for failed nodes and creates pending tasks for their error handlers.
+/// Scans task outputs for failures (indicated by a present `error` field) and
+/// creates recovery [`PendingTask`]s targeting each failed node's registered
+/// error handler. The error handler map is consulted to find the handler node
+/// name for each failed node.
 ///
-/// Note: `TaskOutput` currently does not include error information. Error
-/// handler integration will be added when the error reporting infrastructure
-/// is extended to track task failures.
+/// The recovery tasks use [`TaskTrigger::Pull`] and are appended to the next
+/// superstep's pending task list by the caller (`PregelLoop::after_tick`).
 ///
 /// # Arguments
 ///
-/// * `_failed_tasks` - Tasks that failed in the current superstep
-/// * `nodes` - All nodes in the graph
+/// * `task_outputs` - All task outputs from the completed superstep
+/// * `nodes` - All nodes in the graph (used to verify handler existence)
+/// * `error_handler_map` - Maps node names to their error handler node names
 ///
 /// # Returns
 ///
-/// Vector of pending tasks for error handler nodes (currently empty).
+/// Vector of pending tasks targeting error handler nodes.
 ///
 /// # Examples
 ///
 /// ```ignore
 /// use juncture_core::pregel::scheduler::schedule_error_handlers;
 ///
-/// let recovery_tasks = schedule_error_handlers(&failed_tasks, &nodes);
+/// let recovery_tasks = schedule_error_handlers(&task_outputs, &nodes, &error_handler_map);
 /// for task in recovery_tasks {
-///     // Execute error handler task
+///     // Execute error handler task in next superstep
 /// }
 /// ```
+#[expect(
+    clippy::implicit_hasher,
+    reason = "public API accepts std HashMap; callers typically construct from builder metadata"
+)]
 pub fn schedule_error_handlers<S: State>(
-    _failed_tasks: &[TaskOutput<S>],
+    task_outputs: &[TaskOutput<S>],
     nodes: &indexmap::IndexMap<String, std::sync::Arc<dyn crate::Node<S>>>,
+    error_handler_map: &std::collections::HashMap<String, String>,
 ) -> Vec<PendingTask<S>> {
-    // Error handler integration requires TaskOutput to track failures.
-    // When TaskOutput is extended with error information, this function
-    // will scan for failed tasks and create recovery tasks using
-    // get_error_handler_node().
-    let _ = nodes;
-    Vec::new()
+    let mut recovery_tasks = Vec::new();
+
+    for output in task_outputs {
+        let Some(ref error) = output.error else {
+            continue;
+        };
+
+        let Some(handler_name) = error_handler_map.get(&output.node_name) else {
+            continue;
+        };
+
+        // Verify the handler node actually exists in the graph
+        if !nodes.contains_key(handler_name) {
+            tracing::warn!(
+                name: "juncture.error_handler.missing_node",
+                node_name = %output.node_name,
+                handler_name = %handler_name,
+                error = %error,
+                "Error handler node not found in graph, skipping recovery"
+            );
+            continue;
+        }
+
+        recovery_tasks.push(PendingTask::pull(
+            uuid::Uuid::new_v4().to_string(),
+            handler_name.clone(),
+        ));
+    }
+
+    recovery_tasks
 }
 
-/// Get the error handler node for a given node
+/// Get the error handler node name for a given node
 ///
-/// This function looks up the registered error handler for a node.
-/// Error handlers are registered via node metadata or graph configuration.
-///
-/// Currently returns None for all nodes. Error handler registration will
-/// be added in a future update when the node metadata system is enhanced.
+/// Looks up the registered error handler for a node from the provided map.
+/// Returns the handler node name if one is registered, `None` otherwise.
 ///
 /// # Arguments
 ///
 /// * `node_name` - Name of the node that failed
-/// * `nodes` - All nodes in the graph
+/// * `error_handler_map` - Maps node names to error handler node names
 ///
 /// # Returns
 ///
 /// `Some(error_handler_name)` if an error handler is registered, `None` otherwise
-#[allow(dead_code, reason = "Helper for future error handler integration")]
-fn get_error_handler_node<S: State>(
-    _node_name: &str,
-    _nodes: &indexmap::IndexMap<String, std::sync::Arc<dyn crate::Node<S>>>,
+#[must_use]
+#[allow(
+    dead_code,
+    reason = "public API for external error handler introspection"
+)]
+pub fn get_error_handler_node(
+    node_name: &str,
+    error_handler_map: &std::collections::HashMap<String, String>,
 ) -> Option<String> {
-    // Error handler lookup will be implemented when node metadata
-    // is extended to support error handler registration.
-    // This could be done via:
-    // 1. Node trait method: fn error_handler(&self) -> Option<String>
-    // 2. Graph-level registry: HashMap<String, String> (node -> handler)
-    // 3. Metadata attribute: #[node(error_handler = "handler_name")]
-    None
+    error_handler_map.get(node_name).cloned()
 }
 
 #[cfg(test)]
 mod scheduler_tests {
     use super::*;
+    use crate::node::IntoNode;
 
     #[derive(Clone, Debug)]
     struct TestState;
@@ -886,6 +912,7 @@ mod scheduler_tests {
                 trigger: crate::pregel::types::TaskTrigger::Pull,
                 command: Command::end(),
                 duration: std::time::Duration::from_millis(10),
+                error: None,
             };
 
         let result: SuperstepResult<TestState> = SuperstepResult {
@@ -911,21 +938,110 @@ mod scheduler_tests {
     }
 
     #[test]
-    fn test_schedule_error_handlers_empty() {
+    fn test_schedule_error_handlers_no_failures() {
         let nodes: indexmap::IndexMap<String, std::sync::Arc<dyn crate::Node<TestState>>> =
             indexmap::IndexMap::new();
-        let failed_tasks: Vec<crate::pregel::types::TaskOutput<TestState>> = Vec::new();
+        let task_outputs: Vec<TaskOutput<TestState>> = Vec::new();
+        let error_handler_map = std::collections::HashMap::new();
 
-        let recovery_tasks = schedule_error_handlers(&failed_tasks, &nodes);
+        let recovery_tasks = schedule_error_handlers(&task_outputs, &nodes, &error_handler_map);
         assert!(recovery_tasks.is_empty());
     }
 
     #[test]
-    fn test_get_error_handler_node_none() {
+    fn test_schedule_error_handlers_with_failure() {
+        use crate::Command;
+
+        let mut nodes: indexmap::IndexMap<String, std::sync::Arc<dyn crate::Node<TestState>>> =
+            indexmap::IndexMap::new();
+        nodes.insert(
+            "error_handler_a".to_string(),
+            crate::node::NodeFnCommand(|_s| async move { Ok(Command::end()) })
+                .into_node("error_handler_a"),
+        );
+
+        let task_outputs = vec![TaskOutput {
+            task_id: "task-1".to_string(),
+            node_name: "failing_node".to_string(),
+            command: Command::default(),
+            duration: std::time::Duration::ZERO,
+            trigger: crate::pregel::types::TaskTrigger::Pull,
+            error: Some(crate::JunctureError::execution("test failure")),
+        }];
+
+        let mut error_handler_map = std::collections::HashMap::new();
+        error_handler_map.insert("failing_node".to_string(), "error_handler_a".to_string());
+
+        let recovery_tasks = schedule_error_handlers(&task_outputs, &nodes, &error_handler_map);
+        assert_eq!(recovery_tasks.len(), 1);
+        assert_eq!(recovery_tasks[0].node_name, "error_handler_a");
+    }
+
+    #[test]
+    fn test_schedule_error_handlers_missing_handler_node() {
+        use crate::Command;
+
         let nodes: indexmap::IndexMap<String, std::sync::Arc<dyn crate::Node<TestState>>> =
             indexmap::IndexMap::new();
 
-        let handler = get_error_handler_node("node_a", &nodes);
+        let task_outputs = vec![TaskOutput {
+            task_id: "task-1".to_string(),
+            node_name: "failing_node".to_string(),
+            command: Command::default(),
+            duration: std::time::Duration::ZERO,
+            trigger: crate::pregel::types::TaskTrigger::Pull,
+            error: Some(crate::JunctureError::execution("test failure")),
+        }];
+
+        let mut error_handler_map = std::collections::HashMap::new();
+        error_handler_map.insert(
+            "failing_node".to_string(),
+            "nonexistent_handler".to_string(),
+        );
+
+        let recovery_tasks = schedule_error_handlers(&task_outputs, &nodes, &error_handler_map);
+        assert!(
+            recovery_tasks.is_empty(),
+            "handler node not in graph, no recovery task"
+        );
+    }
+
+    #[test]
+    fn test_schedule_error_handlers_no_handler_registered() {
+        use crate::Command;
+
+        let nodes: indexmap::IndexMap<String, std::sync::Arc<dyn crate::Node<TestState>>> =
+            indexmap::IndexMap::new();
+
+        let task_outputs = vec![TaskOutput {
+            task_id: "task-1".to_string(),
+            node_name: "failing_node".to_string(),
+            command: Command::default(),
+            duration: std::time::Duration::ZERO,
+            trigger: crate::pregel::types::TaskTrigger::Pull,
+            error: Some(crate::JunctureError::execution("test failure")),
+        }];
+
+        let error_handler_map = std::collections::HashMap::new();
+
+        let recovery_tasks = schedule_error_handlers(&task_outputs, &nodes, &error_handler_map);
+        assert!(recovery_tasks.is_empty());
+    }
+
+    #[test]
+    fn test_get_error_handler_node_found() {
+        let mut error_handler_map = std::collections::HashMap::new();
+        error_handler_map.insert("node_a".to_string(), "handler_a".to_string());
+
+        let handler = get_error_handler_node("node_a", &error_handler_map);
+        assert_eq!(handler, Some("handler_a".to_string()));
+    }
+
+    #[test]
+    fn test_get_error_handler_node_not_found() {
+        let error_handler_map = std::collections::HashMap::new();
+
+        let handler = get_error_handler_node("node_a", &error_handler_map);
         assert!(handler.is_none());
     }
 }
