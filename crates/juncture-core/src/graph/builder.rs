@@ -844,6 +844,7 @@ impl<S: State> StateGraph<S> {
     ) -> Result<&mut Self, TopologyError>
     where
         Sub: crate::subgraph::StateSubset<S> + State + Clone + serde::Serialize,
+        Sub::Update: serde::Serialize,
         S: Clone,
     {
         // Create input/output mapping functions using StateSubset.
@@ -916,6 +917,7 @@ impl<S: State> StateGraph<S> {
     ) -> Result<&mut Self, TopologyError>
     where
         Sub: State + serde::Serialize,
+        Sub::Update: serde::Serialize,
         S: Clone,
     {
         let input_map_arc = Arc::new(input_map);
@@ -2187,4 +2189,4 @@ mod tests {
     }
 }
 
-// Rust guideline compliant 2026-05-20
+// Rust guideline compliant 2026-05-21

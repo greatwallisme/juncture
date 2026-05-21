@@ -138,6 +138,7 @@ impl<S: State> CompiledGraph<S> {
     pub fn invoke(&self, input: S, config: &RunnableConfig) -> Result<GraphOutput<S>, JunctureError>
     where
         S: serde::Serialize,
+        S::Update: serde::Serialize,
     {
         // Use blocking executor to run async Pregel loop
         let runtime = tokio::runtime::Runtime::new()
@@ -167,6 +168,7 @@ impl<S: State> CompiledGraph<S> {
     ) -> Result<GraphOutput<S>, JunctureError>
     where
         S: serde::Serialize,
+        S::Update: serde::Serialize,
     {
         // Maximum number of fields supported (u64 bitmask in FieldsChanged)
         let num_fields = 64;
@@ -260,6 +262,7 @@ impl<S: State> CompiledGraph<S> {
     >
     where
         S: Clone + Send + serde::Serialize + 'static,
+        S::Update: serde::Serialize,
     {
         use futures::stream;
 
@@ -411,6 +414,7 @@ impl<S: State> CompiledGraph<S> {
     ) -> Result<S, JunctureError>
     where
         S: Clone + Send + serde::Serialize + 'static,
+        S::Update: serde::Serialize,
     {
         let num_fields = 64;
 
@@ -526,6 +530,7 @@ impl<S: State> CompiledGraph<S> {
     ) -> Result<GraphOutput<S>, JunctureError>
     where
         S: for<'de> serde::Deserialize<'de> + serde::Serialize,
+        S::Update: serde::Serialize,
     {
         let checkpointer =
             self.inner.checkpointer.as_ref().ok_or_else(|| {
@@ -635,6 +640,7 @@ impl<S: State> CompiledGraph<S> {
     ) -> Result<GraphOutput<S>, JunctureError>
     where
         S: for<'de> serde::Deserialize<'de> + serde::Serialize,
+        S::Update: serde::Serialize,
     {
         self.resume(config, ResumeValue::Single(value)).await
     }
@@ -703,6 +709,7 @@ impl<S: State> CompiledGraph<S> {
     >
     where
         S: Clone + Send + for<'de> serde::Deserialize<'de> + serde::Serialize + 'static,
+        S::Update: serde::Serialize,
     {
         use futures::stream;
 
@@ -2411,8 +2418,8 @@ mod tests {
         fn reset_ephemeral(&mut self) {}
     }
 
-    #[derive(Clone, Debug, Default)]
+    #[derive(Clone, Debug, Default, serde::Serialize)]
     struct StateDummyUpdate;
 }
 
-// Rust guideline compliant 2026-05-20
+// Rust guideline compliant 2026-05-21

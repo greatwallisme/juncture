@@ -218,7 +218,10 @@ impl<S: State, Sub: State> SubgraphNode<S, Sub> {
     }
 }
 
-impl<S: State, Sub: State + serde::Serialize> Node<S> for SubgraphNode<S, Sub> {
+impl<S: State, Sub: State + serde::Serialize> Node<S> for SubgraphNode<S, Sub>
+where
+    Sub::Update: serde::Serialize,
+{
     fn call(
         &self,
         state: S,
@@ -513,4 +516,4 @@ impl SubgraphTransformer {
     }
 }
 
-// Rust guideline compliant 2026-05-19
+// Rust guideline compliant 2026-05-21

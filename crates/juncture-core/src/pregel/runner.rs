@@ -101,7 +101,9 @@ pub async fn execute_superstep<S: State>(
         mpsc::UnboundedReceiver<crate::interrupt::InterruptSignal>,
     ),
     JunctureError,
-> {
+>
+where
+    S::Update: serde::Serialize, {
     if pending_tasks.is_empty() {
         // Return empty result and a dummy channel
         let (_interrupt_tx, interrupt_rx) = mpsc::unbounded_channel();
@@ -223,12 +225,17 @@ pub async fn execute_superstep<S: State>(
     while let Some(result) = join_set.join_next().await {
         match result {
             Ok(Ok(output)) => {
-                // Persist writes immediately after each task completes
-                // This ensures crash recovery can resume from the last completed task
+                // Persist writes immediately after each task completes.
+                // This ensures crash recovery can resume from the last completed task.
+                // Each PendingWrite records one field (channel) that was modified,
+                // enabling fine-grained replay of partially completed supersteps.
                 if let Some(cp) = checkpointer
-                    && output.command.update.is_some()
+                    && let Some(ref update) = output.command.update
                 {
-                    let _ = cp.put_writes(config, vec![], &output.task_id).await;
+                    let writes = serialize_pending_writes(&output.task_id, update);
+                    if !writes.is_empty() {
+                        let _ = cp.put_writes(config, writes, &output.task_id).await;
+                    }
                 }
 
                 task_outputs.push(output);
@@ -358,6 +365,35 @@ fn match_resume_to_interrupts(
             values
         }
     }
+}
+
+/// Serialize an Update into per-field `PendingWrite` entries.
+///
+/// The `#[derive(State)]` macro generates Update structs where each field is
+/// `Option<T>`. When serialized to JSON, `None` fields become `null` and
+/// `Some(v)` fields become the actual value. This function filters out null
+/// entries and creates one `PendingWrite` per non-null field, enabling
+/// fine-grained crash recovery at the channel level.
+///
+/// Returns an empty vector if serialization fails (graceful degradation).
+fn serialize_pending_writes<U>(task_id: &str, update: &U) -> Vec<crate::checkpoint::PendingWrite>
+where
+    U: serde::Serialize,
+{
+    let Ok(value) = serde_json::to_value(update) else {
+        return Vec::new();
+    };
+    let Some(obj) = value.as_object() else {
+        return Vec::new();
+    };
+    obj.iter()
+        .filter(|(_, v)| !v.is_null())
+        .map(|(channel, value)| crate::checkpoint::PendingWrite {
+            task_id: task_id.to_string(),
+            channel: channel.clone(),
+            value: value.clone(),
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -779,8 +815,66 @@ mod tests {
         fn reset_ephemeral(&mut self) {}
     }
 
-    #[derive(Clone, Debug, Default)]
+    #[derive(Clone, Debug, Default, serde::Serialize)]
     struct TestUpdate;
+
+    // --- serialize_pending_writes tests ---
+
+    #[test]
+    fn test_serialize_pending_writes_unit_update() {
+        let update = TestUpdate;
+        let writes = serialize_pending_writes("task-1", &update);
+        // Unit struct serializes to null, not an object
+        assert!(writes.is_empty());
+    }
+
+    #[test]
+    fn test_serialize_pending_writes_with_fields() {
+        #[derive(serde::Serialize)]
+        struct SampleUpdate {
+            messages: Option<Vec<String>>,
+            count: Option<u64>,
+            untouched: Option<String>,
+        }
+
+        let update = SampleUpdate {
+            messages: Some(vec!["hello".to_string()]),
+            count: Some(42),
+            untouched: None,
+        };
+
+        let writes = serialize_pending_writes("task-99", &update);
+        assert_eq!(writes.len(), 2);
+
+        let channels: std::collections::HashSet<&str> =
+            writes.iter().map(|w| w.channel.as_str()).collect();
+        assert!(channels.contains("messages"));
+        assert!(channels.contains("count"));
+        assert!(!channels.contains("untouched"));
+
+        for w in &writes {
+            assert_eq!(w.task_id, "task-99");
+        }
+
+        let msg_write = writes.iter().find(|w| w.channel == "messages").expect("messages write");
+        assert_eq!(msg_write.value, serde_json::json!(["hello"]));
+
+        let count_write = writes.iter().find(|w| w.channel == "count").expect("count write");
+        assert_eq!(count_write.value, serde_json::json!(42));
+    }
+
+    #[test]
+    fn test_serialize_pending_writes_all_none() {
+        #[derive(serde::Serialize)]
+        struct EmptyUpdate {
+            a: Option<String>,
+            b: Option<u64>,
+        }
+
+        let update = EmptyUpdate { a: None, b: None };
+        let writes = serialize_pending_writes("task-x", &update);
+        assert!(writes.is_empty());
+    }
 }
 
-// Rust guideline compliant 2026-05-20
+// Rust guideline compliant 2026-05-21

@@ -452,7 +452,12 @@ impl<S: State> PregelLoop<S> {
     /// ```ignore
     /// let result = loop.execute_superstep().await?;
     /// ```
-    pub async fn execute_superstep(&mut self) -> Result<SuperstepResult<S>, JunctureError> {
+    pub async fn execute_superstep(
+        &mut self,
+    ) -> Result<SuperstepResult<S>, JunctureError>
+    where
+        S::Update: serde::Serialize,
+    {
         let node_names: Vec<_> = self
             .pending_tasks
             .iter()
@@ -1422,7 +1427,7 @@ mod tests {
         fn reset_ephemeral(&mut self) {}
     }
 
-    #[derive(Clone, Debug, Default)]
+    #[derive(Clone, Debug, Default, serde::Serialize)]
     struct TestUpdate;
 
     /// Verify that the scratchpad is populated with interrupt IDs after
