@@ -4,6 +4,7 @@
 // using PostgreSQL database.
 
 use async_trait::async_trait;
+use serde::Serialize;
 use std::sync::Arc;
 
 #[cfg(feature = "postgres")]
@@ -14,6 +15,7 @@ use juncture_core::checkpoint::{
     CheckpointPendingTask, CheckpointTuple, PendingWrite, SerializedSend,
 };
 use juncture_core::config::RunnableConfig;
+use juncture_core::interrupt::InterruptSignal;
 
 use crate::error::CheckpointError;
 use crate::serde::{SerializerKind, deserialize_auto};
@@ -74,6 +76,47 @@ impl std::fmt::Debug for PostgresSaver {
     }
 }
 
+/// SQL for creating the `checkpoints` table, including the `pending_interrupts` column.
+#[cfg(feature = "postgres")]
+const CHECKPOINTS_CREATE_TABLE_SQL: &str = r"
+    CREATE TABLE IF NOT EXISTS checkpoints (
+        thread_id TEXT NOT NULL,
+        checkpoint_ns TEXT NOT NULL DEFAULT '',
+        checkpoint_id TEXT NOT NULL,
+        parent_checkpoint_id TEXT,
+        channel_values BYTEA NOT NULL,
+        channel_versions BYTEA NOT NULL,
+        versions_seen BYTEA NOT NULL,
+        pending_tasks BYTEA,
+        pending_sends BYTEA,
+        pending_interrupts BYTEA,
+        schema_version INTEGER NOT NULL DEFAULT 1,
+        metadata BYTEA NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        PRIMARY KEY (thread_id, checkpoint_ns, checkpoint_id)
+    )
+";
+
+/// SQL for creating the `checkpoint_writes` table.
+#[cfg(feature = "postgres")]
+const CHECKPOINT_WRITES_CREATE_TABLE_SQL: &str = r"
+    CREATE TABLE IF NOT EXISTS checkpoint_writes (
+        thread_id TEXT NOT NULL,
+        checkpoint_ns TEXT NOT NULL DEFAULT '',
+        checkpoint_id TEXT NOT NULL,
+        task_id TEXT NOT NULL,
+        channel TEXT NOT NULL,
+        value BYTEA NOT NULL,
+        idx INTEGER NOT NULL,
+        PRIMARY KEY (thread_id, checkpoint_ns, checkpoint_id, task_id, idx)
+    )
+";
+
+/// Columns selected from the checkpoints table for deserialization.
+#[cfg(feature = "postgres")]
+const CHECKPOINT_SELECT_COLUMNS: &str = "channel_values, channel_versions, versions_seen, pending_tasks, pending_sends, \
+     pending_interrupts, schema_version, metadata, checkpoint_id, created_at";
+
 #[cfg(feature = "postgres")]
 impl PostgresSaver {
     /// Create new `PostgreSQL` saver
@@ -90,48 +133,28 @@ impl PostgresSaver {
             .await
             .map_err(|e| CheckpointError::Database(e.to_string()))?;
 
-        // Run migrations
-        sqlx::query(
-            r"
-            CREATE TABLE IF NOT EXISTS checkpoints (
-                thread_id TEXT NOT NULL,
-                checkpoint_ns TEXT NOT NULL DEFAULT '',
-                checkpoint_id TEXT NOT NULL,
-                parent_checkpoint_id TEXT,
-                channel_values BYTEA NOT NULL,
-                channel_versions BYTEA NOT NULL,
-                versions_seen BYTEA NOT NULL,
-                pending_tasks BYTEA,
-                pending_sends BYTEA,
-                schema_version INTEGER NOT NULL DEFAULT 1,
-                metadata BYTEA NOT NULL,
-                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                PRIMARY KEY (thread_id, checkpoint_ns, checkpoint_id)
-            )
-            ",
-        )
-        .execute(&pool)
-        .await
-        .map_err(|e| CheckpointError::Database(e.to_string()))?;
+        Self::run_schema_migrations(&pool).await?;
 
-        // Create checkpoint_writes table for pending writes
-        sqlx::query(
-            r"
-            CREATE TABLE IF NOT EXISTS checkpoint_writes (
-                thread_id TEXT NOT NULL,
-                checkpoint_ns TEXT NOT NULL DEFAULT '',
-                checkpoint_id TEXT NOT NULL,
-                task_id TEXT NOT NULL,
-                channel TEXT NOT NULL,
-                value BYTEA NOT NULL,
-                idx INTEGER NOT NULL,
-                PRIMARY KEY (thread_id, checkpoint_ns, checkpoint_id, task_id, idx)
-            )
-            ",
-        )
-        .execute(&pool)
-        .await
-        .map_err(|e| CheckpointError::Database(e.to_string()))?;
+        Ok(Self {
+            pool: Arc::new(pool),
+            serializer: SerializerKind::default(),
+        })
+    }
+
+    /// Run all schema migrations on a newly connected pool.
+    ///
+    /// Creates tables and indexes if they do not exist, then applies
+    /// additive column migrations for databases created before schema changes.
+    async fn run_schema_migrations(pool: &sqlx::PgPool) -> Result<(), CheckpointError> {
+        sqlx::query(CHECKPOINTS_CREATE_TABLE_SQL)
+            .execute(pool)
+            .await
+            .map_err(|e| CheckpointError::Database(e.to_string()))?;
+
+        sqlx::query(CHECKPOINT_WRITES_CREATE_TABLE_SQL)
+            .execute(pool)
+            .await
+            .map_err(|e| CheckpointError::Database(e.to_string()))?;
 
         // Create indexes
         sqlx::query(
@@ -140,24 +163,28 @@ impl PostgresSaver {
                 ON checkpoints(thread_id, checkpoint_ns, created_at DESC)
             ",
         )
-        .execute(&pool)
+        .execute(pool)
         .await
         .map_err(|e| CheckpointError::Database(e.to_string()))?;
 
         sqlx::query(
             r"
             CREATE INDEX IF NOT EXISTS idx_checkpoint_writes_lookup
-            ON checkpoint_writes (thread_id, checkpoint_ns, checkpoint_id)
+                ON checkpoint_writes (thread_id, checkpoint_ns, checkpoint_id)
             ",
         )
-        .execute(&pool)
+        .execute(pool)
         .await
         .map_err(|e| CheckpointError::Database(e.to_string()))?;
 
-        Ok(Self {
-            pool: Arc::new(pool),
-            serializer: SerializerKind::default(),
-        })
+        // Add pending_interrupts column for databases created before this field existed.
+        // PostgreSQL supports IF NOT EXISTS for ALTER TABLE ADD COLUMN.
+        sqlx::query("ALTER TABLE checkpoints ADD COLUMN IF NOT EXISTS pending_interrupts BYTEA")
+            .execute(pool)
+            .await
+            .map_err(|e| CheckpointError::Database(e.to_string()))?;
+
+        Ok(())
     }
 
     /// Create a `PostgresSaver` with a custom serializer
@@ -194,6 +221,7 @@ impl PostgresSaver {
         versions_seen_bytes: &[u8],
         pending_tasks_bytes: Option<&[u8]>,
         pending_sends_bytes: Option<&[u8]>,
+        pending_interrupts_bytes: Option<&[u8]>,
         schema_version: i64,
         checkpoint_id: String,
         created_at: String,
@@ -222,6 +250,13 @@ impl PostgresSaver {
             })
             .transpose()?
             .unwrap_or_default();
+        let pending_interrupts: Vec<InterruptSignal> = pending_interrupts_bytes
+            .map(|bytes| {
+                deserialize_auto::<Vec<InterruptSignal>>(bytes)
+                    .map_err(|e| CoreCheckpointError::Storage(e.to_string()))
+            })
+            .transpose()?
+            .unwrap_or_default();
 
         Ok(Checkpoint {
             id: checkpoint_id,
@@ -230,7 +265,7 @@ impl PostgresSaver {
             versions_seen,
             pending_tasks,
             pending_sends,
-            pending_interrupts: vec![],
+            pending_interrupts,
             schema_version: u32::try_from(schema_version).expect("schema_version fits in u32"),
             created_at,
             v: 1,
@@ -262,6 +297,9 @@ impl PostgresSaver {
         let pending_sends_bytes: Option<Vec<u8>> = row
             .try_get("pending_sends")
             .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
+        let pending_interrupts_bytes: Option<Vec<u8>> = row
+            .try_get("pending_interrupts")
+            .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
         let schema_version: i64 = row
             .try_get("schema_version")
             .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
@@ -281,6 +319,7 @@ impl PostgresSaver {
             &versions_seen_bytes,
             pending_tasks_bytes.as_deref(),
             pending_sends_bytes.as_deref(),
+            pending_interrupts_bytes.as_deref(),
             schema_version,
             checkpoint_id,
             created_at,
@@ -387,6 +426,22 @@ impl PostgresSaver {
             })
             .collect::<Result<Vec<_>, CoreCheckpointError>>()
     }
+
+    /// Serialize a value only when it is non-empty, returning `None` for empty slices.
+    ///
+    /// Avoids storing trivially empty blobs for optional columns.
+    fn serialize_optional<T: Serialize>(
+        serializer: &SerializerKind,
+        value: &Vec<T>,
+    ) -> Result<Option<Vec<u8>>, CoreCheckpointError> {
+        if value.is_empty() {
+            return Ok(None);
+        }
+        serializer
+            .serialize(value)
+            .map(Some)
+            .map_err(|e| CoreCheckpointError::Storage(e.to_string()))
+    }
 }
 
 #[async_trait]
@@ -400,29 +455,22 @@ impl juncture_core::checkpoint::CheckpointSaver for PostgresSaver {
             Self::get_thread_id(config).map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
         let checkpoint_ns = Self::get_checkpoint_ns(config);
 
+        let select_sql = format!("SELECT {CHECKPOINT_SELECT_COLUMNS} FROM checkpoints");
+
         let row = if let Some(checkpoint_id) = &config.checkpoint_id {
-            sqlx::query(
-                "SELECT channel_values, channel_versions, versions_seen,
-                        pending_tasks, pending_sends, schema_version, metadata,
-                        checkpoint_id, created_at
-                 FROM checkpoints
-                 WHERE thread_id = $1 AND checkpoint_ns = $2 AND checkpoint_id = $3",
-            )
+            sqlx::query(&format!(
+                "{select_sql} WHERE thread_id = $1 AND checkpoint_ns = $2 AND checkpoint_id = $3"
+            ))
             .bind(&thread_id)
             .bind(&checkpoint_ns)
             .bind(checkpoint_id)
             .fetch_optional(&*self.pool)
             .await
         } else {
-            sqlx::query(
-                "SELECT channel_values, channel_versions, versions_seen,
-                        pending_tasks, pending_sends, schema_version, metadata,
-                        checkpoint_id, created_at
-                 FROM checkpoints
-                 WHERE thread_id = $1 AND checkpoint_ns = $2
-                 ORDER BY created_at DESC
-                 LIMIT 1",
-            )
+            sqlx::query(&format!(
+                "{select_sql} WHERE thread_id = $1 AND checkpoint_ns = $2 \
+                 ORDER BY created_at DESC LIMIT 1"
+            ))
             .bind(&thread_id)
             .bind(&checkpoint_ns)
             .fetch_optional(&*self.pool)
@@ -462,15 +510,13 @@ impl juncture_core::checkpoint::CheckpointSaver for PostgresSaver {
                 || f.after.is_some()
         });
 
+        let select_sql = format!("SELECT {CHECKPOINT_SELECT_COLUMNS} FROM checkpoints");
+
         let rows = if has_non_limit_filter {
-            sqlx::query(
-                "SELECT channel_values, channel_versions, versions_seen,
-                        pending_tasks, pending_sends, schema_version, metadata,
-                        checkpoint_id, created_at
-                 FROM checkpoints
-                 WHERE thread_id = $1 AND checkpoint_ns = $2
-                 ORDER BY created_at DESC",
-            )
+            sqlx::query(&format!(
+                "{select_sql} WHERE thread_id = $1 AND checkpoint_ns = $2 \
+                 ORDER BY created_at DESC"
+            ))
             .bind(&thread_id)
             .bind(&checkpoint_ns)
             .fetch_all(&*self.pool)
@@ -479,15 +525,10 @@ impl juncture_core::checkpoint::CheckpointSaver for PostgresSaver {
         } else {
             let limit = i64::try_from(filter.as_ref().and_then(|f| f.limit).unwrap_or(10))
                 .expect("limit value fits in i64");
-            sqlx::query(
-                "SELECT channel_values, channel_versions, versions_seen,
-                        pending_tasks, pending_sends, schema_version, metadata,
-                        checkpoint_id, created_at
-                 FROM checkpoints
-                 WHERE thread_id = $1 AND checkpoint_ns = $2
-                 ORDER BY created_at DESC
-                 LIMIT $3",
-            )
+            sqlx::query(&format!(
+                "{select_sql} WHERE thread_id = $1 AND checkpoint_ns = $2 \
+                 ORDER BY created_at DESC LIMIT $3"
+            ))
             .bind(&thread_id)
             .bind(&checkpoint_ns)
             .bind(limit)
@@ -540,24 +581,12 @@ impl juncture_core::checkpoint::CheckpointSaver for PostgresSaver {
             .serializer
             .serialize(&checkpoint.versions_seen)
             .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
-        let pending_tasks_bytes = if checkpoint.pending_tasks.is_empty() {
-            None
-        } else {
-            Some(
-                self.serializer
-                    .serialize(&checkpoint.pending_tasks)
-                    .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?,
-            )
-        };
-        let pending_sends_bytes = if checkpoint.pending_sends.is_empty() {
-            None
-        } else {
-            Some(
-                self.serializer
-                    .serialize(&checkpoint.pending_sends)
-                    .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?,
-            )
-        };
+        let pending_tasks_bytes =
+            Self::serialize_optional(&self.serializer, &checkpoint.pending_tasks)?;
+        let pending_sends_bytes =
+            Self::serialize_optional(&self.serializer, &checkpoint.pending_sends)?;
+        let pending_interrupts_bytes =
+            Self::serialize_optional(&self.serializer, &checkpoint.pending_interrupts)?;
         let metadata_bytes = self
             .serializer
             .serialize(&metadata)
@@ -579,8 +608,9 @@ impl juncture_core::checkpoint::CheckpointSaver for PostgresSaver {
             INSERT INTO checkpoints
             (thread_id, checkpoint_ns, checkpoint_id, parent_checkpoint_id,
              channel_values, channel_versions, versions_seen,
-             pending_tasks, pending_sends, schema_version, metadata, created_at)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+             pending_tasks, pending_sends, pending_interrupts,
+             schema_version, metadata, created_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
             ON CONFLICT (thread_id, checkpoint_ns, checkpoint_id) DO UPDATE SET
                 parent_checkpoint_id = EXCLUDED.parent_checkpoint_id,
                 channel_values = EXCLUDED.channel_values,
@@ -588,6 +618,7 @@ impl juncture_core::checkpoint::CheckpointSaver for PostgresSaver {
                 versions_seen = EXCLUDED.versions_seen,
                 pending_tasks = EXCLUDED.pending_tasks,
                 pending_sends = EXCLUDED.pending_sends,
+                pending_interrupts = EXCLUDED.pending_interrupts,
                 schema_version = EXCLUDED.schema_version,
                 metadata = EXCLUDED.metadata
             ",
@@ -601,6 +632,7 @@ impl juncture_core::checkpoint::CheckpointSaver for PostgresSaver {
         .bind(&versions_seen_bytes)
         .bind(&pending_tasks_bytes)
         .bind(&pending_sends_bytes)
+        .bind(&pending_interrupts_bytes)
         .bind(i64::from(checkpoint.schema_version))
         .bind(&metadata_bytes)
         .bind(&checkpoint.created_at)
@@ -960,6 +992,81 @@ mod tests {
             .execute(&*saver.pool)
             .await;
     }
+
+    #[tokio::test]
+    #[cfg(feature = "postgres")]
+    async fn test_postgres_saver_pending_interrupts_roundtrip() {
+        let conn_str = std::env::var("TEST_POSTGRES_URL")
+            .unwrap_or_else(|_| "postgresql://postgres:postgres@localhost:5432/test".to_string());
+
+        let Ok(saver) = PostgresSaver::new(&conn_str).await else {
+            return;
+        };
+
+        let config = create_test_config("thread-interrupts-pg");
+
+        let checkpoint = Checkpoint {
+            id: "cp-int-pg-1".to_string(),
+            channel_values: json!({"state": "paused"}),
+            channel_versions: std::collections::HashMap::new(),
+            versions_seen: std::collections::HashMap::new(),
+            pending_tasks: vec![],
+            pending_sends: vec![],
+            pending_interrupts: vec![
+                InterruptSignal {
+                    index: 0,
+                    id: Some("interrupt-approval".to_string()),
+                    payload: json!({"reason": "awaiting human review"}),
+                },
+                InterruptSignal {
+                    index: 1,
+                    id: None,
+                    payload: json!({"type": "confirmation"}),
+                },
+            ],
+            schema_version: 1,
+            created_at: Utc::now().to_rfc3339(),
+            v: 1,
+            new_versions: std::collections::HashMap::new(),
+            counters_since_delta_snapshot: std::collections::HashMap::new(),
+        };
+
+        let metadata = CheckpointMetadata {
+            source: CheckpointSource::Interrupt {
+                node: "approval_node".to_string(),
+            },
+            step: 3,
+            ..create_test_metadata()
+        };
+        let result_config = saver
+            .put(&config, checkpoint.clone(), metadata)
+            .await
+            .unwrap();
+
+        // Retrieve and verify pending_interrupts persisted correctly
+        let tuple = saver.get_tuple(&result_config).await.unwrap().unwrap();
+        assert_eq!(tuple.checkpoint.pending_interrupts.len(), 2);
+
+        let first = &tuple.checkpoint.pending_interrupts[0];
+        assert_eq!(first.index, 0);
+        assert_eq!(first.id.as_deref(), Some("interrupt-approval"));
+        assert_eq!(first.payload, json!({"reason": "awaiting human review"}));
+
+        let second = &tuple.checkpoint.pending_interrupts[1];
+        assert_eq!(second.index, 1);
+        assert!(second.id.is_none());
+        assert_eq!(second.payload, json!({"type": "confirmation"}));
+
+        // Clean up
+        let _ = sqlx::query("DELETE FROM checkpoints WHERE thread_id = $1")
+            .bind(&config.thread_id)
+            .execute(&*saver.pool)
+            .await;
+        let _ = sqlx::query("DELETE FROM checkpoint_writes WHERE thread_id = $1")
+            .bind(&config.thread_id)
+            .execute(&*saver.pool)
+            .await;
+    }
 }
 
-// Rust guideline compliant 2026-05-20
+// Rust guideline compliant 2026-05-21

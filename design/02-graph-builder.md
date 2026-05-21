@@ -79,6 +79,12 @@ impl<S: State> StateGraph<S> {
         retry_policies: Vec<RetryPolicy>,
     ) -> &mut Self;
 
+> **Implementation Note (C-02-2)**: The actual implementation consolidates the per-node parameters
+> (defer, metadata, destinations, retry_policies) into a `NodeMetadata` struct (`builder.rs:20-33`).
+> `add_node()` accepts `IntoNode<S>` and optional `NodeMetadata`, providing a cleaner API than
+> many individual parameters. Builder methods `with_defer()`, `with_metadata()`, `with_retry()`
+> construct `NodeMetadata` ergonomically.
+
 > **Implementation Note**: `RetryingNode` wrapper provides production-grade retry with exponential backoff.
 > Goes beyond LangGraph base retry with jitter, circuit breaker, and comprehensive error classification.
 

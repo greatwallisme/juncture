@@ -15,6 +15,7 @@ use juncture_core::checkpoint::{
     CheckpointPendingTask, CheckpointTuple, PendingWrite, SerializedSend,
 };
 use juncture_core::config::RunnableConfig;
+use juncture_core::interrupt::InterruptSignal;
 
 use crate::error::CheckpointError;
 use crate::serde::{SerializerKind, deserialize_auto};
@@ -110,6 +111,7 @@ impl SqliteSaver {
                 versions_seen BLOB NOT NULL,
                 pending_tasks BLOB,
                 pending_sends BLOB,
+                pending_interrupts BLOB,
                 schema_version INTEGER NOT NULL DEFAULT 1,
                 metadata BLOB NOT NULL,
                 created_at TEXT NOT NULL,
@@ -160,6 +162,18 @@ impl SqliteSaver {
         .execute(&pool)
         .await
         .map_err(|e| CheckpointError::Database(e.to_string()))?;
+
+        // Add pending_interrupts column for databases created before this field existed.
+        // SQLite does not support IF NOT EXISTS for ALTER TABLE ADD COLUMN, so we
+        // must catch and ignore the "duplicate column name" error.
+        let alter_result = sqlx::query("ALTER TABLE checkpoints ADD COLUMN pending_interrupts BLOB")
+            .execute(&pool)
+            .await;
+        match alter_result {
+            Ok(_) => {}
+            Err(e) if e.to_string().contains("duplicate column name") => {}
+            Err(e) => return Err(CheckpointError::Database(e.to_string())),
+        }
 
         Ok(Self {
             pool: Arc::new(pool),
@@ -195,6 +209,7 @@ impl SqliteSaver {
                 versions_seen BLOB NOT NULL,
                 pending_tasks BLOB,
                 pending_sends BLOB,
+                pending_interrupts BLOB,
                 schema_version INTEGER NOT NULL DEFAULT 1,
                 metadata BLOB NOT NULL,
                 created_at TEXT NOT NULL,
@@ -245,6 +260,18 @@ impl SqliteSaver {
         .execute(&pool)
         .await
         .map_err(|e| CheckpointError::Database(e.to_string()))?;
+
+        // Add pending_interrupts column for databases created before this field existed.
+        // SQLite does not support IF NOT EXISTS for ALTER TABLE ADD COLUMN, so we
+        // must catch and ignore the "duplicate column name" error.
+        let alter_result = sqlx::query("ALTER TABLE checkpoints ADD COLUMN pending_interrupts BLOB")
+            .execute(&pool)
+            .await;
+        match alter_result {
+            Ok(_) => {}
+            Err(e) if e.to_string().contains("duplicate column name") => {}
+            Err(e) => return Err(CheckpointError::Database(e.to_string())),
+        }
 
         Ok(Self {
             pool: Arc::new(pool),
@@ -287,6 +314,7 @@ impl SqliteSaver {
         versions_seen_bytes: &[u8],
         pending_tasks_bytes: Option<&[u8]>,
         pending_sends_bytes: Option<&[u8]>,
+        pending_interrupts_bytes: Option<&[u8]>,
         schema_version: i64,
         checkpoint_id: String,
         created_at: String,
@@ -315,6 +343,13 @@ impl SqliteSaver {
             })
             .transpose()?
             .unwrap_or_default();
+        let pending_interrupts: Vec<InterruptSignal> = pending_interrupts_bytes
+            .map(|bytes| {
+                deserialize_auto::<Vec<InterruptSignal>>(bytes)
+                    .map_err(|e| CoreCheckpointError::Storage(e.to_string()))
+            })
+            .transpose()?
+            .unwrap_or_default();
 
         Ok(Checkpoint {
             id: checkpoint_id,
@@ -323,7 +358,7 @@ impl SqliteSaver {
             versions_seen,
             pending_tasks,
             pending_sends,
-            pending_interrupts: vec![],
+            pending_interrupts,
             schema_version: u32::try_from(schema_version).expect("schema_version fits in u32"),
             created_at,
             v: 1,
@@ -355,6 +390,9 @@ impl SqliteSaver {
         let pending_sends_bytes: Option<Vec<u8>> = row
             .try_get("pending_sends")
             .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
+        let pending_interrupts_bytes: Option<Vec<u8>> = row
+            .try_get("pending_interrupts")
+            .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
         let schema_version: i64 = row
             .try_get("schema_version")
             .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
@@ -374,6 +412,7 @@ impl SqliteSaver {
             &versions_seen_bytes,
             pending_tasks_bytes.as_deref(),
             pending_sends_bytes.as_deref(),
+            pending_interrupts_bytes.as_deref(),
             schema_version,
             checkpoint_id,
             created_at,
@@ -496,7 +535,8 @@ impl juncture_core::checkpoint::CheckpointSaver for SqliteSaver {
         let row = if let Some(checkpoint_id) = &config.checkpoint_id {
             sqlx::query(
                 "SELECT channel_values, channel_versions, versions_seen,
-                        pending_tasks, pending_sends, schema_version, metadata,
+                        pending_tasks, pending_sends, pending_interrupts,
+                        schema_version, metadata,
                         checkpoint_id, created_at
                  FROM checkpoints
                  WHERE thread_id = ? AND checkpoint_ns = ? AND checkpoint_id = ?",
@@ -509,7 +549,8 @@ impl juncture_core::checkpoint::CheckpointSaver for SqliteSaver {
         } else {
             sqlx::query(
                 "SELECT channel_values, channel_versions, versions_seen,
-                        pending_tasks, pending_sends, schema_version, metadata,
+                        pending_tasks, pending_sends, pending_interrupts,
+                        schema_version, metadata,
                         checkpoint_id, created_at
                  FROM checkpoints
                  WHERE thread_id = ? AND checkpoint_ns = ?
@@ -558,7 +599,8 @@ impl juncture_core::checkpoint::CheckpointSaver for SqliteSaver {
         let rows = if has_non_limit_filter {
             sqlx::query(
                 "SELECT channel_values, channel_versions, versions_seen,
-                        pending_tasks, pending_sends, schema_version, metadata,
+                        pending_tasks, pending_sends, pending_interrupts,
+                        schema_version, metadata,
                         checkpoint_id, created_at
                  FROM checkpoints
                  WHERE thread_id = ? AND checkpoint_ns = ?
@@ -574,7 +616,8 @@ impl juncture_core::checkpoint::CheckpointSaver for SqliteSaver {
                 .expect("limit value fits in i64");
             sqlx::query(
                 "SELECT channel_values, channel_versions, versions_seen,
-                        pending_tasks, pending_sends, schema_version, metadata,
+                        pending_tasks, pending_sends, pending_interrupts,
+                        schema_version, metadata,
                         checkpoint_id, created_at
                  FROM checkpoints
                  WHERE thread_id = ? AND checkpoint_ns = ?
@@ -643,6 +686,10 @@ impl juncture_core::checkpoint::CheckpointSaver for SqliteSaver {
             .serializer
             .serialize(&checkpoint.pending_sends)
             .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
+        let pending_interrupts_bytes = self
+            .serializer
+            .serialize(&checkpoint.pending_interrupts)
+            .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
         let metadata_bytes = self
             .serializer
             .serialize(&metadata)
@@ -664,8 +711,9 @@ impl juncture_core::checkpoint::CheckpointSaver for SqliteSaver {
             INSERT INTO checkpoints
             (thread_id, checkpoint_ns, checkpoint_id, parent_checkpoint_id,
              channel_values, channel_versions, versions_seen,
-             pending_tasks, pending_sends, schema_version, metadata, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             pending_tasks, pending_sends, pending_interrupts,
+             schema_version, metadata, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT (thread_id, checkpoint_ns, checkpoint_id) DO UPDATE SET
                 parent_checkpoint_id = excluded.parent_checkpoint_id,
                 channel_values = excluded.channel_values,
@@ -673,6 +721,7 @@ impl juncture_core::checkpoint::CheckpointSaver for SqliteSaver {
                 versions_seen = excluded.versions_seen,
                 pending_tasks = excluded.pending_tasks,
                 pending_sends = excluded.pending_sends,
+                pending_interrupts = excluded.pending_interrupts,
                 schema_version = excluded.schema_version,
                 metadata = excluded.metadata
             ",
@@ -686,6 +735,7 @@ impl juncture_core::checkpoint::CheckpointSaver for SqliteSaver {
         .bind(&versions_seen_bytes)
         .bind(&pending_tasks_bytes)
         .bind(&pending_sends_bytes)
+        .bind(&pending_interrupts_bytes)
         .bind(i64::from(checkpoint.schema_version))
         .bind(&metadata_bytes)
         .bind(&checkpoint.created_at)
@@ -1249,6 +1299,68 @@ mod tests {
         assert_eq!(filtered.len(), 2);
         assert!(filtered.iter().all(|t| t.metadata.step >= 3));
     }
+
+    #[tokio::test]
+    #[cfg(feature = "sqlite")]
+    async fn test_sqlite_saver_pending_interrupts_roundtrip() {
+        let saver = SqliteSaver::from_connection_string("sqlite::memory:")
+            .await
+            .unwrap();
+
+        let config = create_test_config("thread-interrupts-sqlite");
+
+        let checkpoint = Checkpoint {
+            id: "cp-int-sqlite-1".to_string(),
+            channel_values: json!({"state": "paused"}),
+            channel_versions: std::collections::HashMap::new(),
+            versions_seen: std::collections::HashMap::new(),
+            pending_tasks: vec![],
+            pending_sends: vec![],
+            pending_interrupts: vec![
+                InterruptSignal {
+                    index: 0,
+                    id: Some("interrupt-approval".to_string()),
+                    payload: json!({"reason": "awaiting human review"}),
+                },
+                InterruptSignal {
+                    index: 1,
+                    id: None,
+                    payload: json!({"type": "confirmation"}),
+                },
+            ],
+            schema_version: 1,
+            created_at: Utc::now().to_rfc3339(),
+            v: 1,
+            new_versions: std::collections::HashMap::new(),
+            counters_since_delta_snapshot: std::collections::HashMap::new(),
+        };
+
+        let metadata = CheckpointMetadata {
+            source: CheckpointSource::Interrupt {
+                node: "approval_node".to_string(),
+            },
+            step: 3,
+            ..create_test_metadata()
+        };
+        let result_config = saver
+            .put(&config, checkpoint.clone(), metadata)
+            .await
+            .unwrap();
+
+        // Retrieve and verify pending_interrupts persisted correctly
+        let tuple = saver.get_tuple(&result_config).await.unwrap().unwrap();
+        assert_eq!(tuple.checkpoint.pending_interrupts.len(), 2);
+
+        let first = &tuple.checkpoint.pending_interrupts[0];
+        assert_eq!(first.index, 0);
+        assert_eq!(first.id.as_deref(), Some("interrupt-approval"));
+        assert_eq!(first.payload, json!({"reason": "awaiting human review"}));
+
+        let second = &tuple.checkpoint.pending_interrupts[1];
+        assert_eq!(second.index, 1);
+        assert!(second.id.is_none());
+        assert_eq!(second.payload, json!({"type": "confirmation"}));
+    }
 }
 
-// Rust guideline compliant 2026-05-20
+// Rust guideline compliant 2026-05-21

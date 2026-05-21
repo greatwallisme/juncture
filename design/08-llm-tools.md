@@ -433,6 +433,10 @@ pub fn tools_condition<S: State + serde::Serialize>(
     state: &S,
     messages_field: &str,  // 默认 "messages"
 ) -> &'static str {
+    // > **Implementation Note (C-08-2)**: The actual implementation requires `S: State + serde::Serialize`
+    // > (not just `S: State`) because `has_pending_tool_calls()` serializes state to JSON to extract
+    // > the messages array. This is a serialization-based approach rather than direct field access,
+    // > providing flexibility for any state type without requiring a `messages()` accessor method.
     // 从 state 中读取消息列表
     // 检查最后一条 AI 消息是否有 tool_calls
     // 有 → "tools"，无 → END

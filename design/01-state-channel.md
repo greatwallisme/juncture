@@ -293,6 +293,10 @@ impl<S: State> CowState<S> {
     /// 获取可变状态（写时复制）
     ///
     /// 首次调用时会克隆 shared Arc，后续调用重用本地副本。
+    ///
+    /// > **Implementation Note (C-01-3)**: The actual implementation replaces the `todo!()` placeholders
+    /// > with production-ready `Arc::make_mut()` for proper clone-on-write semantics. Only the first
+    /// > mutation triggers a clone; subsequent mutations reuse the local copy. See `trait_.rs:100-173`.
     pub fn get_mut(&mut self) -> &mut S {
         if self.pending.is_none() {
             // 首次修改：克隆共享状态
@@ -303,6 +307,10 @@ impl<S: State> CowState<S> {
     }
 
     /// 应用更新（延迟执行）
+    ///
+    /// > **Implementation Note (C-01-3)**: `update()` merges changes into the pending update struct
+    /// > and applies them via `S::apply()` when `commit()` is called, using `Arc::make_mut()` to
+    /// > ensure copy-on-write semantics without unnecessary clones.
     pub fn update(&mut self, changes: S::Update) {
         if let Some(ref mut pending) = self.pending {
             // 合并到待处理的更新
@@ -937,6 +945,11 @@ pub scratch: Option<String>,
 /// 实现：使用工厂方法而非 const（避免 String::new() 在 const context 中的限制）
 /// Message::remove_all() -> Message  // 清空所有消息
 /// Message::remove(id: &str) -> Message  // 删除指定消息
+///
+/// > **Implementation Note (C-01-1)**: The implementation uses factory methods instead of const values.
+/// > `Message::remove_all()` and `Message::remove(id: &str)` are static methods returning constructed
+/// > `Message` instances, while `REMOVE_ALL_MESSAGES` is a `&str` constant (`"__remove_all__"`). This avoids
+/// > `String` field initialization issues in const context and provides better API ergonomics.
 pub const REMOVE_ALL_MESSAGES: Message = Message {
     id: "__remove_all__".to_string(),
     role: Role::System,

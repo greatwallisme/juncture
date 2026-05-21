@@ -223,6 +223,10 @@ pub struct CheckpointNamespace {
     segments: Vec<NamespaceSegment>,
 }
 
+// > **Implementation Note (C-07-1)**: `CheckpointNamespace` implements `Display` trait
+// > (`checkpoint.rs:155-159`), enabling idiomatic `println!("{}", ns)` and `format!("{ns}")` usage.
+// > The display output joins segments with `|` separator for human-readable namespace representation.
+
 #[derive(Clone, Debug)]
 pub struct NamespaceSegment {
     pub node_name: String,

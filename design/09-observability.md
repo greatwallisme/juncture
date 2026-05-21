@@ -236,6 +236,13 @@ impl MetricsRegistry {
     }
 }
 
+// > **Implementation Note (C-09-5)**: The actual implementation uses a handle-based abstraction instead
+// > of direct OTel types. `CounterHandle`, `HistogramHandle`, and `GaugeHandle` wrapper types
+// > (`metrics.rs:16-163`) wrap in-memory storage (HashMap) rather than OpenTelemetry Meter primitives.
+// > This provides a cleaner API for in-memory metrics while maintaining the same method signatures
+// > (`.increment()`, `.record()`, `.set()`). Future integration with a real OTel Meter will swap the
+// > internal storage without changing the handle API.
+
 /// 使用示例
 let registry = juncture::metrics::registry();
 
