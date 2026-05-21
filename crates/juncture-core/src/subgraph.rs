@@ -4,12 +4,8 @@
 //! Subgraphs enable modular composition and reusable graph components.
 
 use crate::{
-    State,
-    checkpoint::CHECKPOINT_NS_SEPARATOR,
-    command::Command,
-    config::RunnableConfig,
-    error::JunctureError,
-    node::Node,
+    State, checkpoint::CHECKPOINT_NS_SEPARATOR, command::Command, config::RunnableConfig,
+    error::JunctureError, node::Node,
 };
 use std::sync::Arc;
 
@@ -222,7 +218,7 @@ impl<S: State, Sub: State> SubgraphNode<S, Sub> {
     }
 }
 
-impl<S: State, Sub: State> Node<S> for SubgraphNode<S, Sub> {
+impl<S: State, Sub: State + serde::Serialize> Node<S> for SubgraphNode<S, Sub> {
     fn call(
         &self,
         state: S,
@@ -247,11 +243,7 @@ impl<S: State, Sub: State> Node<S> for SubgraphNode<S, Sub> {
             // Build child namespace using CHECKPOINT_NS_SEPARATOR between nesting levels
             let child_ns = config.checkpoint_ns.as_ref().map_or_else(
                 || format!("{name}:{invocation_id}"),
-                |parent_ns| {
-                    format!(
-                        "{parent_ns}{CHECKPOINT_NS_SEPARATOR}{name}:{invocation_id}"
-                    )
-                },
+                |parent_ns| format!("{parent_ns}{CHECKPOINT_NS_SEPARATOR}{name}:{invocation_id}"),
             );
 
             // Create child config with updated namespace and resume values from parent

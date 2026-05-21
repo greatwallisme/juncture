@@ -464,10 +464,7 @@ impl<S: State> TimeoutNode<S> {
     /// * `inner` - The node to wrap
     /// * `policy` - Timeout policy governing timeout behavior
     #[must_use]
-    pub fn new(
-        inner: Arc<dyn crate::Node<S>>,
-        policy: crate::TimeoutPolicy,
-    ) -> Self {
+    pub fn new(inner: Arc<dyn crate::Node<S>>, policy: crate::TimeoutPolicy) -> Self {
         let name = inner.name().to_string();
         Self {
             inner,
@@ -564,8 +561,7 @@ where
         Err(_) => Err(crate::JunctureError::node_timeout(
             crate::error::NodeTimeoutError::RunTimeout {
                 node: node_name.to_string(),
-                timeout: u64::try_from(run_timeout.as_millis())
-                    .unwrap_or(u64::MAX),
+                timeout: u64::try_from(run_timeout.as_millis()).unwrap_or(u64::MAX),
             },
         )),
     }
@@ -847,7 +843,7 @@ impl<S: State> StateGraph<S> {
         subgraph: Arc<crate::graph::CompiledGraph<Sub>>,
     ) -> Result<&mut Self, TopologyError>
     where
-        Sub: crate::subgraph::StateSubset<S> + State + Clone,
+        Sub: crate::subgraph::StateSubset<S> + State + Clone + serde::Serialize,
         S: Clone,
     {
         // Create input/output mapping functions using StateSubset.
@@ -919,7 +915,7 @@ impl<S: State> StateGraph<S> {
         config: crate::subgraph::SubgraphConfig,
     ) -> Result<&mut Self, TopologyError>
     where
-        Sub: State,
+        Sub: State + serde::Serialize,
         S: Clone,
     {
         let input_map_arc = Arc::new(input_map);
@@ -2072,9 +2068,7 @@ mod tests {
         let result = execute_with_timeout(
             "test_node",
             std::time::Duration::from_secs(10),
-            |_s: StateDummy, _cfg: &crate::RunnableConfig| async {
-                Ok(crate::Command::end())
-            },
+            |_s: StateDummy, _cfg: &crate::RunnableConfig| async { Ok(crate::Command::end()) },
             StateDummy,
             &config,
         )
@@ -2139,8 +2133,8 @@ mod tests {
         })
         .into_node("inner");
 
-        let policy = crate::TimeoutPolicy::new()
-            .with_run_timeout(std::time::Duration::from_secs(10));
+        let policy =
+            crate::TimeoutPolicy::new().with_run_timeout(std::time::Duration::from_secs(10));
 
         let timeout_node = TimeoutNode::new(inner, policy);
         let config = crate::RunnableConfig::new();
@@ -2160,8 +2154,8 @@ mod tests {
         })
         .into_node("inner");
 
-        let policy = crate::TimeoutPolicy::new()
-            .with_run_timeout(std::time::Duration::from_millis(10));
+        let policy =
+            crate::TimeoutPolicy::new().with_run_timeout(std::time::Duration::from_millis(10));
 
         let timeout_node = TimeoutNode::new(inner, policy);
         let config = crate::RunnableConfig::new();
@@ -2180,8 +2174,8 @@ mod tests {
         })
         .into_node("inner");
 
-        let policy = crate::TimeoutPolicy::new()
-            .with_run_timeout(std::time::Duration::from_secs(10));
+        let policy =
+            crate::TimeoutPolicy::new().with_run_timeout(std::time::Duration::from_secs(10));
 
         let timeout_node = TimeoutNode::new(inner, policy);
         let config = crate::RunnableConfig::new();

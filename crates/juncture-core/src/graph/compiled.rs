@@ -135,11 +135,10 @@ impl<S: State> CompiledGraph<S> {
     /// let output = compiled.invoke(initial_state, &config)?;
     /// let final_state = output.value;
     /// ```
-    pub fn invoke(
-        &self,
-        input: S,
-        config: &RunnableConfig,
-    ) -> Result<GraphOutput<S>, JunctureError> {
+    pub fn invoke(&self, input: S, config: &RunnableConfig) -> Result<GraphOutput<S>, JunctureError>
+    where
+        S: serde::Serialize,
+    {
         // Use blocking executor to run async Pregel loop
         let runtime = tokio::runtime::Runtime::new()
             .map_err(|e| JunctureError::execution(format!("Failed to create runtime: {e}")))?;
@@ -165,7 +164,10 @@ impl<S: State> CompiledGraph<S> {
         &self,
         input: S,
         config: &RunnableConfig,
-    ) -> Result<GraphOutput<S>, JunctureError> {
+    ) -> Result<GraphOutput<S>, JunctureError>
+    where
+        S: serde::Serialize,
+    {
         // Maximum number of fields supported (u64 bitmask in FieldsChanged)
         let num_fields = 64;
 
@@ -257,7 +259,7 @@ impl<S: State> CompiledGraph<S> {
         JunctureError,
     >
     where
-        S: Clone + Send + 'static,
+        S: Clone + Send + serde::Serialize + 'static,
     {
         use futures::stream;
 
@@ -408,7 +410,7 @@ impl<S: State> CompiledGraph<S> {
         emitter: EventEmitter<S>,
     ) -> Result<S, JunctureError>
     where
-        S: Clone + Send + 'static,
+        S: Clone + Send + serde::Serialize + 'static,
     {
         let num_fields = 64;
 
@@ -523,7 +525,7 @@ impl<S: State> CompiledGraph<S> {
         resume_value: ResumeValue,
     ) -> Result<GraphOutput<S>, JunctureError>
     where
-        S: for<'de> serde::Deserialize<'de>,
+        S: for<'de> serde::Deserialize<'de> + serde::Serialize,
     {
         let checkpointer =
             self.inner.checkpointer.as_ref().ok_or_else(|| {
@@ -632,7 +634,7 @@ impl<S: State> CompiledGraph<S> {
         value: serde_json::Value,
     ) -> Result<GraphOutput<S>, JunctureError>
     where
-        S: for<'de> serde::Deserialize<'de>,
+        S: for<'de> serde::Deserialize<'de> + serde::Serialize,
     {
         self.resume(config, ResumeValue::Single(value)).await
     }
@@ -700,7 +702,7 @@ impl<S: State> CompiledGraph<S> {
         JunctureError,
     >
     where
-        S: Clone + Send + for<'de> serde::Deserialize<'de> + 'static,
+        S: Clone + Send + for<'de> serde::Deserialize<'de> + serde::Serialize + 'static,
     {
         use futures::stream;
 

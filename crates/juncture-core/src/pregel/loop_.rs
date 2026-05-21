@@ -5,6 +5,7 @@
 
 use crate::{
     JunctureError, Node, State,
+    checkpoint::{Checkpoint, CheckpointMetadata, CheckpointSource, generate_checkpoint_id},
     edge::TriggerTable,
     interrupt::should_interrupt,
     pregel::{
@@ -552,7 +553,7 @@ impl<S: State> PregelLoop<S> {
     )]
     pub async fn after_tick(&mut self, result: SuperstepResult<S>) -> Result<(), JunctureError>
     where
-        S: Clone,
+        S: Clone + serde::Serialize,
     {
         // Apply writes from completed tasks
         let mut total_changed = crate::FieldsChanged(0);
@@ -682,11 +683,21 @@ impl<S: State> PregelLoop<S> {
                 }
             }
 
+            // Save checkpoint with Interrupt source for HITL recovery
+            let node = self.interrupt_node_name().to_string();
+            self.save_interrupt_checkpoint(&node).await;
+
             return Ok(());
         }
 
         // Handle BubbleUp events from subgraph execution.
         if result.has_bubble_ups() && self.handle_bubble_ups(&result.bubble_ups) {
+            // Save checkpoint with Interrupt source if a BubbleUp interrupt was
+            // the reason for stopping.
+            if self.status.is_interrupted() {
+                let node = self.interrupt_node_name().to_string();
+                self.save_interrupt_checkpoint(&node).await;
+            }
             return Ok(());
         }
 
@@ -741,6 +752,10 @@ impl<S: State> PregelLoop<S> {
                         let _ = tx.send(event);
                     }
                 }
+
+                // Save checkpoint with Interrupt source for HITL recovery
+                let node = self.interrupt_node_name().to_string();
+                self.save_interrupt_checkpoint(&node).await;
 
                 return Ok(());
             }
@@ -1016,6 +1031,156 @@ impl<S: State> PregelLoop<S> {
         }
     }
 
+    /// Save a checkpoint with [`CheckpointSource::Interrupt`] when a checkpointer is configured.
+    ///
+    /// Builds a full checkpoint from the current loop state, sets the source to
+    /// `Interrupt { node }`, and persists it via the checkpointer. Errors are
+    /// logged but do not propagate -- interrupt checkpointing is best-effort and
+    /// should not prevent the interrupt from being surfaced to the caller.
+    ///
+    /// # Type Parameters
+    ///
+    /// Requires `S: serde::Serialize` to serialize the current state into
+    /// `channel_values` for the checkpoint.
+    async fn save_interrupt_checkpoint(&mut self, node: &str)
+    where
+        S: serde::Serialize,
+    {
+        let Some(ref checkpointer) = self.checkpointer else {
+            return;
+        };
+
+        let channel_values = match serde_json::to_value(&self.state) {
+            Ok(v) => v,
+            Err(err) => {
+                tracing::warn!(
+                    name: "juncture.checkpoint.interrupt.serialize_failed",
+                    node = node,
+                    error = %err,
+                    "Failed to serialize state for interrupt checkpoint"
+                );
+                return;
+            }
+        };
+
+        let channel_versions: HashMap<String, u64> = self
+            .field_versions
+            .versions()
+            .iter()
+            .enumerate()
+            .map(|(idx, ver)| (format!("field_{idx}"), *ver))
+            .collect();
+
+        let new_versions = channel_versions.clone();
+
+        let versions_seen: HashMap<String, HashMap<String, u64>> = self
+            .nodes
+            .keys()
+            .map(|node_name| {
+                let versions = self.versions_seen.get_versions(node_name);
+                let map: HashMap<String, u64> = versions
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, ver)| (format!("field_{idx}"), *ver))
+                    .collect();
+                (node_name.clone(), map)
+            })
+            .collect();
+
+        let checkpoint_id = generate_checkpoint_id();
+        let created_at = chrono::Utc::now().to_rfc3339();
+
+        let checkpoint = Checkpoint {
+            id: checkpoint_id,
+            channel_values,
+            channel_versions,
+            versions_seen,
+            pending_tasks: Vec::new(),
+            pending_sends: Vec::new(),
+            pending_interrupts: self.pending_interrupts.clone(),
+            schema_version: S::schema_version(),
+            created_at,
+            v: 1,
+            new_versions,
+            counters_since_delta_snapshot: HashMap::new(),
+        };
+
+        let metadata = CheckpointMetadata {
+            source: CheckpointSource::Interrupt {
+                node: node.to_string(),
+            },
+            step: i64::try_from(self.step).unwrap_or(i64::MAX),
+            writes: HashMap::new(),
+            parents: HashMap::new(),
+            run_id: self.run_id.clone(),
+        };
+
+        match checkpointer
+            .put(&self.runnable_config, checkpoint, metadata)
+            .await
+        {
+            Ok(updated_config) => {
+                self.runnable_config.checkpoint_id = updated_config.checkpoint_id;
+                tracing::debug!(
+                    name: "juncture.checkpoint.interrupt.saved",
+                    node = node,
+                    step = self.step,
+                    "Interrupt checkpoint saved"
+                );
+            }
+            Err(err) => {
+                tracing::warn!(
+                    name: "juncture.checkpoint.interrupt.save_failed",
+                    node = node,
+                    error = %err,
+                    "Failed to save interrupt checkpoint"
+                );
+            }
+        }
+    }
+
+    /// Save a pending interrupt checkpoint for `interrupt_before` scenarios.
+    ///
+    /// When `tick()` detects an `interrupt_before`, the loop exits immediately
+    /// (tick is synchronous and cannot call the async checkpointer). The caller
+    /// should invoke this method after the loop exits when the status is
+    /// [`LoopStatus::InterruptBefore`].
+    ///
+    /// This is a no-op if no checkpointer is configured or if the status is not
+    /// interrupted.
+    ///
+    /// # Type Parameters
+    ///
+    /// Requires `S: serde::Serialize` to serialize the current state.
+    ///
+    /// # Errors
+    ///
+    /// Does not return errors -- checkpoint save failures are logged and the
+    /// interrupt is still surfaced to the caller.
+    pub async fn save_pending_interrupt_checkpoint(&mut self)
+    where
+        S: serde::Serialize,
+    {
+        if !self.status.is_interrupted() || self.checkpointer.is_none() {
+            return;
+        }
+        let node = self.interrupt_node_name().to_string();
+        self.save_interrupt_checkpoint(&node).await;
+    }
+
+    /// Extract the primary interrupt node name from pending interrupts or loop status.
+    ///
+    /// Used for checkpoint source identification. Returns the first interrupt's
+    /// associated node name, or "unknown" if not available.
+    fn interrupt_node_name(&self) -> &str {
+        static UNKNOWN: &str = "unknown";
+        self.pending_interrupts
+            .first()
+            .and_then(|s| s.payload.get("node"))
+            .and_then(|v| v.as_str())
+            .unwrap_or(UNKNOWN)
+    }
+
     /// Finish all channels in the state
     ///
     /// Called when graph execution completes (no more pending tasks).
@@ -1243,7 +1408,7 @@ mod tests {
         assert!(loop_.status.is_interrupted());
     }
 
-    #[derive(Clone, Debug)]
+    #[derive(Clone, Debug, serde::Serialize)]
     struct TestState;
 
     impl State for TestState {
@@ -1261,7 +1426,7 @@ mod tests {
     struct TestUpdate;
 
     /// Verify that the scratchpad is populated with interrupt IDs after
-    /// execute_superstep processes pending interrupts. This is the core
+    /// `execute_superstep` processes pending interrupts. This is the core
     /// fix for review finding B-06-006: the scratchpad must track which
     /// interrupts have been processed so that on re-execution, already-
     /// handled interrupt points receive null-resume values instead of
