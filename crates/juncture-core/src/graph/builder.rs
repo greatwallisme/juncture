@@ -676,6 +676,8 @@ impl<S: State> StateGraph<S> {
 
     /// Add a node with full configuration options
     ///
+    /// Returns `&mut Self` on success for fluent builder chaining.
+    ///
     /// # Errors
     ///
     /// Returns an error if a node with the same name already exists.
@@ -691,7 +693,7 @@ impl<S: State> StateGraph<S> {
         metadata: Option<HashMap<String, serde_json::Value>>,
         destinations: Option<Vec<String>>,
         retry_policies: Vec<RetryPolicy>,
-    ) -> Result<(), TopologyError> {
+    ) -> Result<&mut Self, TopologyError> {
         let name = name.into();
         if self.nodes.contains_key(&name) {
             return Err(TopologyError::DuplicateNode { name });
@@ -710,7 +712,7 @@ impl<S: State> StateGraph<S> {
             },
         );
 
-        Ok(())
+        Ok(self)
     }
 
     /// Add a node with default configuration options
@@ -721,6 +723,8 @@ impl<S: State> StateGraph<S> {
     /// - `destinations`: `None`
     /// - `retry_policies`: empty
     ///
+    /// Returns `&mut Self` on success for fluent builder chaining.
+    ///
     /// # Errors
     ///
     /// Returns an error if a node with the same name already exists.
@@ -728,7 +732,7 @@ impl<S: State> StateGraph<S> {
         &mut self,
         name: impl Into<String>,
         node: impl IntoNode<S>,
-    ) -> Result<(), TopologyError> {
+    ) -> Result<&mut Self, TopologyError> {
         self.add_node(name, node, false, None, None, Vec::new())
     }
 
@@ -739,6 +743,8 @@ impl<S: State> StateGraph<S> {
     ///
     /// The handler receives `NodeError` with detailed information (node name,
     /// error, state snapshot, attempt count) and returns a recovery command.
+    ///
+    /// Returns `&mut Self` on success for fluent builder chaining.
     ///
     /// # Arguments
     ///
@@ -758,7 +764,7 @@ impl<S: State> StateGraph<S> {
         name: impl Into<String>,
         node: impl IntoNode<S>,
         handler: Arc<dyn Fn(super::builder::NodeError<S>) -> crate::Command<S> + Send + Sync>,
-    ) -> Result<(), TopologyError>
+    ) -> Result<&mut Self, TopologyError>
     where
         S: Clone,
     {
@@ -774,13 +780,15 @@ impl<S: State> StateGraph<S> {
         self.builder_metadata
             .insert(name_str, NodeMetadata::default());
 
-        Ok(())
+        Ok(self)
     }
 
     /// Add a node with automatic retry behavior
     ///
     /// When the wrapped node fails, it is retried according to the
     /// provided retry policy with exponential backoff.
+    ///
+    /// Returns `&mut Self` on success for fluent builder chaining.
     ///
     /// # Arguments
     ///
@@ -796,7 +804,7 @@ impl<S: State> StateGraph<S> {
         name: impl Into<String>,
         node: impl IntoNode<S>,
         policy: RetryPolicy,
-    ) -> Result<(), TopologyError>
+    ) -> Result<&mut Self, TopologyError>
     where
         S: Clone,
     {
@@ -812,13 +820,15 @@ impl<S: State> StateGraph<S> {
         self.builder_metadata
             .insert(name_str, NodeMetadata::default());
 
-        Ok(())
+        Ok(self)
     }
 
     /// Add a compiled subgraph as a node in this graph
     ///
     /// The subgraph is mounted with input/output mapping functions
     /// that transform state between the parent and child graph.
+    ///
+    /// Returns `&mut Self` on success for fluent builder chaining.
     ///
     /// # Arguments
     ///
@@ -830,7 +840,7 @@ impl<S: State> StateGraph<S> {
     pub fn add_subgraph(
         &mut self,
         mount: crate::subgraph::SubgraphMount<S>,
-    ) -> Result<(), TopologyError> {
+    ) -> Result<&mut Self, TopologyError> {
         if self.nodes.contains_key(&mount.name) {
             return Err(TopologyError::DuplicateNode {
                 name: mount.name.clone(),
@@ -843,7 +853,7 @@ impl<S: State> StateGraph<S> {
         self.builder_metadata.insert(name, NodeMetadata::default());
         self.subgraphs.push(mount);
 
-        Ok(())
+        Ok(self)
     }
 
     /// Add a subgraph with shared state using `StateSubset`
@@ -1084,6 +1094,8 @@ impl<S: State> StateGraph<S> {
     /// Automatically adds edges between consecutive nodes and sets
     /// the first node as the entry point.
     ///
+    /// Returns `&mut Self` on success for fluent builder chaining.
+    ///
     /// # Examples
     ///
     /// ```ignore
@@ -1093,9 +1105,9 @@ impl<S: State> StateGraph<S> {
     /// # Errors
     ///
     /// Returns an error if any of the nodes don't exist.
-    pub fn add_sequence(&mut self, nodes: &[impl AsRef<str>]) -> Result<(), TopologyError> {
+    pub fn add_sequence(&mut self, nodes: &[impl AsRef<str>]) -> Result<&mut Self, TopologyError> {
         if nodes.is_empty() {
-            return Ok(());
+            return Ok(self);
         }
 
         let node_names: Vec<&str> = nodes.iter().map(std::convert::AsRef::as_ref).collect();
@@ -1119,7 +1131,7 @@ impl<S: State> StateGraph<S> {
             self.add_edge(window[0], window[1]);
         }
 
-        Ok(())
+        Ok(self)
     }
 
     /// Validate that all state keys are present
