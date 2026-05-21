@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use crate::checkpoint::CheckpointSaver;
 use crate::interrupt::ResumeValue;
-use crate::observability::{GraphLifecycleCallback, MetricsCollector};
+use crate::observability::{CachePolicy as LlmCachePolicy, GraphLifecycleCallback, MetricsCollector};
 use crate::pregel::BudgetConfig;
 use crate::pregel::Durability;
 use crate::runtime::RuntimeStore;
@@ -93,6 +93,9 @@ pub struct RunnableConfig {
     /// node start/end/error, graph completion, and checkpoint saves.
     /// All methods have default no-op implementations.
     pub callback_handler: Option<Arc<dyn GraphLifecycleCallback>>,
+
+    /// LLM response cache policy for controlling key generation and TTL
+    pub llm_cache_policy: Option<LlmCachePolicy>,
 }
 
 impl std::fmt::Debug for RunnableConfig {
@@ -139,6 +142,7 @@ impl std::fmt::Debug for RunnableConfig {
                     .as_ref()
                     .map(|_| "<GraphLifecycleCallback>"),
             )
+            .field("llm_cache_policy", &self.llm_cache_policy.as_ref().map(|_| "<CachePolicy>"))
             .finish()
     }
 }
@@ -305,6 +309,13 @@ impl RunnableConfig {
     #[must_use]
     pub fn with_callback_handler(mut self, handler: Arc<dyn GraphLifecycleCallback>) -> Self {
         self.callback_handler = Some(handler);
+        self
+    }
+
+    /// Set the LLM response cache policy
+    #[must_use]
+    pub fn with_llm_cache_policy(mut self, policy: LlmCachePolicy) -> Self {
+        self.llm_cache_policy = Some(policy);
         self
     }
 }

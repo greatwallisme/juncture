@@ -201,6 +201,7 @@ impl ServerInfo {
     clippy::type_complexity,
     reason = "Contains Arc<dyn Fn> which doesn't implement Debug. Complex trait object type is required for dynamic tool configuration."
 )]
+#[derive(Clone)]
 pub struct CachePolicy {
     /// Custom cache key generation function
     pub key_func: Option<Arc<dyn Fn(&CacheKeyInput) -> String + Send + Sync>>,
