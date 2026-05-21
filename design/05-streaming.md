@@ -4,6 +4,8 @@
 
 Streaming 是 Juncture 向调用方实时传递执行进度的机制。从 token 级别的 LLM 输出到 superstep 级别的状态变更，streaming 系统提供多粒度、可组合的事件流，使调用方能够构建实时 UI、监控面板和调试工具。
 
+> **Implementation Note (C-05-3)**: Public streaming types (`StreamMode`, `StreamEvent`, `StreamConfig`, etc.) have minimal doc examples. Consider adding usage examples for each variant to improve developer experience.
+
 ---
 
 ## 1. LangGraph 参考：7 种 Stream Mode
@@ -238,6 +240,10 @@ pub struct ToolCallChunk {
     pub args_delta: String, // JSON 片段
     pub index: usize,
 }
+
+> **Implementation Note (C-05-2)**: `MessageChunk` and `ToolCallChunk` fields are `pub` (data class pattern)
+> rather than private with accessor methods. This is acceptable for stream-event DTOs where the caller
+> consumes all fields and no invariant enforcement is needed.
 
 #[derive(Clone, Debug)]
 pub struct MessageStreamMetadata {

@@ -393,6 +393,9 @@ pub enum FilterExpr {
 }
 ```
 
+> **Implementation Note (C-10-1b)**: Standalone crate `FilterExpr` is missing `#[serde(tag = "op")]` on the enum,
+> causing serialization format inconsistency with the core implementation. Core crate uses struct variants
+> with explicit serialization; standalone crate should add the tag for consistent wire format.
 
 > **Implementation Note**: Complete `FilterExpr::matches()` method with full evaluation engine.
 > Supports dot-notation path access (e.g., "metadata.status") and type-aware JSON comparison logic.
