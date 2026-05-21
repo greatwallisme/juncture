@@ -103,7 +103,8 @@ pub async fn execute_superstep<S: State>(
     JunctureError,
 >
 where
-    S::Update: serde::Serialize, {
+    S::Update: serde::Serialize,
+{
     if pending_tasks.is_empty() {
         // Return empty result and a dummy channel
         let (_interrupt_tx, interrupt_rx) = mpsc::unbounded_channel();
@@ -856,10 +857,16 @@ mod tests {
             assert_eq!(w.task_id, "task-99");
         }
 
-        let msg_write = writes.iter().find(|w| w.channel == "messages").expect("messages write");
+        let msg_write = writes
+            .iter()
+            .find(|w| w.channel == "messages")
+            .expect("messages write");
         assert_eq!(msg_write.value, serde_json::json!(["hello"]));
 
-        let count_write = writes.iter().find(|w| w.channel == "count").expect("count write");
+        let count_write = writes
+            .iter()
+            .find(|w| w.channel == "count")
+            .expect("count write");
         assert_eq!(count_write.value, serde_json::json!(42));
     }
 

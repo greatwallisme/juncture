@@ -13,6 +13,40 @@ use indexmap::IndexMap;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+/// Configuration for graph compilation
+///
+/// Controls compile-time settings that become defaults for every execution
+/// of the compiled graph. Runtime [`RunnableConfig`](crate::RunnableConfig)
+/// values override these when present.
+///
+/// # Examples
+///
+/// ```ignore
+/// use juncture_core::graph::CompileConfig;
+///
+/// let config = CompileConfig {
+///     interrupt_before: vec!["human_review".into()],
+///     interrupt_after: vec!["llm_call".into()],
+/// };
+/// let compiled = graph.compile_with_config(config)?;
+/// ```
+#[derive(Clone, Debug, Default)]
+pub struct CompileConfig {
+    /// Nodes that should interrupt before execution (HITL)
+    ///
+    /// When a node listed here is about to execute, the graph pauses and
+    /// returns control to the caller. Runtime `interrupt_before` in
+    /// [`RunnableConfig`] takes precedence over this list.
+    pub interrupt_before: Vec<String>,
+
+    /// Nodes that should interrupt after execution (HITL)
+    ///
+    /// After a node listed here finishes executing, the graph pauses and
+    /// returns control to the caller. Runtime `interrupt_after` in
+    /// [`RunnableConfig`] takes precedence over this list.
+    pub interrupt_after: Vec<String>,
+}
+
 /// Metadata stored for each node during graph construction
 ///
 /// Contains configuration options that affect node execution behavior.
@@ -1149,7 +1183,8 @@ impl<S: State> StateGraph<S> {
 
     /// Compile the graph into an executable form
     ///
-    /// Runs topology validation and builds the optimized execution structure.
+    /// Runs topology validation and builds the optimized execution structure
+    /// using default compile configuration (no compile-time interrupts).
     ///
     /// # Errors
     ///
@@ -1161,7 +1196,35 @@ impl<S: State> StateGraph<S> {
     /// let compiled = graph.compile()?;
     /// ```
     pub fn compile(&self) -> Result<CompiledGraph<S>, TopologyError> {
-        self.compile_with_checkpointer(None)
+        self.compile_inner(CompileConfig::default(), None)
+    }
+
+    /// Compile the graph with explicit compile-time configuration
+    ///
+    /// Like [`compile`](Self::compile) but accepts a [`CompileConfig`] that
+    /// sets compile-time defaults for interrupt behavior. Runtime
+    /// [`RunnableConfig`] values override these when present.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TopologyError`] if validation fails.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// use juncture_core::graph::CompileConfig;
+    ///
+    /// let compiled = graph.compile_with_config(CompileConfig {
+    ///     interrupt_before: vec!["human_review".into()],
+    ///     interrupt_after: vec!["llm_call".into()],
+    ///     ..Default::default()
+    /// })?;
+    /// ```
+    pub fn compile_with_config(
+        &self,
+        config: CompileConfig,
+    ) -> Result<CompiledGraph<S>, TopologyError> {
+        self.compile_inner(config, None)
     }
 
     /// Compile the graph without persistence (dev/test)
@@ -1173,20 +1236,32 @@ impl<S: State> StateGraph<S> {
     ///
     /// Returns [`TopologyError`] if validation fails.
     pub fn compile_ephemeral(&self) -> Result<CompiledGraph<S>, TopologyError> {
-        self.compile_with_checkpointer(None)
+        self.compile_inner(CompileConfig::default(), None)
     }
 
     /// Compile the graph with optional checkpointer
     ///
     /// This is a forward-compatible method that accepts an optional checkpointer.
-    /// Currently, checkpointing is not implemented, so the checkpointer is ignored.
+    /// Uses default compile configuration (no compile-time interrupts).
     ///
     /// # Errors
     ///
     /// Returns [`TopologyError`] if validation fails.
     pub fn compile_with_checkpointer(
         &self,
-        _checkpointer: Option<Arc<dyn crate::checkpoint::CheckpointSaver>>,
+        checkpointer: Option<Arc<dyn crate::checkpoint::CheckpointSaver>>,
+    ) -> Result<CompiledGraph<S>, TopologyError> {
+        self.compile_inner(CompileConfig::default(), checkpointer)
+    }
+
+    /// Internal compilation shared by all public compile methods.
+    ///
+    /// Validates topology, builds the trigger table, and constructs the
+    /// [`CompiledGraph`] with the given compile config and optional checkpointer.
+    fn compile_inner(
+        &self,
+        config: CompileConfig,
+        checkpointer: Option<Arc<dyn crate::checkpoint::CheckpointSaver>>,
     ) -> Result<CompiledGraph<S>, TopologyError> {
         // Validate topology
         TopologyValidator::validate(&self.nodes, &self.edges, self.entry_point.as_deref())?;
@@ -1199,6 +1274,9 @@ impl<S: State> StateGraph<S> {
             self.nodes.clone(),
             trigger_table,
             self.builder_metadata.clone(),
+            config.interrupt_before,
+            config.interrupt_after,
+            checkpointer,
         ))
     }
 

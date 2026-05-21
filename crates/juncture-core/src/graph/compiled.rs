@@ -88,27 +88,8 @@ impl<S: State> CompiledGraph<S> {
         nodes: IndexMap<String, Arc<dyn crate::Node<S>>>,
         trigger_table: TriggerTable<S>,
         builder_metadata: IndexMap<String, NodeMetadata>,
-    ) -> Self {
-        Self {
-            inner: Arc::new(CompiledGraphInner {
-                nodes,
-                trigger_table,
-                builder_metadata,
-                checkpointer: None,
-            }),
-        }
-    }
-
-    /// Create a new compiled graph with checkpointer
-    #[must_use]
-    #[allow(
-        dead_code,
-        reason = "will be used when checkpointing is implemented in Phase 6"
-    )]
-    pub(crate) fn with_checkpointer(
-        nodes: IndexMap<String, Arc<dyn crate::Node<S>>>,
-        trigger_table: TriggerTable<S>,
-        builder_metadata: IndexMap<String, NodeMetadata>,
+        interrupt_before: Vec<String>,
+        interrupt_after: Vec<String>,
         checkpointer: Option<Arc<dyn crate::checkpoint::CheckpointSaver>>,
     ) -> Self {
         Self {
@@ -117,8 +98,26 @@ impl<S: State> CompiledGraph<S> {
                 trigger_table,
                 builder_metadata,
                 checkpointer,
+                interrupt_before,
+                interrupt_after,
             }),
         }
+    }
+
+    /// Merge compile-time interrupt defaults with runtime config.
+    ///
+    /// Runtime values (from `RunnableConfig`) take precedence when present.
+    /// Compile-time values (from `CompileConfig`) serve as defaults when
+    /// runtime values are `None`.
+    fn effective_config(&self, config: &RunnableConfig) -> RunnableConfig {
+        let mut effective = config.clone();
+        if effective.interrupt_before.is_none() && !self.inner.interrupt_before.is_empty() {
+            effective.interrupt_before = Some(self.inner.interrupt_before.clone());
+        }
+        if effective.interrupt_after.is_none() && !self.inner.interrupt_after.is_empty() {
+            effective.interrupt_after = Some(self.inner.interrupt_after.clone());
+        }
+        effective
     }
 
     /// Invoke the graph synchronously
@@ -140,11 +139,13 @@ impl<S: State> CompiledGraph<S> {
         S: serde::Serialize,
         S::Update: serde::Serialize,
     {
+        let effective = self.effective_config(config);
+
         // Use blocking executor to run async Pregel loop
         let runtime = tokio::runtime::Runtime::new()
             .map_err(|e| JunctureError::execution(format!("Failed to create runtime: {e}")))?;
 
-        runtime.block_on(self.invoke_async(input, config))
+        runtime.block_on(self.invoke_async_inner(input, &effective))
     }
 
     /// Invoke the graph asynchronously
@@ -162,6 +163,20 @@ impl<S: State> CompiledGraph<S> {
     /// let final_state = output.value;
     /// ```
     pub async fn invoke_async(
+        &self,
+        input: S,
+        config: &RunnableConfig,
+    ) -> Result<GraphOutput<S>, JunctureError>
+    where
+        S: serde::Serialize,
+        S::Update: serde::Serialize,
+    {
+        let effective = self.effective_config(config);
+        self.invoke_async_inner(input, &effective).await
+    }
+
+    /// Core async invocation used by both `invoke` (blocking) and `invoke_async`.
+    async fn invoke_async_inner(
         &self,
         input: S,
         config: &RunnableConfig,
@@ -266,6 +281,7 @@ impl<S: State> CompiledGraph<S> {
     {
         use futures::stream;
 
+        let effective = self.effective_config(config);
         let num_fields = 64;
 
         // Sized channel provides backpressure: 256 for Messages mode (high-throughput
@@ -278,7 +294,7 @@ impl<S: State> CompiledGraph<S> {
             input,
             self.inner.nodes.clone(),
             self.inner.trigger_table.clone(),
-            config.clone(),
+            effective,
             num_fields,
         )?;
 
@@ -418,8 +434,9 @@ impl<S: State> CompiledGraph<S> {
     {
         let num_fields = 64;
 
+        // Merge compile-time defaults with runtime config
+        let mut exec_config = self.effective_config(config);
         // Ensure run_id is populated; generate one if not provided.
-        let mut exec_config = config.clone();
         if exec_config.run_id.is_none() {
             exec_config.run_id = Some(uuid::Uuid::new_v4().to_string());
         }
@@ -562,8 +579,8 @@ impl<S: State> CompiledGraph<S> {
         let state: S = serde_json::from_value(tuple.checkpoint.channel_values)
             .map_err(|e| JunctureError::checkpoint(format!("failed to deserialize state: {e}")))?;
 
-        // Create a new config with resume value and ensure run_id is populated.
-        let mut resume_config = config.clone();
+        // Merge compile-time defaults with runtime config, then add resume value
+        let mut resume_config = self.effective_config(config);
         resume_config.resume_value = Some(resume_value);
         if resume_config.run_id.is_none() {
             resume_config.run_id = Some(uuid::Uuid::new_v4().to_string());
@@ -741,8 +758,8 @@ impl<S: State> CompiledGraph<S> {
         let state: S = serde_json::from_value(tuple.checkpoint.channel_values)
             .map_err(|e| JunctureError::checkpoint(format!("failed to deserialize state: {e}")))?;
 
-        // Create resume config with run_id populated
-        let mut resume_config = config.clone();
+        // Merge compile-time defaults with runtime config, then add resume value
+        let mut resume_config = self.effective_config(config);
         resume_config.resume_value = Some(resume_value);
         if resume_config.run_id.is_none() {
             resume_config.run_id = Some(uuid::Uuid::new_v4().to_string());
@@ -1319,6 +1336,12 @@ struct CompiledGraphInner<S: State> {
 
     /// Optional checkpointer
     checkpointer: Option<Arc<dyn crate::checkpoint::CheckpointSaver>>,
+
+    /// Compile-time `interrupt_before` nodes (HITL defaults)
+    interrupt_before: Vec<String>,
+
+    /// Compile-time `interrupt_after` nodes (HITL defaults)
+    interrupt_after: Vec<String>,
 }
 
 /// Output from graph execution
@@ -1468,7 +1491,8 @@ mod tests {
         let trigger_table = TriggerTable::new();
         let builder_metadata = IndexMap::new();
 
-        let compiled = CompiledGraph::new(nodes, trigger_table, builder_metadata);
+        let compiled =
+            CompiledGraph::new(nodes, trigger_table, builder_metadata, vec![], vec![], None);
         assert_eq!(compiled.nodes().len(), 1);
     }
 
@@ -1486,7 +1510,8 @@ mod tests {
             },
         );
 
-        let compiled = CompiledGraph::new(nodes, trigger_table, IndexMap::new());
+        let compiled =
+            CompiledGraph::new(nodes, trigger_table, IndexMap::new(), vec![], vec![], None);
         let mermaid = compiled.to_mermaid();
 
         assert!(mermaid.contains("graph TD"));
@@ -1507,7 +1532,8 @@ mod tests {
             },
         );
 
-        let compiled = CompiledGraph::new(nodes, trigger_table, IndexMap::new());
+        let compiled =
+            CompiledGraph::new(nodes, trigger_table, IndexMap::new(), vec![], vec![], None);
         let dot = compiled.to_dot();
 
         assert!(dot.contains("digraph juncture_graph"));
@@ -1528,7 +1554,8 @@ mod tests {
             },
         );
 
-        let compiled = CompiledGraph::new(nodes, trigger_table, IndexMap::new());
+        let compiled =
+            CompiledGraph::new(nodes, trigger_table, IndexMap::new(), vec![], vec![], None);
         let json = compiled.to_json();
 
         assert!(json.is_object());
@@ -1541,7 +1568,14 @@ mod tests {
         let mut nodes: IndexMap<String, Arc<dyn crate::Node<StateDummy>>> = IndexMap::new();
         nodes.insert("a".to_string(), mock_node("a"));
 
-        let compiled = CompiledGraph::new(nodes, TriggerTable::new(), IndexMap::new());
+        let compiled = CompiledGraph::new(
+            nodes,
+            TriggerTable::new(),
+            IndexMap::new(),
+            vec![],
+            vec![],
+            None,
+        );
         let drawable = compiled.get_graph(None);
         assert_eq!(drawable.nodes.len(), 1);
 
@@ -1554,7 +1588,14 @@ mod tests {
         let mut nodes: IndexMap<String, Arc<dyn crate::Node<StateDummy>>> = IndexMap::new();
         nodes.insert("a".to_string(), mock_node("a"));
 
-        let compiled = CompiledGraph::new(nodes, TriggerTable::new(), IndexMap::new());
+        let compiled = CompiledGraph::new(
+            nodes,
+            TriggerTable::new(),
+            IndexMap::new(),
+            vec![],
+            vec![],
+            None,
+        );
         let subgraphs = compiled.get_subgraphs();
         assert!(subgraphs.is_empty());
     }
@@ -1564,7 +1605,14 @@ mod tests {
         let mut nodes: IndexMap<String, Arc<dyn crate::Node<StateDummy>>> = IndexMap::new();
         nodes.insert("a".to_string(), mock_node("a"));
 
-        let compiled = CompiledGraph::new(nodes, TriggerTable::new(), IndexMap::new());
+        let compiled = CompiledGraph::new(
+            nodes,
+            TriggerTable::new(),
+            IndexMap::new(),
+            vec![],
+            vec![],
+            None,
+        );
         let config = RunnableConfig::new();
 
         let result = compiled
@@ -1659,10 +1707,12 @@ mod tests {
             nodes
         };
 
-        let compiled = CompiledGraph::with_checkpointer(
+        let compiled = CompiledGraph::new(
             nodes.clone(),
             TriggerTable::new(),
             IndexMap::new(),
+            vec![],
+            vec![],
             Some(Arc::new(MockCheckpointer {
                 checkpoint_source: CheckpointSource::Input,
             })),
@@ -1683,10 +1733,12 @@ mod tests {
         assert!(err.to_string().contains("Input"));
 
         // Test with Loop source (should fail)
-        let compiled = CompiledGraph::with_checkpointer(
+        let compiled = CompiledGraph::new(
             nodes.clone(),
             TriggerTable::new(),
             IndexMap::new(),
+            vec![],
+            vec![],
             Some(Arc::new(MockCheckpointer {
                 checkpoint_source: CheckpointSource::Loop,
             })),
@@ -1706,10 +1758,12 @@ mod tests {
         assert!(err.to_string().contains("Loop"));
 
         // Test with Interrupt source (should pass validation, though will fail later)
-        let compiled = CompiledGraph::with_checkpointer(
+        let compiled = CompiledGraph::new(
             nodes,
             TriggerTable::new(),
             IndexMap::new(),
+            vec![],
+            vec![],
             Some(Arc::new(MockCheckpointer {
                 checkpoint_source: CheckpointSource::Interrupt {
                     node: "test_node".to_string(),
@@ -1736,7 +1790,14 @@ mod tests {
         let mut nodes: IndexMap<String, Arc<dyn crate::Node<StateDummy>>> = IndexMap::new();
         nodes.insert("a".to_string(), mock_node("a"));
 
-        let compiled = CompiledGraph::new(nodes, TriggerTable::new(), IndexMap::new());
+        let compiled = CompiledGraph::new(
+            nodes,
+            TriggerTable::new(),
+            IndexMap::new(),
+            vec![],
+            vec![],
+            None,
+        );
         let config = RunnableConfig::new();
 
         let result = compiled
@@ -1751,7 +1812,14 @@ mod tests {
         let mut nodes: IndexMap<String, Arc<dyn crate::Node<StateDummy>>> = IndexMap::new();
         nodes.insert("a".to_string(), mock_node("a"));
 
-        let compiled = CompiledGraph::new(nodes, TriggerTable::new(), IndexMap::new());
+        let compiled = CompiledGraph::new(
+            nodes,
+            TriggerTable::new(),
+            IndexMap::new(),
+            vec![],
+            vec![],
+            None,
+        );
         let config = RunnableConfig::new();
 
         let result = compiled
@@ -1850,10 +1918,12 @@ mod tests {
         };
 
         // Test with Input source (should fail)
-        let compiled = CompiledGraph::with_checkpointer(
+        let compiled = CompiledGraph::new(
             nodes.clone(),
             TriggerTable::new(),
             IndexMap::new(),
+            vec![],
+            vec![],
             Some(Arc::new(MockCheckpointer {
                 checkpoint_source: CheckpointSource::Input,
             })),
@@ -1880,10 +1950,12 @@ mod tests {
         );
 
         // Test with Interrupt source (should pass source validation)
-        let compiled = CompiledGraph::with_checkpointer(
+        let compiled = CompiledGraph::new(
             nodes,
             TriggerTable::new(),
             IndexMap::new(),
+            vec![],
+            vec![],
             Some(Arc::new(MockCheckpointer {
                 checkpoint_source: CheckpointSource::Interrupt {
                     node: "test_node".to_string(),
@@ -1915,7 +1987,14 @@ mod tests {
         let mut nodes: IndexMap<String, Arc<dyn crate::Node<StateDummy>>> = IndexMap::new();
         nodes.insert("a".to_string(), mock_node("a"));
 
-        let compiled = CompiledGraph::new(nodes, TriggerTable::new(), IndexMap::new());
+        let compiled = CompiledGraph::new(
+            nodes,
+            TriggerTable::new(),
+            IndexMap::new(),
+            vec![],
+            vec![],
+            None,
+        );
         let config = RunnableConfig::new();
 
         let result = compiled.get_state(&config).await;
@@ -1928,7 +2007,14 @@ mod tests {
         let mut nodes: IndexMap<String, Arc<dyn crate::Node<StateDummy>>> = IndexMap::new();
         nodes.insert("a".to_string(), mock_node("a"));
 
-        let compiled = CompiledGraph::new(nodes, TriggerTable::new(), IndexMap::new());
+        let compiled = CompiledGraph::new(
+            nodes,
+            TriggerTable::new(),
+            IndexMap::new(),
+            vec![],
+            vec![],
+            None,
+        );
         let config = RunnableConfig::new();
 
         let result = compiled.get_state_history(&config, None).await;
@@ -1941,7 +2027,14 @@ mod tests {
         let mut nodes: IndexMap<String, Arc<dyn crate::Node<StateDummy>>> = IndexMap::new();
         nodes.insert("a".to_string(), mock_node("a"));
 
-        let compiled = CompiledGraph::new(nodes, TriggerTable::new(), IndexMap::new());
+        let compiled = CompiledGraph::new(
+            nodes,
+            TriggerTable::new(),
+            IndexMap::new(),
+            vec![],
+            vec![],
+            None,
+        );
         let config = RunnableConfig::new();
 
         let update = StateUpdate {
@@ -2003,10 +2096,12 @@ mod tests {
             nodes
         };
 
-        let compiled = CompiledGraph::with_checkpointer(
+        let compiled = CompiledGraph::new(
             nodes,
             TriggerTable::new(),
             IndexMap::new(),
+            vec![],
+            vec![],
             Some(Arc::new(NoCheckpointCheckpointer)),
         );
 
@@ -2123,10 +2218,12 @@ mod tests {
             nodes
         };
 
-        let compiled = CompiledGraph::with_checkpointer(
+        let compiled = CompiledGraph::new(
             nodes,
             TriggerTable::new(),
             IndexMap::new(),
+            vec![],
+            vec![],
             Some(Arc::new(MockCheckpointer {
                 observed: Arc::clone(&observed),
             })),
@@ -2163,7 +2260,14 @@ mod tests {
         let mut nodes: IndexMap<String, Arc<dyn crate::Node<StateDummy>>> = IndexMap::new();
         nodes.insert("a".to_string(), mock_node("a"));
 
-        let compiled = CompiledGraph::new(nodes, TriggerTable::new(), IndexMap::new());
+        let compiled = CompiledGraph::new(
+            nodes,
+            TriggerTable::new(),
+            IndexMap::new(),
+            vec![],
+            vec![],
+            None,
+        );
         let config = RunnableConfig::new();
 
         let updates = vec![StateUpdate {
@@ -2237,7 +2341,8 @@ mod tests {
             },
         );
 
-        let compiled = CompiledGraph::new(nodes, trigger_table, IndexMap::new());
+        let compiled =
+            CompiledGraph::new(nodes, trigger_table, IndexMap::new(), vec![], vec![], None);
         let config = RunnableConfig::new();
 
         let mut stream = compiled
@@ -2279,7 +2384,8 @@ mod tests {
             },
         );
 
-        let compiled = CompiledGraph::new(nodes, trigger_table, IndexMap::new());
+        let compiled =
+            CompiledGraph::new(nodes, trigger_table, IndexMap::new(), vec![], vec![], None);
         let config = RunnableConfig::new();
 
         let mut stream = compiled
@@ -2321,7 +2427,8 @@ mod tests {
             },
         );
 
-        let compiled = CompiledGraph::new(nodes, trigger_table, IndexMap::new());
+        let compiled =
+            CompiledGraph::new(nodes, trigger_table, IndexMap::new(), vec![], vec![], None);
         let config = RunnableConfig::new();
 
         let mut stream = compiled
@@ -2363,7 +2470,8 @@ mod tests {
             },
         );
 
-        let compiled = CompiledGraph::new(nodes, trigger_table, IndexMap::new());
+        let compiled =
+            CompiledGraph::new(nodes, trigger_table, IndexMap::new(), vec![], vec![], None);
         let config = RunnableConfig::new();
 
         let mut stream = compiled
@@ -2420,6 +2528,106 @@ mod tests {
 
     #[derive(Clone, Debug, Default, serde::Serialize)]
     struct StateDummyUpdate;
+
+    #[test]
+    fn test_compile_config_default_is_empty() {
+        let config = super::super::CompileConfig::default();
+        assert!(config.interrupt_before.is_empty());
+        assert!(config.interrupt_after.is_empty());
+    }
+
+    #[test]
+    fn test_compile_with_config_stores_interrupts() {
+        let mut graph = super::super::StateGraph::<StateDummy>::new();
+        graph
+            .add_node_simple(
+                "human_review",
+                NodeFnUpdate(|_s: StateDummy| async move { Ok(StateDummyUpdate) }),
+            )
+            .unwrap();
+        graph.set_entry_point("human_review");
+        graph.set_finish_point("human_review");
+
+        let config = super::super::CompileConfig {
+            interrupt_before: vec!["human_review".to_string()],
+            interrupt_after: vec!["human_review".to_string()],
+        };
+
+        let compiled = graph.compile_with_config(config).unwrap();
+        assert_eq!(compiled.nodes().len(), 1);
+    }
+
+    #[test]
+    fn test_effective_config_uses_compile_time_defaults() {
+        let mut nodes: IndexMap<String, Arc<dyn crate::Node<StateDummy>>> = IndexMap::new();
+        nodes.insert("a".to_string(), mock_node("a"));
+
+        let compiled = CompiledGraph::new(
+            nodes,
+            TriggerTable::new(),
+            IndexMap::new(),
+            vec!["node_a".to_string()],
+            vec!["node_b".to_string()],
+            None,
+        );
+
+        // When runtime config has no interrupt_before/after, compile-time values apply
+        let config = RunnableConfig::new();
+        let effective = compiled.effective_config(&config);
+        assert_eq!(effective.interrupt_before, Some(vec!["node_a".to_string()]));
+        assert_eq!(effective.interrupt_after, Some(vec!["node_b".to_string()]));
+    }
+
+    #[test]
+    fn test_effective_config_runtime_overrides_compile_time() {
+        let mut nodes: IndexMap<String, Arc<dyn crate::Node<StateDummy>>> = IndexMap::new();
+        nodes.insert("a".to_string(), mock_node("a"));
+
+        let compiled = CompiledGraph::new(
+            nodes,
+            TriggerTable::new(),
+            IndexMap::new(),
+            vec!["compile_before".to_string()],
+            vec!["compile_after".to_string()],
+            None,
+        );
+
+        // Runtime values take precedence
+        let config = RunnableConfig::new()
+            .with_interrupt_before(vec!["runtime_before".to_string()])
+            .with_interrupt_after(vec!["runtime_after".to_string()]);
+
+        let effective = compiled.effective_config(&config);
+        assert_eq!(
+            effective.interrupt_before,
+            Some(vec!["runtime_before".to_string()])
+        );
+        assert_eq!(
+            effective.interrupt_after,
+            Some(vec!["runtime_after".to_string()])
+        );
+    }
+
+    #[test]
+    fn test_effective_config_empty_compile_time_no_override() {
+        let mut nodes: IndexMap<String, Arc<dyn crate::Node<StateDummy>>> = IndexMap::new();
+        nodes.insert("a".to_string(), mock_node("a"));
+
+        let compiled = CompiledGraph::new(
+            nodes,
+            TriggerTable::new(),
+            IndexMap::new(),
+            vec![],
+            vec![],
+            None,
+        );
+
+        // When compile-time lists are empty, runtime config stays as-is
+        let config = RunnableConfig::new();
+        let effective = compiled.effective_config(&config);
+        assert!(effective.interrupt_before.is_none());
+        assert!(effective.interrupt_after.is_none());
+    }
 }
 
 // Rust guideline compliant 2026-05-21

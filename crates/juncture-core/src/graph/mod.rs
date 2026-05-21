@@ -35,8 +35,8 @@ mod remote;
 mod topology;
 
 pub use builder::{
-    ErrorHandlerNode, NodeMetadata, RetryPolicy, RetryingNode, StateGraph, TimeoutNode,
-    execute_with_retry, execute_with_timeout,
+    CompileConfig, ErrorHandlerNode, NodeMetadata, RetryPolicy, RetryingNode, StateGraph,
+    TimeoutNode, execute_with_retry, execute_with_timeout,
 };
 pub use compiled::{
     CompiledGraph, DrawableEdge, DrawableGraph, DrawableNode, GraphOutput, GraphOutputMetadata,

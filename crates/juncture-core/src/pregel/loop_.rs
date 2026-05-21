@@ -452,9 +452,7 @@ impl<S: State> PregelLoop<S> {
     /// ```ignore
     /// let result = loop.execute_superstep().await?;
     /// ```
-    pub async fn execute_superstep(
-        &mut self,
-    ) -> Result<SuperstepResult<S>, JunctureError>
+    pub async fn execute_superstep(&mut self) -> Result<SuperstepResult<S>, JunctureError>
     where
         S::Update: serde::Serialize,
     {
