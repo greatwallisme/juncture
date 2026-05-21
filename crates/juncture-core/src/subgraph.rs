@@ -479,8 +479,10 @@ impl SubgraphTransformer {
         if let Some(ref filter) = self.filter {
             // Extract event type for filtering
             let event_type = match event {
-                crate::stream::StreamEvent::Values { .. } => "values",
-                crate::stream::StreamEvent::Updates { .. } => "updates",
+                crate::stream::StreamEvent::Values { .. }
+                | crate::stream::StreamEvent::FilteredValues { .. } => "values",
+                crate::stream::StreamEvent::Updates { .. }
+                | crate::stream::StreamEvent::FilteredUpdates { .. } => "updates",
                 crate::stream::StreamEvent::Messages { .. } => "messages",
                 crate::stream::StreamEvent::Custom { .. } => "custom",
                 crate::stream::StreamEvent::TaskStart { .. } => "task_start",

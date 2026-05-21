@@ -267,6 +267,9 @@ impl<S: State> CompiledGraph<S> {
     /// Executes the graph and emits [`StreamEvent`](crate::stream::StreamEvent)s
     /// as each superstep completes, enabling real-time monitoring of execution progress.
     ///
+    /// This is a convenience wrapper around [`stream_with_config`](Self::stream_with_config)
+    /// that uses a default [`StreamConfig`] with no output key filtering.
+    ///
     /// # Arguments
     ///
     /// * `input` - Initial state for execution
@@ -302,10 +305,6 @@ impl<S: State> CompiledGraph<S> {
     /// }
     /// # Ok::<(), juncture_core::JunctureError>(())
     /// ```
-    #[expect(
-        clippy::unused_async,
-        reason = "function signature follows async convention for consistency with invoke_async"
-    )]
     pub async fn stream(
         &self,
         input: S,
@@ -319,10 +318,90 @@ impl<S: State> CompiledGraph<S> {
         S: Clone + Send + serde::Serialize + 'static,
         S::Update: serde::Serialize,
     {
+        self.stream_with_config(input, config, crate::stream::StreamConfig::new(mode))
+            .await
+    }
+
+    /// Stream graph execution with full [`StreamConfig`] control.
+    ///
+    /// Like [`stream`](Self::stream) but accepts a [`StreamConfig`] instead
+    /// of a bare [`StreamMode`], enabling output key filtering, subgraph
+    /// inclusion, and message batch tuning.
+    ///
+    /// When [`StreamConfig::output_keys`] is set, [`StreamEvent::Values`]
+    /// events are replaced by [`StreamEvent::FilteredValues`] containing only
+    /// the requested fields as a JSON object.  Similarly, [`StreamEvent::Updates`]
+    /// events become [`StreamEvent::FilteredUpdates`].
+    ///
+    /// # Arguments
+    ///
+    /// * `input` - Initial state for execution
+    /// * `config` - Execution configuration
+    /// * `stream_config` - Full streaming configuration (mode, output keys, etc.)
+    ///
+    /// # Returns
+    ///
+    /// A pinned stream of results, where each result is either a
+    /// [`StreamEvent`] or a [`JunctureError`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`JunctureError`] if the graph cannot be initialized.
+    /// Runtime errors during execution are sent through the stream.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// use juncture_core::{StateGraph, State, StreamMode, stream::StreamConfig};
+    /// use futures::StreamExt;
+    ///
+    /// let cfg = StreamConfig::new(StreamMode::Values)
+    ///     .with_output_keys(vec!["messages".to_string()]);
+    ///
+    /// let mut stream = compiled.stream_with_config(initial_state, &config, cfg).await?;
+    /// while let Some(result) = stream.next().await {
+    ///     match result? {
+    ///         StreamEvent::FilteredValues { data, step } => {
+    ///             println!("Step {}: {}", step, data);
+    ///         }
+    ///         StreamEvent::Values { state, step } => {
+    ///             println!("Step {}: {:?}", step, state);
+    ///         }
+    ///         StreamEvent::End { output } => {
+    ///             println!("Final state: {:?}", output);
+    ///         }
+    ///         _ => {}
+    ///     }
+    /// }
+    /// # Ok::<(), juncture_core::JunctureError>(())
+    /// ```
+    #[allow(
+        clippy::too_many_lines,
+        reason = "stream orchestration: channel setup, PregelLoop wiring, output_keys filtering, and event forwarding are inseparable"
+    )]
+    #[expect(
+        clippy::unused_async,
+        reason = "function signature follows async convention for consistency with invoke_async"
+    )]
+    pub async fn stream_with_config(
+        &self,
+        input: S,
+        config: &RunnableConfig,
+        stream_config: crate::stream::StreamConfig,
+    ) -> Result<
+        Pin<Box<dyn Stream<Item = Result<StreamEvent<S>, JunctureError>> + Send>>,
+        JunctureError,
+    >
+    where
+        S: Clone + Send + serde::Serialize + 'static,
+        S::Update: serde::Serialize,
+    {
         use futures::stream;
 
         let effective = self.effective_config(config);
         let num_fields = 64;
+        let mode = stream_config.mode.clone();
+        let output_keys = stream_config.output_keys;
 
         // Sized channel provides backpressure: 256 for Messages mode (high-throughput
         // LLM token chunks), 32 for all other modes. Per design doc 05-streaming 7.3.
@@ -351,17 +430,36 @@ impl<S: State> CompiledGraph<S> {
 
         // Spawn graph execution in background task
         tokio::spawn(async move {
-            // Task to forward PregelLoop events to the main stream
+            // Task to forward PregelLoop events to the main stream,
+            // applying output_keys filtering to Updates events when configured.
             let tx_forward = tx.clone();
             let mode_forward = mode.clone();
+            let output_keys_forward = output_keys.clone();
             tokio::spawn(async move {
                 // Create a temporary bounded channel for EventEmitter filtering
                 let (temp_tx, _temp_rx) = mpsc::channel(1);
                 let emitter = EventEmitter::new(temp_tx, mode_forward);
 
                 while let Some(event) = pregel_rx.recv().await {
-                    // Filter events based on stream mode using EventEmitter's should_emit
-                    if emitter.should_emit(&event) {
+                    if !emitter.should_emit(&event) {
+                        continue;
+                    }
+
+                    // Apply output_keys filtering to Updates events from PregelLoop
+                    let filtered = output_keys_forward.as_ref().and_then(|keys| match &event {
+                        StreamEvent::Updates { node, update, step } => serde_json::to_value(update)
+                            .ok()
+                            .map(|json| StreamEvent::FilteredUpdates {
+                                node: node.clone(),
+                                data: crate::stream::filter_json_by_keys(json, keys),
+                                step: *step,
+                            }),
+                        _ => None,
+                    });
+
+                    if let Some(filtered_event) = filtered {
+                        let _ = tx_forward.send(Ok(filtered_event)).await;
+                    } else {
                         let _ = tx_forward.send(Ok(event)).await;
                     }
                 }
@@ -371,12 +469,22 @@ impl<S: State> CompiledGraph<S> {
             while matches!(pregel.tick(), Ok(true)) {
                 let step = pregel.step();
 
-                // Emit Values events if mode is Values
+                // Emit Values events if mode is Values, applying output_keys
                 if matches!(mode, StreamMode::Values) {
-                    let event = StreamEvent::Values {
-                        state: pregel.snapshot_state(),
-                        step,
-                    };
+                    let event = output_keys.as_ref().map_or_else(
+                        || StreamEvent::Values {
+                            state: pregel.snapshot_state(),
+                            step,
+                        },
+                        |keys| {
+                            let json = serde_json::to_value(pregel.snapshot_state())
+                                .unwrap_or(serde_json::Value::Null);
+                            StreamEvent::FilteredValues {
+                                data: crate::stream::filter_json_by_keys(json, keys),
+                                step,
+                            }
+                        },
+                    );
                     let _ = tx.send(Ok(event)).await;
                 }
 
@@ -2773,6 +2881,367 @@ mod tests {
         let effective = compiled.effective_config(&config);
         assert!(effective.interrupt_before.is_none());
         assert!(effective.interrupt_after.is_none());
+    }
+
+    // --- Tests for stream_with_config / output_keys filtering ---
+
+    /// Multi-field state type for `output_keys` filtering tests.
+    #[derive(Clone, Debug, serde::Deserialize, serde::Serialize, PartialEq)]
+    #[serde(crate = "serde")]
+    struct MultiFieldState {
+        messages: Vec<String>,
+        count: i32,
+        label: String,
+    }
+
+    impl crate::State for MultiFieldState {
+        type Update = MultiFieldStateUpdate;
+        type FieldVersions = ();
+
+        fn apply(&mut self, update: Self::Update) -> crate::FieldsChanged {
+            let mut mask = 0u64;
+            if let Some(messages) = update.messages {
+                self.messages = messages;
+                mask |= 1;
+            }
+            if let Some(count) = update.count {
+                self.count = count;
+                mask |= 1 << 1;
+            }
+            if let Some(label) = update.label {
+                self.label = label;
+                mask |= 1 << 2;
+            }
+            crate::FieldsChanged(mask)
+        }
+
+        fn reset_ephemeral(&mut self) {}
+    }
+
+    #[derive(Clone, Debug, Default, serde::Serialize)]
+    struct MultiFieldStateUpdate {
+        messages: Option<Vec<String>>,
+        count: Option<i32>,
+        label: Option<String>,
+    }
+
+    fn multi_field_node(name: &str) -> Arc<dyn crate::Node<MultiFieldState>> {
+        NodeFnUpdate(|_s: MultiFieldState| async move {
+            Ok(MultiFieldStateUpdate {
+                messages: Some(vec!["hello".to_string()]),
+                count: Some(1),
+                label: Some("updated".to_string()),
+            })
+        })
+        .into_node(name)
+    }
+
+    fn build_multi_field_graph() -> CompiledGraph<MultiFieldState> {
+        let mut nodes: IndexMap<String, Arc<dyn crate::Node<MultiFieldState>>> = IndexMap::new();
+        nodes.insert("node_a".to_string(), multi_field_node("node_a"));
+
+        let mut trigger_table = TriggerTable::new();
+        trigger_table.add_incoming(
+            "node_a".to_string(),
+            crate::edge::TriggerSource::Edge {
+                from: crate::edge::START.to_string(),
+            },
+        );
+
+        CompiledGraph::new(nodes, trigger_table, IndexMap::new(), vec![], vec![], None)
+    }
+
+    #[tokio::test]
+    async fn test_stream_with_config_no_output_keys_emits_values() {
+        use futures::StreamExt;
+
+        let compiled = build_multi_field_graph();
+        let config = RunnableConfig::new();
+
+        let stream_config = crate::stream::StreamConfig::new(StreamMode::Values);
+
+        let mut stream = compiled
+            .stream_with_config(
+                MultiFieldState {
+                    messages: vec![],
+                    count: 0,
+                    label: String::new(),
+                },
+                &config,
+                stream_config,
+            )
+            .await
+            .expect("stream_with_config should succeed");
+
+        let mut events = Vec::new();
+        while let Some(result) = stream.next().await {
+            events.push(result.expect("stream event should be Ok"));
+        }
+
+        // Should contain Values events (not FilteredValues)
+        let has_values = events
+            .iter()
+            .any(|e| matches!(e, crate::stream::StreamEvent::Values { .. }));
+        assert!(has_values, "Expected Values events without output_keys");
+    }
+
+    #[tokio::test]
+    async fn test_stream_with_config_output_keys_emits_filtered_values() {
+        use futures::StreamExt;
+
+        let compiled = build_multi_field_graph();
+        let config = RunnableConfig::new();
+
+        let stream_config = crate::stream::StreamConfig::new(StreamMode::Values)
+            .with_output_keys(vec!["messages".to_string()]);
+
+        let mut stream = compiled
+            .stream_with_config(
+                MultiFieldState {
+                    messages: vec![],
+                    count: 0,
+                    label: String::new(),
+                },
+                &config,
+                stream_config,
+            )
+            .await
+            .expect("stream_with_config should succeed");
+
+        let mut events = Vec::new();
+        while let Some(result) = stream.next().await {
+            events.push(result.expect("stream event should be Ok"));
+        }
+
+        // Should contain FilteredValues events with only "messages" key
+        let filtered: Vec<_> = events
+            .iter()
+            .filter_map(|e| {
+                if let crate::stream::StreamEvent::FilteredValues { data, .. } = e {
+                    Some(data.clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        assert!(
+            !filtered.is_empty(),
+            "Expected FilteredValues events with output_keys set"
+        );
+
+        for data in &filtered {
+            // Should only contain "messages" key
+            assert!(
+                data.get("messages").is_some(),
+                "FilteredValues should contain 'messages' key"
+            );
+            assert!(
+                data.get("count").is_none(),
+                "FilteredValues should not contain 'count' key"
+            );
+            assert!(
+                data.get("label").is_none(),
+                "FilteredValues should not contain 'label' key"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_stream_delegates_to_stream_with_config() {
+        use futures::StreamExt;
+
+        let compiled = build_multi_field_graph();
+        let config = RunnableConfig::new();
+
+        // stream() with StreamMode should behave identically to
+        // stream_with_config(StreamConfig::new(mode))
+        let mut stream = compiled
+            .stream(
+                MultiFieldState {
+                    messages: vec![],
+                    count: 0,
+                    label: String::new(),
+                },
+                &config,
+                StreamMode::Values,
+            )
+            .await
+            .expect("stream should succeed");
+
+        let mut events = Vec::new();
+        while let Some(result) = stream.next().await {
+            events.push(result.expect("stream event should be Ok"));
+        }
+
+        let has_values = events
+            .iter()
+            .any(|e| matches!(e, crate::stream::StreamEvent::Values { .. }));
+        let has_end = events
+            .iter()
+            .any(|e| matches!(e, crate::stream::StreamEvent::End { .. }));
+
+        assert!(has_values, "stream() should emit Values events");
+        assert!(has_end, "stream() should emit End event");
+    }
+
+    #[tokio::test]
+    async fn test_stream_with_config_output_keys_multiple_keys() {
+        use futures::StreamExt;
+
+        let compiled = build_multi_field_graph();
+        let config = RunnableConfig::new();
+
+        let stream_config = crate::stream::StreamConfig::new(StreamMode::Values)
+            .with_output_keys(vec!["messages".to_string(), "count".to_string()]);
+
+        let mut stream = compiled
+            .stream_with_config(
+                MultiFieldState {
+                    messages: vec![],
+                    count: 0,
+                    label: String::new(),
+                },
+                &config,
+                stream_config,
+            )
+            .await
+            .expect("stream_with_config should succeed");
+
+        let mut events = Vec::new();
+        while let Some(result) = stream.next().await {
+            events.push(result.expect("stream event should be Ok"));
+        }
+
+        let filtered: Vec<_> = events
+            .iter()
+            .filter_map(|e| {
+                if let crate::stream::StreamEvent::FilteredValues { data, .. } = e {
+                    Some(data.clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        assert!(!filtered.is_empty());
+
+        for data in &filtered {
+            assert!(
+                data.get("messages").is_some(),
+                "Should contain 'messages' key"
+            );
+            assert!(data.get("count").is_some(), "Should contain 'count' key");
+            assert!(
+                data.get("label").is_none(),
+                "Should not contain 'label' key"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_stream_with_config_updates_mode_output_keys() {
+        use futures::StreamExt;
+
+        let compiled = build_multi_field_graph();
+        let config = RunnableConfig::new();
+
+        let stream_config = crate::stream::StreamConfig::new(StreamMode::Updates)
+            .with_output_keys(vec!["messages".to_string()]);
+
+        let mut stream = compiled
+            .stream_with_config(
+                MultiFieldState {
+                    messages: vec![],
+                    count: 0,
+                    label: String::new(),
+                },
+                &config,
+                stream_config,
+            )
+            .await
+            .expect("stream_with_config should succeed");
+
+        let mut events = Vec::new();
+        while let Some(result) = stream.next().await {
+            events.push(result.expect("stream event should be Ok"));
+        }
+
+        // Should contain FilteredUpdates events with only "messages" key
+        let filtered_updates: Vec<_> = events
+            .iter()
+            .filter_map(|e| {
+                if let crate::stream::StreamEvent::FilteredUpdates { data, .. } = e {
+                    Some(data.clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        assert!(
+            !filtered_updates.is_empty(),
+            "Expected FilteredUpdates events in Updates mode with output_keys"
+        );
+
+        for data in &filtered_updates {
+            assert!(
+                data.get("messages").is_some(),
+                "FilteredUpdates should contain 'messages' key"
+            );
+            // The other keys should be filtered out
+            assert!(
+                data.get("count").is_none(),
+                "FilteredUpdates should not contain 'count' key"
+            );
+            assert!(
+                data.get("label").is_none(),
+                "FilteredUpdates should not contain 'label' key"
+            );
+        }
+    }
+
+    #[test]
+    fn test_filter_json_by_keys() {
+        let json = serde_json::json!({
+            "messages": ["hello"],
+            "count": 42,
+            "label": "test"
+        });
+
+        let filtered = crate::stream::filter_json_by_keys(json, &["messages".to_string()]);
+        assert!(filtered.get("messages").is_some());
+        assert!(filtered.get("count").is_none());
+        assert!(filtered.get("label").is_none());
+    }
+
+    #[test]
+    fn test_filter_json_by_keys_multiple() {
+        let json = serde_json::json!({
+            "a": 1,
+            "b": 2,
+            "c": 3
+        });
+
+        let filtered =
+            crate::stream::filter_json_by_keys(json, &["a".to_string(), "c".to_string()]);
+        assert_eq!(filtered.get("a").unwrap(), 1);
+        assert!(filtered.get("b").is_none());
+        assert_eq!(filtered.get("c").unwrap(), 3);
+    }
+
+    #[test]
+    fn test_filter_json_by_keys_empty_keys() {
+        let json = serde_json::json!({"a": 1});
+        let filtered = crate::stream::filter_json_by_keys(json.clone(), &[]);
+        assert_eq!(json, filtered);
+    }
+
+    #[test]
+    fn test_filter_json_by_keys_non_object() {
+        let json = serde_json::json!("hello");
+        let filtered = crate::stream::filter_json_by_keys(json.clone(), &["a".to_string()]);
+        assert_eq!(json, filtered);
     }
 }
 

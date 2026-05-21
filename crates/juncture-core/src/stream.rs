@@ -40,10 +40,30 @@ pub enum StreamEvent<S: State> {
     /// Complete state snapshot
     Values { state: S, step: usize },
 
+    /// Filtered state snapshot (only selected fields as JSON).
+    ///
+    /// Emitted instead of [`Values`](Self::Values) when
+    /// [`StreamConfig::output_keys`] is set. The `data` field contains a JSON
+    /// object with only the keys requested by the caller.
+    FilteredValues {
+        data: serde_json::Value,
+        step: usize,
+    },
+
     /// Node update
     Updates {
         node: String,
         update: S::Update,
+        step: usize,
+    },
+
+    /// Filtered node update (only selected fields as JSON).
+    ///
+    /// Emitted instead of [`Updates`](Self::Updates) when
+    /// [`StreamConfig::output_keys`] is set.
+    FilteredUpdates {
+        node: String,
+        data: serde_json::Value,
         step: usize,
     },
 
@@ -349,8 +369,18 @@ impl<S: State> EventEmitter<S> {
     #[allow(clippy::match_same_arms, reason = "each arm is explicit for clarity")]
     pub fn should_emit(&self, event: &StreamEvent<S>) -> bool {
         match (&self.mode, event) {
-            (StreamMode::Values, StreamEvent::Values { .. } | StreamEvent::End { .. }) => true,
-            (StreamMode::Updates, StreamEvent::Updates { .. } | StreamEvent::End { .. }) => true,
+            (
+                StreamMode::Values,
+                StreamEvent::Values { .. }
+                | StreamEvent::FilteredValues { .. }
+                | StreamEvent::End { .. },
+            ) => true,
+            (
+                StreamMode::Updates,
+                StreamEvent::Updates { .. }
+                | StreamEvent::FilteredUpdates { .. }
+                | StreamEvent::End { .. },
+            ) => true,
             (StreamMode::Messages, StreamEvent::Messages { .. } | StreamEvent::End { .. }) => {
                 // Filter out Messages events with "nostream" tag
                 if let StreamEvent::Messages { metadata, .. } = event {
@@ -396,8 +426,18 @@ impl<S: State> EventEmitter<S> {
     )]
     fn mode_matches_single(mode: &StreamMode, event: &StreamEvent<S>) -> bool {
         match (mode, event) {
-            (StreamMode::Values, StreamEvent::Values { .. } | StreamEvent::End { .. }) => true,
-            (StreamMode::Updates, StreamEvent::Updates { .. } | StreamEvent::End { .. }) => true,
+            (
+                StreamMode::Values,
+                StreamEvent::Values { .. }
+                | StreamEvent::FilteredValues { .. }
+                | StreamEvent::End { .. },
+            ) => true,
+            (
+                StreamMode::Updates,
+                StreamEvent::Updates { .. }
+                | StreamEvent::FilteredUpdates { .. }
+                | StreamEvent::End { .. },
+            ) => true,
             (StreamMode::Messages, StreamEvent::Messages { .. } | StreamEvent::End { .. }) => true,
             (StreamMode::Custom, StreamEvent::Custom { .. } | StreamEvent::End { .. }) => true,
             (StreamMode::Debug, _) => true,
@@ -658,6 +698,24 @@ impl MessageBatchConfig {
             max_chunks: 1,
             flush_interval_ms: None,
         }
+    }
+}
+
+/// Filter a JSON object to retain only the specified keys.
+///
+/// If `keys` is empty the original value is returned unchanged.
+/// Non-object values pass through unmodified.
+pub(crate) fn filter_json_by_keys(value: serde_json::Value, keys: &[String]) -> serde_json::Value {
+    if keys.is_empty() {
+        return value;
+    }
+    match value {
+        serde_json::Value::Object(mut map) => {
+            let keep: std::collections::HashSet<&String> = keys.iter().collect();
+            map.retain(|k, _| keep.contains(k));
+            serde_json::Value::Object(map)
+        }
+        other => other,
     }
 }
 
