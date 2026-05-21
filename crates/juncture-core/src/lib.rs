@@ -32,7 +32,11 @@ pub mod tools;
 /// # Syntax
 ///
 /// ```ignore
+/// // Anonymous interrupt (auto-generated ID from node name + index):
 /// interrupt!(payload)
+///
+/// // Named interrupt (user-specified ID for targeted resume):
+/// interrupt!(id, payload)
 /// ```
 ///
 /// # Examples
@@ -42,17 +46,41 @@ pub mod tools;
 /// use serde_json::json;
 ///
 /// async fn my_node(state: MyState) -> Result<MyStateUpdate, JunctureError> {
-///     // Request human input (task-local context)
+///     // Anonymous interrupt -- ID is auto-generated from node + index
 ///     let decision: serde_json::Value = interrupt!(
 ///         json!({"question": "Continue?", "options": ["yes", "no"]})
 ///     )?;
 ///
-///     // Process human decision...
+///     // Named interrupt -- caller can resume by ID
+///     let approval: serde_json::Value = interrupt!(
+///         "approve_step",
+///         json!({"question": "Approve this action?", "action": "delete"})
+///     )?;
+///
 ///     Ok(MyStateUpdate::default())
 /// }
 /// ```
 #[macro_export]
 macro_rules! interrupt {
+    // Named interrupt: interrupt!("my_id", json!({...}))
+    ($id:expr, $payload:expr) => {{
+        $crate::interrupt::INTERRUPT_CONTEXT
+            .try_with(|ctx| {
+                Box::pin($crate::interrupt::__interrupt_impl(
+                    &**ctx,
+                    ::serde_json::to_value(&$payload)
+                        .expect("interrupt payload must be serializable"),
+                    Some($id),
+                ))
+                .await
+            })
+            .unwrap_or_else(|_| {
+                Err($crate::JunctureError::execution(
+                    "interrupt context not set in task-local",
+                ))
+            })
+    }};
+    // Anonymous interrupt: interrupt!(json!({...}))
     ($payload:expr) => {{
         $crate::interrupt::INTERRUPT_CONTEXT
             .try_with(|ctx| {
@@ -83,7 +111,11 @@ macro_rules! interrupt {
 /// # Syntax
 ///
 /// ```ignore
+/// // Anonymous interrupt (auto-generated ID from node name + index):
 /// interrupt_with_ctx!(context, payload)
+///
+/// // Named interrupt (user-specified ID for targeted resume):
+/// interrupt_with_ctx!(context, id, payload)
 /// ```
 ///
 /// # Examples
@@ -93,18 +125,34 @@ macro_rules! interrupt {
 /// use serde_json::json;
 ///
 /// async fn my_node(state: MyState, ctx: &InterruptContext) -> Result<MyStateUpdate, JunctureError> {
-///     // Request human input with explicit context
+///     // Anonymous interrupt -- ID is auto-generated from node + index
 ///     let decision: serde_json::Value = interrupt_with_ctx!(
 ///         ctx,
 ///         json!({"question": "Continue?", "options": ["yes", "no"]})
 ///     )?;
 ///
-///     // Process human decision...
+///     // Named interrupt -- caller can resume by ID
+///     let approval: serde_json::Value = interrupt_with_ctx!(
+///         ctx,
+///         "approve_step",
+///         json!({"question": "Approve this action?", "action": "delete"})
+///     )?;
+///
 ///     Ok(MyStateUpdate::default())
 /// }
 /// ```
 #[macro_export]
 macro_rules! interrupt_with_ctx {
+    // Named interrupt: interrupt_with_ctx!(ctx, "my_id", json!({...}))
+    ($ctx:expr, $id:expr, $payload:expr) => {{
+        $crate::interrupt::__interrupt_impl(
+            $ctx,
+            ::serde_json::to_value(&$payload).expect("interrupt payload must be serializable"),
+            Some($id),
+        )
+        .await
+    }};
+    // Anonymous interrupt: interrupt_with_ctx!(ctx, json!({...}))
     ($ctx:expr, $payload:expr) => {{
         $crate::interrupt::__interrupt_impl(
             $ctx,

@@ -128,4 +128,88 @@ async fn test_interrupt_macro_with_interrupt() {
     assert_eq!(signal.payload, json!("interrupt_test"));
 }
 
-// Rust guideline compliant 2026-05-18
+#[tokio::test]
+async fn test_interrupt_impl_with_named_id() {
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let resume_values = vec![Some(json!("resumed_value"))];
+    let ctx = InterruptContext::new(resume_values, tx);
+
+    let result = juncture_core::interrupt::__interrupt_impl(
+        &ctx,
+        json!("original_payload"),
+        Some("my_named_id"),
+    )
+    .await;
+
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap(), json!("resumed_value"));
+}
+
+#[tokio::test]
+async fn test_interrupt_impl_named_id_without_resume() {
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let resume_values = vec![None];
+    let ctx = InterruptContext::new(resume_values, tx);
+
+    let result = juncture_core::interrupt::__interrupt_impl(
+        &ctx,
+        json!("payload"),
+        Some("custom_interrupt_id"),
+    )
+    .await;
+
+    assert!(result.is_err());
+    assert!(result.unwrap_err().is_interrupt());
+
+    let signal = rx.try_recv().expect("signal should be available");
+    assert_eq!(signal.index, 0);
+    assert_eq!(signal.payload, json!("payload"));
+    assert_eq!(signal.id, Some("custom_interrupt_id".to_string()));
+}
+
+#[tokio::test]
+async fn test_interrupt_macro_with_named_id() {
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let resume_values = vec![Some(json!("resumed_value"))];
+    let ctx = InterruptContext::new(resume_values, tx);
+
+    let result = interrupt_with_ctx!(&ctx, "named_step", json!("test_payload"));
+
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap(), json!("resumed_value"));
+}
+
+#[tokio::test]
+async fn test_interrupt_macro_named_id_interrupts() {
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let resume_values = vec![None];
+    let ctx = InterruptContext::new(resume_values, tx);
+
+    let result = interrupt_with_ctx!(&ctx, "approve_action", json!({"question": "ok?"}));
+
+    assert!(result.is_err());
+    assert!(result.unwrap_err().is_interrupt());
+
+    let signal = rx.try_recv().expect("signal should be available");
+    assert_eq!(signal.payload, json!({"question": "ok?"}));
+    assert_eq!(signal.id, Some("approve_action".to_string()));
+}
+
+#[tokio::test]
+async fn test_interrupt_macro_anonymous_still_works() {
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let resume_values = vec![None];
+    let ctx = InterruptContext::new(resume_values, tx);
+
+    let result = interrupt_with_ctx!(&ctx, json!("anonymous_payload"));
+
+    assert!(result.is_err());
+    assert!(result.unwrap_err().is_interrupt());
+
+    let signal = rx.try_recv().expect("signal should be available");
+    assert_eq!(signal.payload, json!("anonymous_payload"));
+    // Anonymous: ID is auto-generated, not None in the signal itself
+    assert!(signal.id.is_some());
+}
+
+// Rust guideline compliant 2026-05-21
