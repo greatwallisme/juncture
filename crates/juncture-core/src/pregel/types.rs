@@ -363,71 +363,95 @@ impl LoopStatus {
     }
 }
 
-/// A task result that may be synchronously ready or asynchronously computed
+/// A task result that may be synchronously ready or asynchronously computed.
 ///
-/// In functional API (@task/@entrypoint), results are wrapped as `SyncAsyncFuture`.
-/// Callers use `.await` uniformly regardless of sync/async nature.
+/// In the functional API (`@task`/`@entrypoint`), results are wrapped as
+/// `SyncAsyncFuture`. Callers use `.result().await` uniformly regardless of
+/// whether the underlying computation was synchronous (cache hit) or
+/// asynchronous (computation required).
 ///
 /// # Type Parameters
 ///
-/// * `T` - The result type
+/// * `T` - The success value type produced by this future
 ///
 /// # Examples
 ///
 /// ```ignore
 /// use juncture_core::pregel::types::SyncAsyncFuture;
 ///
+/// // Synchronous (cache hit)
 /// let ready = SyncAsyncFuture::ready(42);
 /// assert!(ready.is_ready());
+/// assert_eq!(ready.result().await?, 42);
+///
+/// // Asynchronous (needs computation)
+/// let pending = SyncAsyncFuture::pending(async { Ok(99) });
+/// assert!(!pending.is_ready());
+/// assert_eq!(pending.result().await?, 99);
 /// ```
 pub enum SyncAsyncFuture<T> {
-    /// Synchronous result (e.g., cache hit)
+    /// Synchronous result (e.g., cache hit).
     Ready(Option<T>),
 
-    /// Asynchronous result (e.g., requires computation)
-    Future(futures::future::BoxFuture<'static, T>),
+    /// Asynchronous result that resolves to `Result<T, JunctureError>`.
+    Future(futures::future::BoxFuture<'static, Result<T, crate::JunctureError>>),
 }
 
-impl<T> std::fmt::Debug for SyncAsyncFuture<T> {
+impl<T: std::fmt::Debug> std::fmt::Debug for SyncAsyncFuture<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Ready(v) => f
-                .debug_tuple("Ready")
-                .field(&v.as_ref().map(|_| "<value>"))
-                .finish(),
-            Self::Future(_) => f.debug_tuple("Future").field(&"<future>").finish(),
+            Self::Ready(value) => f.debug_tuple("Ready").field(value).finish(),
+            Self::Future(_) => f.debug_tuple("Future").field(&"<pending>").finish(),
         }
     }
 }
 
 impl<T> SyncAsyncFuture<T> {
-    /// Create a synchronous ready result
+    /// Create a synchronous ready result with a value.
+    ///
+    /// Use this when the result is already available (e.g., cache hit).
     #[must_use]
     pub const fn ready(value: T) -> Self {
         Self::Ready(Some(value))
     }
 
-    /// Create an empty ready result (no value available)
+    /// Create an empty ready result indicating no value is available.
+    ///
+    /// Calling [`result()`](Self::result) on this will return
+    /// [`JunctureError::empty_channel()`].
     #[must_use]
     pub const fn empty() -> Self {
         Self::Ready(None)
     }
 
-    /// Await the result, returning an error if the value is empty
+    /// Create an asynchronous result from a future that resolves to
+    /// `Result<T, JunctureError>`.
+    ///
+    /// Use this when the result requires computation (e.g., cache miss,
+    /// network call, or LLM invocation).
+    pub fn pending(fut: impl std::future::Future<Output = Result<T, crate::JunctureError>> + Send + 'static) -> Self {
+        Self::Future(Box::pin(fut))
+    }
+
+    /// Await the result, returning `Ok(T)` on success.
     ///
     /// # Errors
     ///
-    /// Returns [`crate::JunctureError::EmptyChannel`] if the result
-    /// is `Ready(None)` (no value available).
+    /// - Returns [`JunctureError::empty_channel()`] if the variant is
+    ///   `Ready(None)` (no value available).
+    /// - Returns the error from the inner future for the `Future` variant.
     pub async fn result(self) -> Result<T, crate::JunctureError> {
         match self {
             Self::Ready(Some(value)) => Ok(value),
             Self::Ready(None) => Err(crate::JunctureError::empty_channel()),
-            Self::Future(fut) => Ok(fut.await),
+            Self::Future(fut) => fut.await,
         }
     }
 
-    /// Check if the result is synchronously available
+    /// Check if the result is synchronously available.
+    ///
+    /// Returns `true` for the `Ready` variant (regardless of whether the
+    /// inner value is `Some` or `None`), and `false` for `Future`.
     #[must_use]
     pub const fn is_ready(&self) -> bool {
         matches!(self, Self::Ready(_))
@@ -440,11 +464,104 @@ impl<T> From<T> for SyncAsyncFuture<T> {
     }
 }
 
-impl<T> From<futures::future::BoxFuture<'static, T>> for SyncAsyncFuture<T> {
-    fn from(fut: futures::future::BoxFuture<'static, T>) -> Self {
-        Self::Future(fut)
+#[cfg(test)]
+mod tests {
+    use super::SyncAsyncFuture;
+    use crate::JunctureError;
+
+    #[tokio::test]
+    async fn ready_some_returns_value() {
+        let saf = SyncAsyncFuture::ready(42_i32);
+        assert!(saf.is_ready());
+        let result = saf.result().await;
+        assert_eq!(result.expect("Ready(Some) should yield Ok"), 42);
+    }
+
+    #[tokio::test]
+    async fn ready_none_returns_empty_channel_error() {
+        let saf: SyncAsyncFuture<i32> = SyncAsyncFuture::empty();
+        assert!(saf.is_ready());
+        let err = saf
+            .result()
+            .await
+            .expect_err("Ready(None) should yield Err");
+        assert!(err.is_empty_channel(), "expected EmptyChannel error, got {err:?}");
+    }
+
+    #[tokio::test]
+    async fn from_trait_creates_ready_some() {
+        let saf = SyncAsyncFuture::from("hello");
+        assert!(saf.is_ready());
+        assert_eq!(saf.result().await.expect("From<T> should yield Ok"), "hello");
+    }
+
+    #[tokio::test]
+    async fn pending_future_returns_ok() {
+        let saf = SyncAsyncFuture::pending(async { Ok::<_, JunctureError>(99_u64) });
+        assert!(!saf.is_ready());
+        assert_eq!(
+            saf.result().await.expect("pending Ok should yield Ok"),
+            99
+        );
+    }
+
+    #[tokio::test]
+    async fn pending_future_propagates_error() {
+        let error = JunctureError::execution("computation failed");
+        let saf = SyncAsyncFuture::pending(async {
+            Err::<i32, _>(JunctureError::execution("computation failed"))
+        });
+        let err = saf
+            .result()
+            .await
+            .expect_err("pending Err should yield Err");
+        assert!(
+            err.is_execution(),
+            "expected Execution error, got {err:?}"
+        );
+        assert_eq!(format!("{error}"), format!("{err}"));
+    }
+
+    #[tokio::test]
+    async fn pending_from_boxed_future() {
+        let saf: SyncAsyncFuture<String> =
+            SyncAsyncFuture::pending(async { Ok("from boxed".to_string()) });
+        assert!(!saf.is_ready());
+        assert_eq!(
+            saf.result().await.expect("boxed future should yield Ok"),
+            "from boxed"
+        );
+    }
+
+    #[test]
+    fn debug_ready_some_shows_value() {
+        let saf = SyncAsyncFuture::ready(42_i32);
+        let debug = format!("{saf:?}");
+        assert!(
+            debug.contains("Ready") && debug.contains("Some(42)"),
+            "Debug should show the value: {debug}"
+        );
+    }
+
+    #[test]
+    fn debug_ready_none_shows_none() {
+        let saf: SyncAsyncFuture<i32> = SyncAsyncFuture::empty();
+        let debug = format!("{saf:?}");
+        assert!(
+            debug.contains("Ready") && debug.contains("None"),
+            "Debug should show None: {debug}"
+        );
+    }
+
+    #[test]
+    fn debug_future_shows_pending() {
+        let saf = SyncAsyncFuture::pending(async { Ok::<_, JunctureError>(1_i32) });
+        let debug = format!("{saf:?}");
+        assert!(
+            debug.contains("Future") && debug.contains("pending"),
+            "Debug should show <pending> for Future variant: {debug}"
+        );
     }
 }
 
-// Rust guideline compliant 2026-05-19
-// Rust guideline compliant 2026-05-20
+// Rust guideline compliant 2026-05-21
