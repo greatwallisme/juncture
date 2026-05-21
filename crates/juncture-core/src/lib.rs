@@ -189,7 +189,7 @@ pub use llm::{
     ToolDefinition,
 };
 pub use node::{IntoNode, Node, NodeError};
-pub use observability::{CacheKeyInput, MetricsRegistry, ServerInfo};
+pub use observability::{CacheKeyInput, ServerInfo};
 pub use prebuilt::{PromptSource, ReactAgentConfig};
 pub use pregel::{
     BubbleUp, BudgetConfig, BudgetExceededAction, BudgetExceededReason, BudgetTracker, BudgetUsage,

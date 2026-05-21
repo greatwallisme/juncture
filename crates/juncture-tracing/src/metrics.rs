@@ -9,6 +9,130 @@ use std::sync::{
     atomic::{AtomicU64, Ordering},
 };
 
+/// Builder for counter metric configuration
+///
+/// Use [`CounterBuilder::with_description`] and [`CounterBuilder::with_unit`]
+/// to configure metric metadata before the handle is created.
+///
+/// # Examples
+///
+/// ```
+/// use juncture_tracing::metrics::MetricsRegistry;
+///
+/// let registry = MetricsRegistry::new();
+/// let counter = registry.counter("my_counter", |b| {
+///     b.with_description("Total invocations").with_unit("1")
+/// });
+/// counter.inc();
+/// ```
+#[derive(Clone, Debug, Default)]
+pub struct CounterBuilder {
+    description: Option<String>,
+    unit: Option<String>,
+}
+
+impl CounterBuilder {
+    /// Set the metric description
+    #[must_use]
+    pub fn with_description(mut self, desc: impl Into<String>) -> Self {
+        self.description = Some(desc.into());
+        self
+    }
+
+    /// Set the metric unit
+    #[must_use]
+    pub fn with_unit(mut self, unit: impl Into<String>) -> Self {
+        self.unit = Some(unit.into());
+        self
+    }
+}
+
+/// Builder for histogram metric configuration
+///
+/// Use the `with_*` methods to configure metric metadata including
+/// optional bucket boundaries.
+///
+/// # Examples
+///
+/// ```
+/// use juncture_tracing::metrics::MetricsRegistry;
+///
+/// let registry = MetricsRegistry::new();
+/// let histogram = registry.histogram("latency_ms", |b| {
+///     b.with_description("Request latency")
+///         .with_unit("ms")
+///         .with_boundaries(vec![1.0, 5.0, 10.0, 50.0, 100.0])
+/// });
+/// histogram.record(42.0);
+/// ```
+#[derive(Clone, Debug, Default)]
+pub struct HistogramBuilder {
+    description: Option<String>,
+    unit: Option<String>,
+    boundaries: Option<Vec<f64>>,
+}
+
+impl HistogramBuilder {
+    /// Set the metric description
+    #[must_use]
+    pub fn with_description(mut self, desc: impl Into<String>) -> Self {
+        self.description = Some(desc.into());
+        self
+    }
+
+    /// Set the metric unit
+    #[must_use]
+    pub fn with_unit(mut self, unit: impl Into<String>) -> Self {
+        self.unit = Some(unit.into());
+        self
+    }
+
+    /// Set explicit histogram bucket boundaries
+    #[must_use]
+    pub fn with_boundaries(mut self, boundaries: Vec<f64>) -> Self {
+        self.boundaries = Some(boundaries);
+        self
+    }
+}
+
+/// Builder for gauge metric configuration
+///
+/// Use [`GaugeBuilder::with_description`] and [`GaugeBuilder::with_unit`]
+/// to configure metric metadata before the handle is created.
+///
+/// # Examples
+///
+/// ```
+/// use juncture_tracing::metrics::MetricsRegistry;
+///
+/// let registry = MetricsRegistry::new();
+/// let gauge = registry.gauge("active_connections", |b| {
+///     b.with_description("Currently active connections").with_unit("1")
+/// });
+/// gauge.set(10);
+/// ```
+#[derive(Clone, Debug, Default)]
+pub struct GaugeBuilder {
+    description: Option<String>,
+    unit: Option<String>,
+}
+
+impl GaugeBuilder {
+    /// Set the metric description
+    #[must_use]
+    pub fn with_description(mut self, desc: impl Into<String>) -> Self {
+        self.description = Some(desc.into());
+        self
+    }
+
+    /// Set the metric unit
+    #[must_use]
+    pub fn with_unit(mut self, unit: impl Into<String>) -> Self {
+        self.unit = Some(unit.into());
+        self
+    }
+}
+
 /// Counter metric handle
 ///
 /// Provides increment operations for counter metrics.
@@ -228,6 +352,22 @@ pub mod names {
     pub const BUDGET_REMAINING_COST_USD: &str = "juncture.budget.remaining_cost_usd";
 }
 
+/// Stored metadata for a named metric
+///
+/// Fields are populated by builder closures and will be consumed when
+/// full OpenTelemetry SDK integration is added (the `OTel` meter API expects
+/// description/unit/boundaries at instrument construction time).
+#[allow(
+    dead_code,
+    reason = "fields read in tests and consumed by future OTel meter integration"
+)]
+#[derive(Clone, Debug, Default)]
+struct MetricMetadata {
+    description: Option<String>,
+    unit: Option<String>,
+    boundaries: Option<Vec<f64>>,
+}
+
 /// Metrics registry for OpenTelemetry metrics
 ///
 /// Provides methods to create and manage custom metrics.
@@ -240,7 +380,9 @@ pub mod names {
 /// use juncture_tracing::metrics::MetricsRegistry;
 ///
 /// let registry = MetricsRegistry::new();
-/// let counter = registry.counter("my_counter");
+/// let counter = registry.counter("my_counter", |b| {
+///     b.with_description("Custom counter").with_unit("1")
+/// });
 /// counter.inc();
 /// ```
 #[cfg(feature = "otel")]
@@ -254,6 +396,7 @@ pub struct MetricsRegistry {
 struct MetricsRegistryInner {
     counters: std::sync::Mutex<std::collections::HashMap<String, u64>>,
     histograms: std::sync::Mutex<std::collections::HashMap<String, Vec<f64>>>,
+    metadata: std::sync::Mutex<std::collections::HashMap<String, MetricMetadata>>,
 }
 
 #[cfg(feature = "otel")]
@@ -274,11 +417,12 @@ impl MetricsRegistry {
         }
     }
 
-    /// Create a counter metric handle
+    /// Create a counter metric handle with builder configuration
     ///
     /// # Arguments
     ///
     /// * `name` - Metric name
+    /// * `f` - Builder closure for configuring description and unit
     ///
     /// # Examples
     ///
@@ -286,23 +430,30 @@ impl MetricsRegistry {
     /// use juncture_tracing::metrics::MetricsRegistry;
     ///
     /// let registry = MetricsRegistry::new();
-    /// let counter = registry.counter("invocations");
+    /// let counter = registry.counter("invocations", |b| {
+    ///     b.with_description("Total invocations").with_unit("1")
+    /// });
     /// counter.inc();
     /// counter.inc_by(5);
     /// ```
-    #[must_use]
-    pub fn counter(&self, name: &str) -> CounterHandle {
+    pub fn counter<F>(&self, name: &str, f: F) -> CounterHandle
+    where
+        F: FnOnce(CounterBuilder) -> CounterBuilder,
+    {
+        let builder = f(CounterBuilder::default());
+        self.store_metadata(name, builder.description, builder.unit, None);
         CounterHandle {
             registry: Arc::clone(&self.inner),
             name: name.to_string(),
         }
     }
 
-    /// Create a histogram metric handle
+    /// Create a histogram metric handle with builder configuration
     ///
     /// # Arguments
     ///
     /// * `name` - Metric name
+    /// * `f` - Builder closure for configuring description, unit, and boundaries
     ///
     /// # Examples
     ///
@@ -310,23 +461,32 @@ impl MetricsRegistry {
     /// use juncture_tracing::metrics::MetricsRegistry;
     ///
     /// let registry = MetricsRegistry::new();
-    /// let histogram = registry.histogram("duration_ms");
+    /// let histogram = registry.histogram("duration_ms", |b| {
+    ///     b.with_description("Request duration")
+    ///         .with_unit("ms")
+    ///         .with_boundaries(vec![1.0, 5.0, 10.0, 50.0, 100.0])
+    /// });
     /// histogram.record(42.0);
     /// histogram.record(58.5);
     /// ```
-    #[must_use]
-    pub fn histogram(&self, name: &str) -> HistogramHandle {
+    pub fn histogram<F>(&self, name: &str, f: F) -> HistogramHandle
+    where
+        F: FnOnce(HistogramBuilder) -> HistogramBuilder,
+    {
+        let builder = f(HistogramBuilder::default());
+        self.store_metadata(name, builder.description, builder.unit, builder.boundaries);
         HistogramHandle {
             registry: Arc::clone(&self.inner),
             name: name.to_string(),
         }
     }
 
-    /// Create a gauge metric handle
+    /// Create a gauge metric handle with builder configuration
     ///
     /// # Arguments
     ///
     /// * `name` - Metric name
+    /// * `f` - Builder closure for configuring description and unit
     ///
     /// # Examples
     ///
@@ -334,15 +494,50 @@ impl MetricsRegistry {
     /// use juncture_tracing::metrics::MetricsRegistry;
     ///
     /// let registry = MetricsRegistry::new();
-    /// let gauge = registry.gauge("active_connections");
+    /// let gauge = registry.gauge("active_connections", |b| {
+    ///     b.with_description("Active connections").with_unit("1")
+    /// });
     /// gauge.set(10);
     /// gauge.inc();
     /// gauge.dec();
     /// ```
-    #[must_use]
-    pub fn gauge(&self, _name: &str) -> GaugeHandle {
+    #[allow(
+        clippy::used_underscore_binding,
+        reason = "name parameter stored as metadata but GaugeHandle does not yet use it"
+    )]
+    pub fn gauge<F>(&self, _name: &str, f: F) -> GaugeHandle
+    where
+        F: FnOnce(GaugeBuilder) -> GaugeBuilder,
+    {
+        let builder = f(GaugeBuilder::default());
+        self.store_metadata(_name, builder.description, builder.unit, None);
         GaugeHandle {
             value: Arc::new(AtomicU64::new(0)),
+        }
+    }
+
+    /// Store metadata for a named metric when any is provided
+    #[allow(
+        clippy::significant_drop_tightening,
+        reason = "MutexGuard is needed for entry API; tightening would complicate the code"
+    )]
+    fn store_metadata(
+        &self,
+        name: &str,
+        description: Option<String>,
+        unit: Option<String>,
+        boundaries: Option<Vec<f64>>,
+    ) {
+        if description.is_some() || unit.is_some() || boundaries.is_some() {
+            let mut metadata = self.inner.metadata.lock().unwrap();
+            metadata.insert(
+                name.to_string(),
+                MetricMetadata {
+                    description,
+                    unit,
+                    boundaries,
+                },
+            );
         }
     }
 }
@@ -417,7 +612,7 @@ mod tests {
     #[test]
     fn test_counter_handle() {
         let registry = MetricsRegistry::new();
-        let counter = registry.counter("test_counter");
+        let counter = registry.counter("test_counter", |b| b);
 
         assert_eq!(counter.get(), 0);
         counter.inc();
@@ -430,7 +625,7 @@ mod tests {
     #[test]
     fn test_histogram_handle() {
         let registry = MetricsRegistry::new();
-        let histogram = registry.histogram("test_histogram");
+        let histogram = registry.histogram("test_histogram", |b| b);
 
         assert!(histogram.get_values().is_empty());
         histogram.record(1.0);
@@ -439,7 +634,6 @@ mod tests {
 
         let values = histogram.get_values();
         assert_eq!(values.len(), 3);
-        // Use approximate comparison for floating point values
         #[allow(
             clippy::float_cmp,
             reason = "test values are exact binary fractions, safe to compare"
@@ -455,7 +649,7 @@ mod tests {
     #[test]
     fn test_gauge_handle() {
         let registry = MetricsRegistry::new();
-        let gauge = registry.gauge("test_gauge");
+        let gauge = registry.gauge("test_gauge", |b| b);
 
         assert_eq!(gauge.get(), 0);
         gauge.set(10);
@@ -474,8 +668,8 @@ mod tests {
     #[test]
     fn test_multiple_counter_handles() {
         let registry = MetricsRegistry::new();
-        let counter1 = registry.counter("counter_a");
-        let counter2 = registry.counter("counter_b");
+        let counter1 = registry.counter("counter_a", |b| b);
+        let counter2 = registry.counter("counter_b", |b| b);
 
         counter1.inc_by(3);
         counter2.inc_by(5);
@@ -483,6 +677,117 @@ mod tests {
         assert_eq!(counter1.get(), 3);
         assert_eq!(counter2.get(), 5);
     }
+
+    #[cfg(feature = "otel")]
+    #[test]
+    #[allow(
+        clippy::significant_drop_tightening,
+        reason = "test needs to hold MutexGuard across multiple assertions on the same metadata"
+    )]
+    fn test_counter_builder_with_description() {
+        let registry = MetricsRegistry::new();
+        let counter = registry.counter("test_counter_desc", |b| {
+            b.with_description("Test counter").with_unit("1")
+        });
+        counter.inc();
+        assert_eq!(counter.get(), 1);
+
+        // Verify metadata was stored
+        let metadata = registry.inner.metadata.lock().unwrap();
+        let meta = metadata.get("test_counter_desc");
+        assert!(meta.is_some());
+        let meta = meta.expect("checked above");
+        assert_eq!(meta.description.as_deref(), Some("Test counter"));
+        assert_eq!(meta.unit.as_deref(), Some("1"));
+    }
+
+    #[cfg(feature = "otel")]
+    #[test]
+    #[allow(
+        clippy::significant_drop_tightening,
+        reason = "test needs to hold MutexGuard across multiple assertions on the same metadata"
+    )]
+    fn test_histogram_builder_with_boundaries() {
+        let registry = MetricsRegistry::new();
+        let histogram = registry.histogram("test_hist_boundaries", |b| {
+            b.with_description("Test histogram")
+                .with_unit("ms")
+                .with_boundaries(vec![1.0, 5.0, 10.0, 50.0, 100.0])
+        });
+        histogram.record(42.0);
+        assert_eq!(histogram.get_values().len(), 1);
+
+        // Verify metadata was stored with boundaries
+        let metadata = registry.inner.metadata.lock().unwrap();
+        let meta = metadata.get("test_hist_boundaries");
+        assert!(meta.is_some());
+        let meta = meta.expect("checked above");
+        assert_eq!(meta.description.as_deref(), Some("Test histogram"));
+        assert_eq!(meta.unit.as_deref(), Some("ms"));
+        assert_eq!(
+            meta.boundaries.as_deref(),
+            Some([1.0, 5.0, 10.0, 50.0, 100.0].as_slice())
+        );
+    }
+
+    #[cfg(feature = "otel")]
+    #[test]
+    #[allow(
+        clippy::significant_drop_tightening,
+        reason = "test needs to hold MutexGuard across multiple assertions on the same metadata"
+    )]
+    fn test_gauge_builder_with_description() {
+        let registry = MetricsRegistry::new();
+        let gauge = registry.gauge("test_gauge_desc", |b| {
+            b.with_description("Active connections").with_unit("1")
+        });
+        gauge.set(5);
+        assert_eq!(gauge.get(), 5);
+
+        // Verify metadata was stored
+        let metadata = registry.inner.metadata.lock().unwrap();
+        let meta = metadata.get("test_gauge_desc");
+        assert!(meta.is_some());
+        let meta = meta.expect("checked above");
+        assert_eq!(meta.description.as_deref(), Some("Active connections"));
+        assert_eq!(meta.unit.as_deref(), Some("1"));
+    }
+
+    #[cfg(feature = "otel")]
+    #[test]
+    fn test_no_metadata_without_builder_config() {
+        let registry = MetricsRegistry::new();
+        let counter = registry.counter("plain_counter", |b| b);
+        counter.inc();
+
+        // No metadata should be stored when builder has no config
+        assert!(
+            registry
+                .inner
+                .metadata
+                .lock()
+                .unwrap()
+                .get("plain_counter")
+                .is_none()
+        );
+    }
+
+    #[cfg(feature = "otel")]
+    #[test]
+    fn test_builder_default_is_no_op() {
+        let cb = CounterBuilder::default();
+        assert!(cb.description.is_none());
+        assert!(cb.unit.is_none());
+
+        let hb = HistogramBuilder::default();
+        assert!(hb.description.is_none());
+        assert!(hb.unit.is_none());
+        assert!(hb.boundaries.is_none());
+
+        let gb = GaugeBuilder::default();
+        assert!(gb.description.is_none());
+        assert!(gb.unit.is_none());
+    }
 }
 
-// Rust guideline compliant 2026-05-19
+// Rust guideline compliant 2026-05-21
