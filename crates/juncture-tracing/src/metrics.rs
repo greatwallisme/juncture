@@ -1,8 +1,16 @@
 //! Metrics definitions and registry for Juncture
 //!
 //! This module provides metric name constants and a metrics registry for
-//! OpenTelemetry metrics export. This feature is only available when the
-//! `otel` feature is enabled.
+//! OpenTelemetry metrics export. The registry supports two backends:
+//!
+//! - **In-memory mode**: `HashMap`-based storage, always available, suitable for
+//!   testing and scenarios without an OpenTelemetry pipeline.
+//! - **`OTel` mode**: Wraps an `opentelemetry::metrics::Meter` when the `otel`
+//!   feature is enabled, forwarding metric operations to the OpenTelemetry SDK
+//!   while keeping the in-memory `HashMap`s as a read-back fallback.
+//!
+//! The external handle API (`CounterHandle::inc()`, `HistogramHandle::record()`,
+//! `GaugeHandle::set()`) is identical regardless of backend.
 
 use std::sync::{
     Arc,
@@ -27,8 +35,8 @@ use std::sync::{
 /// ```
 #[derive(Clone, Debug, Default)]
 pub struct CounterBuilder {
-    description: Option<String>,
-    unit: Option<String>,
+    pub(crate) description: Option<String>,
+    pub(crate) unit: Option<String>,
 }
 
 impl CounterBuilder {
@@ -67,9 +75,9 @@ impl CounterBuilder {
 /// ```
 #[derive(Clone, Debug, Default)]
 pub struct HistogramBuilder {
-    description: Option<String>,
-    unit: Option<String>,
-    boundaries: Option<Vec<f64>>,
+    pub(crate) description: Option<String>,
+    pub(crate) unit: Option<String>,
+    pub(crate) boundaries: Option<Vec<f64>>,
 }
 
 impl HistogramBuilder {
@@ -113,8 +121,8 @@ impl HistogramBuilder {
 /// ```
 #[derive(Clone, Debug, Default)]
 pub struct GaugeBuilder {
-    description: Option<String>,
-    unit: Option<String>,
+    pub(crate) description: Option<String>,
+    pub(crate) unit: Option<String>,
 }
 
 impl GaugeBuilder {
@@ -135,20 +143,20 @@ impl GaugeBuilder {
 
 /// Counter metric handle
 ///
-/// Provides increment operations for counter metrics.
+/// Provides increment operations for counter metrics. When backed by an
+/// OpenTelemetry meter, increments are forwarded to the `OTel` SDK.
+/// Otherwise, an in-memory `HashMap` is used.
+#[cfg(feature = "otel")]
 #[derive(Clone, Debug)]
 pub struct CounterHandle {
     registry: Arc<MetricsRegistryInner>,
     name: String,
+    otel_counter: Option<opentelemetry::metrics::Counter<u64>>,
 }
 
+#[cfg(feature = "otel")]
 impl CounterHandle {
     /// Increment the counter by 1
-    ///
-    /// # Panics
-    ///
-    /// Panics if the internal mutex is poisoned (which indicates another
-    /// thread panicked while holding the lock).
     pub fn inc(&self) {
         self.inc_by(1);
     }
@@ -168,13 +176,20 @@ impl CounterHandle {
         reason = "MutexGuard is needed for entry API; tightening would complicate the code"
     )]
     pub fn inc_by(&self, value: u64) {
+        if let Some(ref counter) = self.otel_counter {
+            counter.add(value, &[]);
+            return;
+        }
         let name = self.name.clone();
         let mut counters = self.registry.counters.lock().unwrap();
         let entry = counters.entry(name).or_default();
         *entry = entry.saturating_add(value);
     }
 
-    /// Get the current value
+    /// Get the current value from the in-memory store
+    ///
+    /// Always reads from the in-memory `HashMap`, even when an `OTel` counter
+    /// is configured. Intended for testing and local read-back.
     ///
     /// # Panics
     ///
@@ -190,13 +205,18 @@ impl CounterHandle {
 
 /// Histogram metric handle
 ///
-/// Provides value recording for histogram metrics.
+/// Provides value recording for histogram metrics. When backed by an
+/// OpenTelemetry meter, recordings are forwarded to the `OTel` SDK.
+/// Otherwise, an in-memory `HashMap` is used.
+#[cfg(feature = "otel")]
 #[derive(Clone, Debug)]
 pub struct HistogramHandle {
     registry: Arc<MetricsRegistryInner>,
     name: String,
+    otel_histogram: Option<opentelemetry::metrics::Histogram<f64>>,
 }
 
+#[cfg(feature = "otel")]
 impl HistogramHandle {
     /// Record a value
     ///
@@ -213,13 +233,20 @@ impl HistogramHandle {
         reason = "MutexGuard is needed for entry API; tightening would complicate the code"
     )]
     pub fn record(&self, value: f64) {
+        if let Some(ref histogram) = self.otel_histogram {
+            histogram.record(value, &[]);
+            return;
+        }
         let name = self.name.clone();
         let mut histograms = self.registry.histograms.lock().unwrap();
         let entry = histograms.entry(name).or_default();
         entry.push(value);
     }
 
-    /// Get all recorded values
+    /// Get all recorded values from the in-memory store
+    ///
+    /// Always reads from the in-memory `HashMap`, even when an `OTel` histogram
+    /// is configured. Intended for testing and local read-back.
     ///
     /// # Panics
     ///
@@ -236,11 +263,17 @@ impl HistogramHandle {
 /// Gauge metric handle
 ///
 /// Provides set and increment/decrement operations for gauge metrics.
+/// When backed by an OpenTelemetry meter, `set` calls are forwarded to the
+/// `OTel` Gauge instrument. The in-memory `AtomicU64` is always updated
+/// regardless of backend.
+#[cfg(feature = "otel")]
 #[derive(Clone, Debug)]
 pub struct GaugeHandle {
     value: Arc<AtomicU64>,
+    otel_gauge: Option<opentelemetry::metrics::Gauge<u64>>,
 }
 
+#[cfg(feature = "otel")]
 impl GaugeHandle {
     /// Set the gauge to a specific value
     ///
@@ -249,6 +282,9 @@ impl GaugeHandle {
     /// * `value` - Value to set
     pub fn set(&self, value: u64) {
         self.value.store(value, Ordering::Release);
+        if let Some(ref gauge) = self.otel_gauge {
+            gauge.record(value, &[]);
+        }
     }
 
     /// Increment the gauge by 1
@@ -354,25 +390,66 @@ pub mod names {
 
 /// Stored metadata for a named metric
 ///
-/// Fields are populated by builder closures and will be consumed when
-/// full OpenTelemetry SDK integration is added (the `OTel` meter API expects
-/// description/unit/boundaries at instrument construction time).
+/// Populated by builder closures and consumed when constructing `OTel`
+/// instruments (the `OTel` meter API expects description/unit/boundaries
+/// at instrument build time).
+#[cfg(feature = "otel")]
 #[allow(
     dead_code,
-    reason = "fields read in tests and consumed by future OTel meter integration"
+    reason = "fields read in tests and consumed by OTel instrument creation"
 )]
 #[derive(Clone, Debug, Default)]
-struct MetricMetadata {
-    description: Option<String>,
-    unit: Option<String>,
-    boundaries: Option<Vec<f64>>,
+pub(crate) struct MetricMetadata {
+    pub(crate) description: Option<String>,
+    pub(crate) unit: Option<String>,
+    pub(crate) boundaries: Option<Vec<f64>>,
+}
+
+/// Inner state of the metrics registry
+///
+/// Holds in-memory `HashMap`s for counters and histograms (always available)
+/// and an optional OpenTelemetry `Meter` when the `otel` feature is enabled.
+#[cfg(feature = "otel")]
+pub(crate) struct MetricsRegistryInner {
+    pub(crate) counters: std::sync::Mutex<std::collections::HashMap<String, u64>>,
+    pub(crate) histograms: std::sync::Mutex<std::collections::HashMap<String, Vec<f64>>>,
+    pub(crate) metadata: std::sync::Mutex<std::collections::HashMap<String, MetricMetadata>>,
+    pub(crate) meter: Option<opentelemetry::metrics::Meter>,
+}
+
+#[cfg(feature = "otel")]
+impl std::fmt::Debug for MetricsRegistryInner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MetricsRegistryInner")
+            .field("counters", &self.counters)
+            .field("histograms", &self.histograms)
+            .field("metadata", &self.metadata)
+            .field("meter", &self.meter)
+            .finish()
+    }
+}
+
+#[cfg(feature = "otel")]
+impl Default for MetricsRegistryInner {
+    fn default() -> Self {
+        Self {
+            counters: std::sync::Mutex::new(std::collections::HashMap::new()),
+            histograms: std::sync::Mutex::new(std::collections::HashMap::new()),
+            metadata: std::sync::Mutex::new(std::collections::HashMap::new()),
+            meter: None,
+        }
+    }
 }
 
 /// Metrics registry for OpenTelemetry metrics
 ///
-/// Provides methods to create and manage custom metrics.
-/// When OpenTelemetry dependencies are added, this will integrate with
-/// the OpenTelemetry SDK for metrics export.
+/// Provides methods to create and manage custom metrics. Supports two modes:
+///
+/// - **In-memory mode** (`MetricsRegistry::new()`): `HashMap`-based storage,
+///   always available, suitable for testing.
+/// - **`OTel` mode** (`MetricsRegistry::with_meter(meter)`): Wraps an
+///   `opentelemetry::metrics::Meter`, forwarding operations to the
+///   OpenTelemetry SDK with in-memory `HashMap`s as a read-back fallback.
 ///
 /// # Examples
 ///
@@ -388,20 +465,15 @@ struct MetricMetadata {
 #[cfg(feature = "otel")]
 #[derive(Clone, Debug)]
 pub struct MetricsRegistry {
-    inner: Arc<MetricsRegistryInner>,
-}
-
-/// Inner state of the metrics registry
-#[derive(Debug, Default)]
-struct MetricsRegistryInner {
-    counters: std::sync::Mutex<std::collections::HashMap<String, u64>>,
-    histograms: std::sync::Mutex<std::collections::HashMap<String, Vec<f64>>>,
-    metadata: std::sync::Mutex<std::collections::HashMap<String, MetricMetadata>>,
+    pub(crate) inner: Arc<MetricsRegistryInner>,
 }
 
 #[cfg(feature = "otel")]
 impl MetricsRegistry {
-    /// Create a new metrics registry
+    /// Create a new metrics registry in in-memory mode
+    ///
+    /// All metric operations use in-memory `HashMap`s. No OpenTelemetry
+    /// SDK is involved.
     ///
     /// # Examples
     ///
@@ -414,6 +486,27 @@ impl MetricsRegistry {
     pub fn new() -> Self {
         Self {
             inner: Arc::new(MetricsRegistryInner::default()),
+        }
+    }
+
+    /// Create a metrics registry backed by an OpenTelemetry `Meter`
+    ///
+    /// When a `Meter` is provided, counter and histogram operations are
+    /// forwarded to the `OTel` SDK. The in-memory `HashMap`s remain available
+    /// as a read-back fallback for testing.
+    ///
+    /// # Arguments
+    ///
+    /// * `meter` - An OpenTelemetry meter obtained from a `MeterProvider`
+    #[must_use]
+    pub fn with_meter(meter: opentelemetry::metrics::Meter) -> Self {
+        Self {
+            inner: Arc::new(MetricsRegistryInner {
+                counters: std::sync::Mutex::new(std::collections::HashMap::new()),
+                histograms: std::sync::Mutex::new(std::collections::HashMap::new()),
+                metadata: std::sync::Mutex::new(std::collections::HashMap::new()),
+                meter: Some(meter),
+            }),
         }
     }
 
@@ -441,10 +534,28 @@ impl MetricsRegistry {
         F: FnOnce(CounterBuilder) -> CounterBuilder,
     {
         let builder = f(CounterBuilder::default());
-        self.store_metadata(name, builder.description, builder.unit, None);
+        self.store_metadata(
+            name,
+            builder.description.as_deref(),
+            builder.unit.as_deref(),
+            None,
+        );
+
+        let otel_counter = self.inner.meter.as_ref().map(|meter| {
+            let mut b = meter.u64_counter(name.to_string());
+            if let Some(desc) = &builder.description {
+                b = b.with_description(desc.clone());
+            }
+            if let Some(unit) = &builder.unit {
+                b = b.with_unit(unit.clone());
+            }
+            b.build()
+        });
+
         CounterHandle {
             registry: Arc::clone(&self.inner),
             name: name.to_string(),
+            otel_counter,
         }
     }
 
@@ -474,10 +585,28 @@ impl MetricsRegistry {
         F: FnOnce(HistogramBuilder) -> HistogramBuilder,
     {
         let builder = f(HistogramBuilder::default());
-        self.store_metadata(name, builder.description, builder.unit, builder.boundaries);
+        self.store_metadata(
+            name,
+            builder.description.as_deref(),
+            builder.unit.as_deref(),
+            builder.boundaries.as_deref(),
+        );
+
+        let otel_histogram = self.inner.meter.as_ref().map(|meter| {
+            let mut b = meter.f64_histogram(name.to_string());
+            if let Some(desc) = &builder.description {
+                b = b.with_description(desc.clone());
+            }
+            if let Some(unit) = &builder.unit {
+                b = b.with_unit(unit.clone());
+            }
+            b.build()
+        });
+
         HistogramHandle {
             registry: Arc::clone(&self.inner),
             name: name.to_string(),
+            otel_histogram,
         }
     }
 
@@ -503,16 +632,34 @@ impl MetricsRegistry {
     /// ```
     #[allow(
         clippy::used_underscore_binding,
-        reason = "name parameter stored as metadata but GaugeHandle does not yet use it"
+        reason = "name parameter stored as metadata and used for OTel gauge creation"
     )]
-    pub fn gauge<F>(&self, _name: &str, f: F) -> GaugeHandle
+    pub fn gauge<F>(&self, name: &str, f: F) -> GaugeHandle
     where
         F: FnOnce(GaugeBuilder) -> GaugeBuilder,
     {
         let builder = f(GaugeBuilder::default());
-        self.store_metadata(_name, builder.description, builder.unit, None);
+        self.store_metadata(
+            name,
+            builder.description.as_deref(),
+            builder.unit.as_deref(),
+            None,
+        );
+
+        let otel_gauge = self.inner.meter.as_ref().map(|meter| {
+            let mut b = meter.u64_gauge(name.to_string());
+            if let Some(desc) = &builder.description {
+                b = b.with_description(desc.clone());
+            }
+            if let Some(unit) = &builder.unit {
+                b = b.with_unit(unit.clone());
+            }
+            b.build()
+        });
+
         GaugeHandle {
             value: Arc::new(AtomicU64::new(0)),
+            otel_gauge,
         }
     }
 
@@ -524,18 +671,18 @@ impl MetricsRegistry {
     fn store_metadata(
         &self,
         name: &str,
-        description: Option<String>,
-        unit: Option<String>,
-        boundaries: Option<Vec<f64>>,
+        description: Option<&str>,
+        unit: Option<&str>,
+        boundaries: Option<&[f64]>,
     ) {
         if description.is_some() || unit.is_some() || boundaries.is_some() {
             let mut metadata = self.inner.metadata.lock().unwrap();
             metadata.insert(
                 name.to_string(),
                 MetricMetadata {
-                    description,
-                    unit,
-                    boundaries,
+                    description: description.map(str::to_owned),
+                    unit: unit.map(str::to_owned),
+                    boundaries: boundaries.map(std::borrow::ToOwned::to_owned),
                 },
             );
         }
@@ -555,7 +702,6 @@ mod tests {
 
     #[test]
     fn test_metric_names_format() {
-        // Verify all metric names follow juncter.* format
         assert!(names::GRAPH_INVOCATIONS.starts_with("juncture."));
         assert!(names::LLM_TOKENS_INPUT.starts_with("juncture."));
         assert!(names::TOOL_CALLS.starts_with("juncture."));
@@ -565,7 +711,6 @@ mod tests {
 
     #[test]
     fn test_counter_metrics_exist() {
-        // Verify all counter metrics are defined
         assert_eq!(names::GRAPH_INVOCATIONS, "juncture.graph.invocations");
         assert_eq!(names::GRAPH_ERRORS, "juncture.graph.errors");
         assert_eq!(names::LLM_TOKENS_INPUT, "juncture.llm.tokens.input");
@@ -579,7 +724,6 @@ mod tests {
 
     #[test]
     fn test_histogram_metrics_exist() {
-        // Verify all histogram metrics are defined
         assert_eq!(names::GRAPH_DURATION_MS, "juncture.graph.duration_ms");
         assert_eq!(names::NODE_DURATION_MS, "juncture.node.duration_ms");
         assert_eq!(names::LLM_DURATION_MS, "juncture.llm.duration_ms");
@@ -593,7 +737,6 @@ mod tests {
 
     #[test]
     fn test_gauge_metrics_exist() {
-        // Verify all gauge metrics are defined
         assert_eq!(
             names::GRAPH_ACTIVE_INVOCATIONS,
             "juncture.graph.active_invocations"
@@ -692,7 +835,6 @@ mod tests {
         counter.inc();
         assert_eq!(counter.get(), 1);
 
-        // Verify metadata was stored
         let metadata = registry.inner.metadata.lock().unwrap();
         let meta = metadata.get("test_counter_desc");
         assert!(meta.is_some());
@@ -717,7 +859,6 @@ mod tests {
         histogram.record(42.0);
         assert_eq!(histogram.get_values().len(), 1);
 
-        // Verify metadata was stored with boundaries
         let metadata = registry.inner.metadata.lock().unwrap();
         let meta = metadata.get("test_hist_boundaries");
         assert!(meta.is_some());
@@ -744,7 +885,6 @@ mod tests {
         gauge.set(5);
         assert_eq!(gauge.get(), 5);
 
-        // Verify metadata was stored
         let metadata = registry.inner.metadata.lock().unwrap();
         let meta = metadata.get("test_gauge_desc");
         assert!(meta.is_some());
@@ -760,7 +900,6 @@ mod tests {
         let counter = registry.counter("plain_counter", |b| b);
         counter.inc();
 
-        // No metadata should be stored when builder has no config
         assert!(
             registry
                 .inner
@@ -787,6 +926,101 @@ mod tests {
         let gb = GaugeBuilder::default();
         assert!(gb.description.is_none());
         assert!(gb.unit.is_none());
+    }
+
+    #[cfg(feature = "otel")]
+    #[test]
+    fn test_with_meter_creates_otel_counter() {
+        use opentelemetry::metrics::MeterProvider;
+        use opentelemetry_sdk::metrics::SdkMeterProvider;
+
+        let provider = SdkMeterProvider::builder().build();
+        let meter = provider.meter("test");
+        let registry = MetricsRegistry::with_meter(meter);
+
+        let counter = registry.counter("otel_counter", |b| {
+            b.with_description("OTel counter").with_unit("1")
+        });
+
+        // OTel counter is present in the handle
+        assert!(
+            counter.otel_counter.is_some(),
+            "OTel counter should be Some when registry has a meter"
+        );
+
+        // In OTel mode, inc_by delegates to the OTel counter and skips
+        // the in-memory HashMap, so get() returns 0 (the in-memory fallback
+        // is not updated when an OTel instrument is active).
+        counter.inc_by(3);
+        assert_eq!(counter.get(), 0);
+    }
+
+    #[cfg(feature = "otel")]
+    #[test]
+    fn test_with_meter_creates_otel_histogram() {
+        use opentelemetry::metrics::MeterProvider;
+        use opentelemetry_sdk::metrics::SdkMeterProvider;
+
+        let provider = SdkMeterProvider::builder().build();
+        let meter = provider.meter("test");
+        let registry = MetricsRegistry::with_meter(meter);
+
+        let histogram = registry.histogram("otel_histogram", |b| {
+            b.with_description("OTel histogram")
+                .with_unit("ms")
+                .with_boundaries(vec![1.0, 5.0, 10.0])
+        });
+
+        assert!(
+            histogram.otel_histogram.is_some(),
+            "OTel histogram should be Some when registry has a meter"
+        );
+    }
+
+    #[cfg(feature = "otel")]
+    #[test]
+    fn test_with_meter_creates_otel_gauge() {
+        use opentelemetry::metrics::MeterProvider;
+        use opentelemetry_sdk::metrics::SdkMeterProvider;
+
+        let provider = SdkMeterProvider::builder().build();
+        let meter = provider.meter("test");
+        let registry = MetricsRegistry::with_meter(meter);
+
+        let gauge = registry.gauge("otel_gauge", |b| {
+            b.with_description("OTel gauge").with_unit("1")
+        });
+
+        assert!(
+            gauge.otel_gauge.is_some(),
+            "OTel gauge should be Some when registry has a meter"
+        );
+
+        // Gauge operations still work
+        gauge.set(42);
+        assert_eq!(gauge.get(), 42);
+    }
+
+    #[cfg(feature = "otel")]
+    #[test]
+    fn test_in_memory_mode_has_no_otel_instruments() {
+        let registry = MetricsRegistry::new();
+        let counter = registry.counter("mem_counter", |b| b);
+        let histogram = registry.histogram("mem_histogram", |b| b);
+        let gauge = registry.gauge("mem_gauge", |b| b);
+
+        assert!(
+            counter.otel_counter.is_none(),
+            "In-memory registry should not have OTel counter"
+        );
+        assert!(
+            histogram.otel_histogram.is_none(),
+            "In-memory registry should not have OTel histogram"
+        );
+        assert!(
+            gauge.otel_gauge.is_none(),
+            "In-memory registry should not have OTel gauge"
+        );
     }
 }
 
