@@ -762,6 +762,11 @@ pub struct StreamConfig {
     pub output_keys: Option<Vec<String>>,
     /// Batching configuration for Messages mode streaming.
     pub message_batch_config: MessageBatchConfig,
+    /// Resumption state for replaying a stream from a checkpoint.
+    ///
+    /// When set, events at or before [`StreamResumption::last_step`] are
+    /// silently skipped so the consumer only receives new events.
+    pub resumption: Option<StreamResumption>,
 }
 
 impl StreamConfig {
@@ -776,6 +781,7 @@ impl StreamConfig {
                 max_chunks: 10,
                 flush_interval_ms: Some(100),
             },
+            resumption: None,
         }
     }
 
@@ -802,6 +808,17 @@ impl StreamConfig {
     #[must_use]
     pub const fn with_message_batch_config(mut self, config: MessageBatchConfig) -> Self {
         self.message_batch_config = config;
+        self
+    }
+
+    /// Set the resumption state for checkpoint-based stream replay.
+    ///
+    /// Events at or before `resumption.last_step` are silently skipped,
+    /// allowing consumers to resume from the last checkpoint without
+    /// receiving already-processed events.
+    #[must_use]
+    pub fn with_resumption(mut self, resumption: StreamResumption) -> Self {
+        self.resumption = Some(resumption);
         self
     }
 }
@@ -912,11 +929,11 @@ impl StreamTransformer for BatchTransformer {
     }
 }
 
-// Rust guideline compliant 2026-05-20
+// Rust guideline compliant 2026-05-21
 
 #[cfg(test)]
 mod tests {
-    use super::MessageBatchConfig;
+    use super::{MessageBatchConfig, StreamConfig, StreamMode, StreamResumption};
 
     #[test]
     fn message_batch_config_default() {
@@ -937,5 +954,59 @@ mod tests {
         let config = MessageBatchConfig::new(50, Some(200));
         assert_eq!(config.max_chunks, 50);
         assert_eq!(config.flush_interval_ms, Some(200));
+    }
+
+    // --- StreamResumption unit tests ---
+
+    #[test]
+    fn resumption_should_skip_returns_true_when_step_at_last_step() {
+        let r = StreamResumption::new("run1".to_string(), None, Some(3));
+        assert!(r.should_skip(3));
+    }
+
+    #[test]
+    fn resumption_should_skip_returns_true_when_step_before_last_step() {
+        let r = StreamResumption::new("run1".to_string(), None, Some(3));
+        assert!(r.should_skip(2));
+        assert!(r.should_skip(0));
+    }
+
+    #[test]
+    fn resumption_should_skip_returns_false_when_step_after_last_step() {
+        let r = StreamResumption::new("run1".to_string(), None, Some(3));
+        assert!(!r.should_skip(4));
+        assert!(!r.should_skip(100));
+    }
+
+    #[test]
+    fn resumption_should_skip_returns_false_when_last_step_is_none() {
+        let r = StreamResumption::new("run1".to_string(), None, None);
+        assert!(!r.should_skip(0));
+        assert!(!r.should_skip(100));
+    }
+
+    // --- StreamConfig resumption builder ---
+
+    #[test]
+    fn stream_config_default_has_no_resumption() {
+        let config = StreamConfig::default();
+        assert!(config.resumption.is_none());
+    }
+
+    #[test]
+    fn stream_config_new_has_no_resumption() {
+        let config = StreamConfig::new(StreamMode::Values);
+        assert!(config.resumption.is_none());
+    }
+
+    #[test]
+    fn stream_config_with_resumption_sets_field() {
+        let r = StreamResumption::new("run1".to_string(), Some("cp-5".to_string()), Some(5));
+        let config = StreamConfig::new(StreamMode::Values).with_resumption(r);
+        assert!(config.resumption.is_some());
+        let resumption = config.resumption.expect("resumption should be set");
+        assert_eq!(resumption.run_id, "run1");
+        assert_eq!(resumption.last_checkpoint_id, Some("cp-5".to_string()));
+        assert_eq!(resumption.last_step, Some(5));
     }
 }

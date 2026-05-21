@@ -404,6 +404,7 @@ impl<S: State> CompiledGraph<S> {
         let output_keys = stream_config.output_keys;
         let include_subgraphs = stream_config.include_subgraphs;
         let subgraph_filter = stream_config.subgraph_filter;
+        let resumption = stream_config.resumption;
 
         // Sized channel provides backpressure: 256 for Messages mode (high-throughput
         // LLM token chunks), 32 for all other modes. Per design doc 05-streaming 7.3.
@@ -433,10 +434,11 @@ impl<S: State> CompiledGraph<S> {
         // Spawn graph execution in background task
         tokio::spawn(async move {
             // Task to forward PregelLoop events to the main stream,
-            // applying subgraph filtering and output_keys filtering.
+            // applying subgraph filtering, resumption, and output_keys filtering.
             let tx_forward = tx.clone();
             let mode_forward = mode.clone();
             let output_keys_forward = output_keys.clone();
+            let resumption_forward = resumption.clone();
             tokio::spawn(async move {
                 // Create a temporary bounded channel for EventEmitter filtering
                 let (temp_tx, _temp_rx) = mpsc::channel(1);
@@ -457,6 +459,24 @@ impl<S: State> CompiledGraph<S> {
                         if let Some(ref filter) = subgraph_filter
                             && let Some(first) = ns.first()
                             && !filter.contains(first)
+                        {
+                            continue;
+                        }
+                    }
+
+                    // Checkpoint-based resumption: skip step-based events
+                    // (Values, Updates, and their filtered variants) at or before
+                    // the last processed step.
+                    if let Some(ref r) = resumption_forward {
+                        let step = match &event {
+                            StreamEvent::Values { step, .. }
+                            | StreamEvent::FilteredValues { step, .. }
+                            | StreamEvent::Updates { step, .. }
+                            | StreamEvent::FilteredUpdates { step, .. } => Some(*step),
+                            _ => None,
+                        };
+                        if let Some(s) = step
+                            && r.should_skip(s)
                         {
                             continue;
                         }
@@ -487,22 +507,27 @@ impl<S: State> CompiledGraph<S> {
                 let step = pregel.step();
 
                 // Emit Values events if mode is Values, applying output_keys
+                // and resumption filtering.
                 if matches!(mode, StreamMode::Values) {
-                    let event = output_keys.as_ref().map_or_else(
-                        || StreamEvent::Values {
-                            state: pregel.snapshot_state(),
-                            step,
-                        },
-                        |keys| {
-                            let json = serde_json::to_value(pregel.snapshot_state())
-                                .unwrap_or(serde_json::Value::Null);
-                            StreamEvent::FilteredValues {
-                                data: crate::stream::filter_json_by_keys(json, keys),
+                    let skip = resumption.as_ref().is_some_and(|r| r.should_skip(step));
+
+                    if !skip {
+                        let event = output_keys.as_ref().map_or_else(
+                            || StreamEvent::Values {
+                                state: pregel.snapshot_state(),
                                 step,
-                            }
-                        },
-                    );
-                    let _ = tx.send(Ok(event)).await;
+                            },
+                            |keys| {
+                                let json = serde_json::to_value(pregel.snapshot_state())
+                                    .unwrap_or(serde_json::Value::Null);
+                                StreamEvent::FilteredValues {
+                                    data: crate::stream::filter_json_by_keys(json, keys),
+                                    step,
+                                }
+                            },
+                        );
+                        let _ = tx.send(Ok(event)).await;
+                    }
                 }
 
                 // Execute superstep
@@ -3325,9 +3350,7 @@ mod tests {
 
     #[test]
     fn test_stream_event_namespace_end_is_empty() {
-        let event: StreamEvent<StateDummy> = StreamEvent::End {
-            output: StateDummy,
-        };
+        let event: StreamEvent<StateDummy> = StreamEvent::End { output: StateDummy };
         assert!(event.namespace().is_empty());
     }
 
@@ -3343,12 +3366,11 @@ mod tests {
 
     #[test]
     fn test_stream_event_namespace_debug_is_empty() {
-        let event: StreamEvent<StateDummy> = StreamEvent::Debug(
-            crate::stream::DebugEvent::SuperstepStart {
+        let event: StreamEvent<StateDummy> =
+            StreamEvent::Debug(crate::stream::DebugEvent::SuperstepStart {
                 step: 0,
                 nodes: vec![],
-            },
-        );
+            });
         assert!(event.namespace().is_empty());
     }
 
@@ -3383,7 +3405,10 @@ mod tests {
         // if !ns.is_empty() && !include_subgraphs { skip }
         let ns = subgraph_event.namespace();
         let should_skip = !ns.is_empty() && !include_subgraphs;
-        assert!(should_skip, "subgraph events should be skipped when include_subgraphs=false");
+        assert!(
+            should_skip,
+            "subgraph events should be skipped when include_subgraphs=false"
+        );
 
         let ns = top_level_event.namespace();
         let should_skip = !ns.is_empty() && !include_subgraphs;
@@ -3405,7 +3430,10 @@ mod tests {
 
         let ns = subgraph_event.namespace();
         let should_skip = !ns.is_empty() && !include_subgraphs;
-        assert!(!should_skip, "include_subgraphs=true should not skip subgraph events");
+        assert!(
+            !should_skip,
+            "include_subgraphs=true should not skip subgraph events"
+        );
 
         // With no filter, no additional filtering applies
         assert!(subgraph_filter.is_none());
@@ -3453,7 +3481,10 @@ mod tests {
         } else {
             false
         };
-        assert!(should_skip, "non-matching subgraph event should be filtered out");
+        assert!(
+            should_skip,
+            "non-matching subgraph event should be filtered out"
+        );
     }
 
     /// Verify that Messages events with subgraph namespace are correctly
@@ -3479,7 +3510,10 @@ mod tests {
 
         let ns = subgraph_messages.namespace();
         let should_skip = !ns.is_empty() && !include_subgraphs;
-        assert!(should_skip, "subgraph Messages events should be filtered when include_subgraphs=false");
+        assert!(
+            should_skip,
+            "subgraph Messages events should be filtered when include_subgraphs=false"
+        );
     }
 
     /// Verify that Interrupt events with subgraph namespace are correctly
@@ -3498,7 +3532,10 @@ mod tests {
 
         let ns = subgraph_interrupt.namespace();
         let should_skip = !ns.is_empty() && !include_subgraphs;
-        assert!(should_skip, "subgraph Interrupt events should be filtered when include_subgraphs=false");
+        assert!(
+            should_skip,
+            "subgraph Interrupt events should be filtered when include_subgraphs=false"
+        );
     }
 
     /// Verify that `StreamConfig::with_subgraphs()` and
@@ -3514,7 +3551,12 @@ mod tests {
 
         let cfg = cfg.with_subgraph_filter(vec!["sub_a".to_string()]);
         assert_eq!(cfg.subgraph_filter.as_ref().map(Vec::len), Some(1));
-        assert_eq!(cfg.subgraph_filter.as_ref().and_then(|f| f.first().cloned()), Some("sub_a".to_string()));
+        assert_eq!(
+            cfg.subgraph_filter
+                .as_ref()
+                .and_then(|f| f.first().cloned()),
+            Some("sub_a".to_string())
+        );
     }
 
     /// End-to-end test: `stream_with_config` with default config
@@ -3553,6 +3595,291 @@ mod tests {
                 event.namespace()
             );
         }
+    }
+
+    // --- Tests for checkpoint-based stream resumption ---
+
+    /// Build a two-node chained graph: START -> `node_a` -> `node_b`.
+    /// `node_a` increments count, `node_b` increments count again.
+    /// This produces two supersteps so resumption can skip one.
+    fn build_two_step_graph() -> CompiledGraph<MultiFieldState> {
+        let node_a = NodeFnUpdate(|s: MultiFieldState| async move {
+            Ok(MultiFieldStateUpdate {
+                messages: Some(s.messages),
+                count: Some(s.count + 1),
+                label: Some(s.label),
+            })
+        })
+        .into_node("node_a");
+
+        let node_b = NodeFnUpdate(|s: MultiFieldState| async move {
+            Ok(MultiFieldStateUpdate {
+                messages: Some(s.messages),
+                count: Some(s.count + 10),
+                label: Some(s.label),
+            })
+        })
+        .into_node("node_b");
+
+        let mut nodes: IndexMap<String, Arc<dyn crate::Node<MultiFieldState>>> = IndexMap::new();
+        nodes.insert("node_a".to_string(), node_a);
+        nodes.insert("node_b".to_string(), node_b);
+
+        let mut trigger_table = TriggerTable::new();
+        // START -> node_a
+        trigger_table.add_incoming(
+            "node_a".to_string(),
+            crate::edge::TriggerSource::Edge {
+                from: crate::edge::START.to_string(),
+            },
+        );
+        // node_a -> node_b (count field changed triggers node_b)
+        trigger_table.add_outgoing(
+            "node_a".to_string(),
+            crate::edge::CompiledEdge::Fixed {
+                target: "node_b".to_string(),
+            },
+        );
+
+        CompiledGraph::new(nodes, trigger_table, IndexMap::new(), vec![], vec![], None)
+    }
+
+    #[tokio::test]
+    async fn test_resumption_skips_values_at_or_before_last_step() {
+        use futures::StreamExt;
+
+        let compiled = build_two_step_graph();
+        let config = RunnableConfig::new();
+
+        let resumption = crate::stream::StreamResumption::new("run1".to_string(), None, Some(0));
+        let stream_config =
+            crate::stream::StreamConfig::new(StreamMode::Values).with_resumption(resumption);
+
+        let mut stream = compiled
+            .stream_with_config(
+                MultiFieldState {
+                    messages: vec![],
+                    count: 0,
+                    label: String::new(),
+                },
+                &config,
+                stream_config,
+            )
+            .await
+            .expect("stream_with_config should succeed");
+
+        let mut events = Vec::new();
+        while let Some(result) = stream.next().await {
+            events.push(result.expect("stream event should be Ok"));
+        }
+
+        // Values events at step 0 should be skipped; step 1 and End should remain.
+        let values_steps: Vec<usize> = events
+            .iter()
+            .filter_map(|e| match e {
+                crate::stream::StreamEvent::Values { step, .. } => Some(*step),
+                _ => None,
+            })
+            .collect();
+
+        assert!(
+            !values_steps.contains(&0),
+            "Values at step 0 should be skipped, got steps: {values_steps:?}"
+        );
+
+        let has_end = events
+            .iter()
+            .any(|e| matches!(e, crate::stream::StreamEvent::End { .. }));
+        assert!(has_end, "End event must always be emitted");
+    }
+
+    #[tokio::test]
+    async fn test_resumption_allows_values_after_last_step() {
+        use futures::StreamExt;
+
+        let compiled = build_two_step_graph();
+        let config = RunnableConfig::new();
+
+        let resumption = crate::stream::StreamResumption::new("run1".to_string(), None, Some(5));
+        let stream_config =
+            crate::stream::StreamConfig::new(StreamMode::Values).with_resumption(resumption);
+
+        let mut stream = compiled
+            .stream_with_config(
+                MultiFieldState {
+                    messages: vec![],
+                    count: 0,
+                    label: String::new(),
+                },
+                &config,
+                stream_config,
+            )
+            .await
+            .expect("stream_with_config should succeed");
+
+        let mut events = Vec::new();
+        while let Some(result) = stream.next().await {
+            events.push(result.expect("stream event should be Ok"));
+        }
+
+        // With last_step=5, all steps (0, 1) should be skipped, but End still arrives.
+        let values_steps: Vec<usize> = events
+            .iter()
+            .filter_map(|e| match e {
+                crate::stream::StreamEvent::Values { step, .. } => Some(*step),
+                _ => None,
+            })
+            .collect();
+
+        assert!(
+            values_steps.is_empty(),
+            "All Values should be skipped with last_step=5, got steps: {values_steps:?}"
+        );
+
+        let has_end = events
+            .iter()
+            .any(|e| matches!(e, crate::stream::StreamEvent::End { .. }));
+        assert!(
+            has_end,
+            "End event must always be emitted even when all steps are skipped"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_resumption_none_last_step_allows_all_events() {
+        use futures::StreamExt;
+
+        let compiled = build_two_step_graph();
+        let config = RunnableConfig::new();
+
+        let resumption = crate::stream::StreamResumption::new("run1".to_string(), None, None);
+        let stream_config =
+            crate::stream::StreamConfig::new(StreamMode::Values).with_resumption(resumption);
+
+        let mut stream = compiled
+            .stream_with_config(
+                MultiFieldState {
+                    messages: vec![],
+                    count: 0,
+                    label: String::new(),
+                },
+                &config,
+                stream_config,
+            )
+            .await
+            .expect("stream_with_config should succeed");
+
+        let mut events = Vec::new();
+        while let Some(result) = stream.next().await {
+            events.push(result.expect("stream event should be Ok"));
+        }
+
+        // With last_step=None, nothing is skipped.
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, crate::stream::StreamEvent::Values { .. })),
+            "Values events should be emitted when last_step is None"
+        );
+
+        let has_end = events
+            .iter()
+            .any(|e| matches!(e, crate::stream::StreamEvent::End { .. }));
+        assert!(has_end, "End event must be present");
+    }
+
+    #[tokio::test]
+    async fn test_resumption_skips_updates_at_or_before_last_step() {
+        use futures::StreamExt;
+
+        let compiled = build_two_step_graph();
+        let config = RunnableConfig::new();
+
+        let resumption = crate::stream::StreamResumption::new("run1".to_string(), None, Some(0));
+        let stream_config =
+            crate::stream::StreamConfig::new(StreamMode::Updates).with_resumption(resumption);
+
+        let mut stream = compiled
+            .stream_with_config(
+                MultiFieldState {
+                    messages: vec![],
+                    count: 0,
+                    label: String::new(),
+                },
+                &config,
+                stream_config,
+            )
+            .await
+            .expect("stream_with_config should succeed");
+
+        let mut events = Vec::new();
+        while let Some(result) = stream.next().await {
+            events.push(result.expect("stream event should be Ok"));
+        }
+
+        // Updates at step 0 should be skipped; updates at step > 0 and End remain.
+        let updates_steps: Vec<usize> = events
+            .iter()
+            .filter_map(|e| match e {
+                crate::stream::StreamEvent::Updates { step, .. }
+                | crate::stream::StreamEvent::FilteredUpdates { step, .. } => Some(*step),
+                _ => None,
+            })
+            .collect();
+
+        assert!(
+            !updates_steps.contains(&0),
+            "Updates at step 0 should be skipped, got steps: {updates_steps:?}"
+        );
+
+        let has_end = events
+            .iter()
+            .any(|e| matches!(e, crate::stream::StreamEvent::End { .. }));
+        assert!(has_end, "End event must always be emitted");
+    }
+
+    #[tokio::test]
+    async fn test_resumption_no_resumption_emits_all_events() {
+        use futures::StreamExt;
+
+        let compiled = build_two_step_graph();
+        let config = RunnableConfig::new();
+
+        // No resumption set (default StreamConfig)
+        let stream_config = crate::stream::StreamConfig::new(StreamMode::Values);
+
+        let mut stream = compiled
+            .stream_with_config(
+                MultiFieldState {
+                    messages: vec![],
+                    count: 0,
+                    label: String::new(),
+                },
+                &config,
+                stream_config,
+            )
+            .await
+            .expect("stream_with_config should succeed");
+
+        let mut events = Vec::new();
+        while let Some(result) = stream.next().await {
+            events.push(result.expect("stream event should be Ok"));
+        }
+
+        let values_count = events
+            .iter()
+            .filter(|e| matches!(e, crate::stream::StreamEvent::Values { .. }))
+            .count();
+
+        assert!(
+            values_count >= 1,
+            "At least one Values event expected without resumption"
+        );
+
+        let has_end = events
+            .iter()
+            .any(|e| matches!(e, crate::stream::StreamEvent::End { .. }));
+        assert!(has_end, "End event must be present");
     }
 }
 
