@@ -924,6 +924,79 @@ impl SqliteStore {
     }
 }
 
+/// Convert a [`FilterExpr`] to a `SQLite` WHERE clause fragment with bind parameters.
+///
+/// Returns a tuple of (SQL clause string, bind parameter values).
+/// Each `?` placeholder in the returned SQL corresponds to an entry in the returned
+/// bind parameter vector in order.
+#[cfg(feature = "sqlite")]
+fn filter_to_sql_sqlite(filter: &FilterExpr) -> (String, Vec<serde_json::Value>) {
+    match filter {
+        FilterExpr::Eq { field, value } => (
+            format!("json_extract(value, '$.{field}') = ?"),
+            vec![value.clone()],
+        ),
+        FilterExpr::Ne { field, value } => (
+            format!("json_extract(value, '$.{field}') != ?"),
+            vec![value.clone()],
+        ),
+        FilterExpr::Gt { field, value } => (
+            format!("CAST(json_extract(value, '$.{field}') AS REAL) > CAST(? AS REAL)"),
+            vec![value.clone()],
+        ),
+        FilterExpr::Gte { field, value } => (
+            format!("CAST(json_extract(value, '$.{field}') AS REAL) >= CAST(? AS REAL)"),
+            vec![value.clone()],
+        ),
+        FilterExpr::Lt { field, value } => (
+            format!("CAST(json_extract(value, '$.{field}') AS REAL) < CAST(? AS REAL)"),
+            vec![value.clone()],
+        ),
+        FilterExpr::Lte { field, value } => (
+            format!("CAST(json_extract(value, '$.{field}') AS REAL) <= CAST(? AS REAL)"),
+            vec![value.clone()],
+        ),
+        FilterExpr::And { expressions } => {
+            let mut clauses = Vec::with_capacity(expressions.len());
+            let mut all_params = Vec::new();
+            for expr in expressions {
+                let (clause, params) = filter_to_sql_sqlite(expr);
+                clauses.push(format!("({clause})"));
+                all_params.extend(params);
+            }
+            (clauses.join(" AND "), all_params)
+        }
+        FilterExpr::Or { expressions } => {
+            let mut clauses = Vec::with_capacity(expressions.len());
+            let mut all_params = Vec::new();
+            for expr in expressions {
+                let (clause, params) = filter_to_sql_sqlite(expr);
+                clauses.push(format!("({clause})"));
+                all_params.extend(params);
+            }
+            (clauses.join(" OR "), all_params)
+        }
+        FilterExpr::Not { expr } => {
+            let (clause, params) = filter_to_sql_sqlite(expr);
+            (format!("NOT ({clause})"), params)
+        }
+    }
+}
+
+/// Serialize a [`serde_json::Value`] to a SQLite-compatible bind string.
+///
+/// `SQLite` `json_extract` converts JSON booleans to integers (0 or 1),
+/// so booleans must be rendered as `"1"` / `"0"` to compare correctly.
+#[cfg(feature = "sqlite")]
+fn sqlite_param_from_value(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::Bool(true) => "1".to_string(),
+        serde_json::Value::Bool(false) => "0".to_string(),
+        serde_json::Value::String(s) => s.clone(),
+        other => other.to_string(),
+    }
+}
+
 #[cfg(feature = "sqlite")]
 #[async_trait]
 impl Store for SqliteStore {
@@ -1024,12 +1097,105 @@ impl Store for SqliteStore {
         Ok(())
     }
 
-    async fn search(&self, _query: SearchQuery) -> Result<SearchResult, StoreError> {
-        // For basic SQLite, we don't support advanced search
-        // Return empty result
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_possible_wrap,
+        clippy::cast_sign_loss,
+        clippy::as_conversions,
+        clippy::similar_names,
+        reason = "SQL binding requires i64 for LIMIT/OFFSET; COUNT returns i64; names 'nlike' and 'nprefix' are adequately descriptive"
+    )]
+    async fn search(&self, query: SearchQuery) -> Result<SearchResult, StoreError> {
+        let pool = self
+            .pool
+            .as_ref()
+            .ok_or_else(|| StoreError::InvalidOperation("Store not initialized".to_string()))?;
+
+        let namespace_pattern = format!("{}%", query.namespace_prefix);
+        let mut conditions = vec!["namespace LIKE ?".to_string()];
+        let mut params_str: Vec<String> = vec![namespace_pattern];
+
+        if let Some(ref filter) = query.filter {
+            let (clause, filter_params) = filter_to_sql_sqlite(filter);
+            conditions.push(format!("({clause})"));
+            for p in &filter_params {
+                params_str.push(sqlite_param_from_value(p));
+            }
+        }
+
+        let where_clause = conditions.join(" AND ");
+
+        // Count total matching items
+        let count_sql = format!("SELECT COUNT(*) as cnt FROM store_items WHERE {where_clause}");
+        let mut count_query = sqlx::query(&count_sql);
+        for p in &params_str {
+            count_query = count_query.bind(p.as_str());
+        }
+        let total_count: i64 = count_query
+            .fetch_one(pool)
+            .await
+            .map_err(|e| StoreError::InvalidOperation(format!("Search count failed: {e}")))?
+            .try_get("cnt")
+            .map_err(|e| StoreError::Database(e.to_string()))?;
+
+        // Fetch paginated results
+        let data_sql = format!(
+            "SELECT namespace, key, value, created_at, updated_at \
+             FROM store_items WHERE {where_clause} \
+             ORDER BY namespace, key LIMIT ? OFFSET ?"
+        );
+        let mut data_query = sqlx::query(&data_sql);
+        for p in &params_str {
+            data_query = data_query.bind(p.as_str());
+        }
+        data_query = data_query.bind(query.limit as i64);
+        data_query = data_query.bind(query.offset as i64);
+
+        let rows = data_query
+            .fetch_all(pool)
+            .await
+            .map_err(|e| StoreError::InvalidOperation(format!("Search query failed: {e}")))?;
+
+        let mut items = Vec::with_capacity(rows.len());
+        for row in rows {
+            let namespace: String = row
+                .try_get("namespace")
+                .map_err(|e| StoreError::Database(e.to_string()))?;
+            let key: String = row
+                .try_get("key")
+                .map_err(|e| StoreError::Database(e.to_string()))?;
+            let value_str: String = row
+                .try_get("value")
+                .map_err(|e| StoreError::Database(e.to_string()))?;
+            let value = serde_json::from_str(&value_str).map_err(StoreError::Serialization)?;
+            let created_at_str: String = row
+                .try_get("created_at")
+                .map_err(|e| StoreError::Database(e.to_string()))?;
+            let updated_at_str: String = row
+                .try_get("updated_at")
+                .map_err(|e| StoreError::Database(e.to_string()))?;
+
+            items.push(SearchItem {
+                item: Item {
+                    namespace,
+                    key,
+                    value,
+                    created_at: chrono::DateTime::parse_from_rfc3339(&created_at_str)
+                        .map_err(|e| StoreError::Database(format!("invalid timestamp: {e}")))?
+                        .with_timezone(&chrono::Utc),
+                    updated_at: chrono::DateTime::parse_from_rfc3339(&updated_at_str)
+                        .map_err(|e| StoreError::Database(format!("invalid timestamp: {e}")))?
+                        .with_timezone(&chrono::Utc),
+                    expires_at: None,
+                    embedding: None,
+                },
+                score: None,
+            });
+        }
+
         Ok(SearchResult {
-            items: vec![],
-            total_count: 0,
+            items,
+            total_count: total_count as usize,
         })
     }
 
@@ -1209,6 +1375,77 @@ impl PostgresStore {
     }
 }
 
+/// Convert a [`FilterExpr`] to a Postgres WHERE clause fragment with bind parameters.
+///
+/// Returns a tuple of (SQL clause string, bind parameter values).
+/// Each `?` placeholder in the returned SQL must be renumbered to `$1`, `$2`, etc.
+/// according to the Postgres parameter numbering scheme.
+#[cfg(feature = "postgres")]
+fn filter_to_sql_postgres(filter: &FilterExpr) -> (String, Vec<serde_json::Value>) {
+    match filter {
+        FilterExpr::Eq { field, value } => {
+            let path = field.split('.').collect::<Vec<_>>().join(",");
+            (format!("value #>> '{{{path}}}' = ?"), vec![value.clone()])
+        }
+        FilterExpr::Ne { field, value } => {
+            let path = field.split('.').collect::<Vec<_>>().join(",");
+            (format!("value #>> '{{{path}}}' != ?"), vec![value.clone()])
+        }
+        FilterExpr::Gt { field, value } => {
+            let path = field.split('.').collect::<Vec<_>>().join(",");
+            (
+                format!("(value #> '{{{path}}}')::numeric > CAST(? AS numeric)"),
+                vec![value.clone()],
+            )
+        }
+        FilterExpr::Gte { field, value } => {
+            let path = field.split('.').collect::<Vec<_>>().join(",");
+            (
+                format!("(value #> '{{{path}}}')::numeric >= CAST(? AS numeric)"),
+                vec![value.clone()],
+            )
+        }
+        FilterExpr::Lt { field, value } => {
+            let path = field.split('.').collect::<Vec<_>>().join(",");
+            (
+                format!("(value #> '{{{path}}}')::numeric < CAST(? AS numeric)"),
+                vec![value.clone()],
+            )
+        }
+        FilterExpr::Lte { field, value } => {
+            let path = field.split('.').collect::<Vec<_>>().join(",");
+            (
+                format!("(value #> '{{{path}}}')::numeric <= CAST(? AS numeric)"),
+                vec![value.clone()],
+            )
+        }
+        FilterExpr::And { expressions } => {
+            let mut clauses = Vec::with_capacity(expressions.len());
+            let mut all_params = Vec::new();
+            for expr in expressions {
+                let (clause, params) = filter_to_sql_postgres(expr);
+                clauses.push(format!("({clause})"));
+                all_params.extend(params);
+            }
+            (clauses.join(" AND "), all_params)
+        }
+        FilterExpr::Or { expressions } => {
+            let mut clauses = Vec::with_capacity(expressions.len());
+            let mut all_params = Vec::new();
+            for expr in expressions {
+                let (clause, params) = filter_to_sql_postgres(expr);
+                clauses.push(format!("({clause})"));
+                all_params.extend(params);
+            }
+            (clauses.join(" OR "), all_params)
+        }
+        FilterExpr::Not { expr } => {
+            let (clause, params) = filter_to_sql_postgres(expr);
+            (format!("NOT ({clause})"), params)
+        }
+    }
+}
+
 #[cfg(feature = "postgres")]
 #[async_trait]
 impl Store for PostgresStore {
@@ -1303,12 +1540,113 @@ impl Store for PostgresStore {
         Ok(())
     }
 
-    async fn search(&self, _query: SearchQuery) -> Result<SearchResult, StoreError> {
-        // For basic PostgreSQL, we don't support advanced search
-        // Return empty result
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_possible_wrap,
+        clippy::cast_sign_loss,
+        clippy::as_conversions,
+        clippy::similar_names,
+        reason = "SQL binding requires i64 for LIMIT/OFFSET; COUNT returns i64; names 'nlike' and 'nprefix' are adequately descriptive"
+    )]
+    async fn search(&self, query: SearchQuery) -> Result<SearchResult, StoreError> {
+        let pool = self
+            .pool
+            .as_ref()
+            .ok_or_else(|| StoreError::InvalidOperation("Store not initialized".to_string()))?;
+
+        let namespace_pattern = format!("{}%", query.namespace_prefix);
+        let mut conditions = vec!["namespace LIKE $1".to_string()];
+        let mut bind_params: Vec<String> = vec![namespace_pattern];
+        let mut param_idx = 2;
+
+        if let Some(ref filter) = query.filter {
+            let (clause, filter_params) = filter_to_sql_postgres(filter);
+            // Renumber ? placeholders to $2, $3, ... for Postgres
+            let mut numbered_clause = String::with_capacity(clause.len());
+            for c in clause.chars() {
+                if c == '?' {
+                    let _ = write!(numbered_clause, "${param_idx}");
+                    param_idx += 1;
+                } else {
+                    numbered_clause.push(c);
+                }
+            }
+            conditions.push(format!("({numbered_clause})"));
+            for p in &filter_params {
+                bind_params.push(p.to_string());
+            }
+        }
+
+        let where_clause = conditions.join(" AND ");
+
+        // Count total matching items
+        let count_sql = format!("SELECT COUNT(*) as cnt FROM store_items WHERE {where_clause}");
+        let mut count_query = sqlx::query(&count_sql);
+        for p in &bind_params {
+            count_query = count_query.bind(p.as_str());
+        }
+        let total_count: i64 = count_query
+            .fetch_one(pool)
+            .await
+            .map_err(|e| StoreError::InvalidOperation(format!("Search count failed: {e}")))?
+            .try_get("cnt")
+            .map_err(|e| StoreError::Database(e.to_string()))?;
+
+        // Fetch paginated results
+        let limit_param = param_idx;
+        let offset_param = param_idx + 1;
+        let data_sql = format!(
+            "SELECT namespace, key, value, created_at, updated_at \
+             FROM store_items WHERE {where_clause} \
+             ORDER BY namespace, key LIMIT ${limit_param} OFFSET ${offset_param}"
+        );
+        let mut data_query = sqlx::query(&data_sql);
+        for p in &bind_params {
+            data_query = data_query.bind(p.as_str());
+        }
+        data_query = data_query.bind(query.limit as i64);
+        data_query = data_query.bind(query.offset as i64);
+
+        let rows = data_query
+            .fetch_all(pool)
+            .await
+            .map_err(|e| StoreError::InvalidOperation(format!("Search query failed: {e}")))?;
+
+        let mut items = Vec::with_capacity(rows.len());
+        for row in rows {
+            let namespace: String = row
+                .try_get("namespace")
+                .map_err(|e| StoreError::Database(e.to_string()))?;
+            let key: String = row
+                .try_get("key")
+                .map_err(|e| StoreError::Database(e.to_string()))?;
+            let value: serde_json::Value = row
+                .try_get("value")
+                .map_err(|e| StoreError::Database(e.to_string()))?;
+            let created_at: chrono::DateTime<chrono::Utc> = row
+                .try_get("created_at")
+                .map_err(|e| StoreError::Database(e.to_string()))?;
+            let updated_at: chrono::DateTime<chrono::Utc> = row
+                .try_get("updated_at")
+                .map_err(|e| StoreError::Database(e.to_string()))?;
+
+            items.push(SearchItem {
+                item: Item {
+                    namespace,
+                    key,
+                    value,
+                    created_at,
+                    updated_at,
+                    expires_at: None,
+                    embedding: None,
+                },
+                score: None,
+            });
+        }
+
         Ok(SearchResult {
-            items: vec![],
-            total_count: 0,
+            items,
+            total_count: total_count as usize,
         })
     }
 
@@ -2089,5 +2427,177 @@ mod tests {
             result.iter().all(|ns| ns.starts_with("alpha-")),
             "all results must match prefix filter"
         );
+    }
+
+    // --- SQLite filter_to_sql tests ---
+
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn test_filter_to_sql_eq() {
+        let filter = FilterExpr::Eq {
+            field: "status".to_string(),
+            value: json!("active"),
+        };
+        let (sql, params) = filter_to_sql_sqlite(&filter);
+        assert_eq!(sql, "json_extract(value, '$.status') = ?");
+        assert_eq!(params.len(), 1);
+        assert_eq!(sqlite_param_from_value(&params[0]), "active");
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn test_filter_to_sql_gt() {
+        let filter = FilterExpr::Gt {
+            field: "age".to_string(),
+            value: json!(18),
+        };
+        let (sql, params) = filter_to_sql_sqlite(&filter);
+        assert_eq!(
+            sql,
+            "CAST(json_extract(value, '$.age') AS REAL) > CAST(? AS REAL)"
+        );
+        assert_eq!(params.len(), 1);
+        assert_eq!(sqlite_param_from_value(&params[0]), "18");
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn test_filter_to_sql_and_or_combination() {
+        let filter = FilterExpr::And {
+            expressions: vec![
+                FilterExpr::Eq {
+                    field: "status".to_string(),
+                    value: json!("active"),
+                },
+                FilterExpr::Or {
+                    expressions: vec![
+                        FilterExpr::Gte {
+                            field: "age".to_string(),
+                            value: json!(18),
+                        },
+                        FilterExpr::Eq {
+                            field: "role".to_string(),
+                            value: json!("admin"),
+                        },
+                    ],
+                },
+            ],
+        };
+        let (sql, params) = filter_to_sql_sqlite(&filter);
+        assert_eq!(
+            sql,
+            "(json_extract(value, '$.status') = ?) AND \
+             ((CAST(json_extract(value, '$.age') AS REAL) >= CAST(? AS REAL)) OR \
+             (json_extract(value, '$.role') = ?))"
+        );
+        assert_eq!(params.len(), 3);
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn test_filter_to_sql_not() {
+        let filter = FilterExpr::Not {
+            expr: Box::new(FilterExpr::Eq {
+                field: "status".to_string(),
+                value: json!("banned"),
+            }),
+        };
+        let (sql, params) = filter_to_sql_sqlite(&filter);
+        assert!(sql.starts_with("NOT ("));
+        assert!(sql.contains("json_extract(value, '$.status') = ?"));
+        assert_eq!(params.len(), 1);
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn test_sqlite_param_bool_true() {
+        assert_eq!(sqlite_param_from_value(&json!(true)), "1");
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn test_sqlite_param_bool_false() {
+        assert_eq!(sqlite_param_from_value(&json!(false)), "0");
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn test_sqlite_param_string() {
+        assert_eq!(sqlite_param_from_value(&json!("hello")), "hello");
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn test_sqlite_param_number() {
+        assert_eq!(sqlite_param_from_value(&json!(42)), "42");
+        assert_eq!(sqlite_param_from_value(&json!(42.5)), "42.5");
+    }
+
+    // --- Postgres filter_to_sql tests ---
+
+    #[cfg(feature = "postgres")]
+    #[test]
+    fn test_filter_to_sql_postgres_eq() {
+        let filter = FilterExpr::Eq {
+            field: "status".to_string(),
+            value: json!("active"),
+        };
+        let (sql, params) = filter_to_sql_postgres(&filter);
+        assert_eq!(sql, "value #>> '{status}' = ?");
+        assert_eq!(params.len(), 1);
+    }
+
+    #[cfg(feature = "postgres")]
+    #[test]
+    fn test_filter_to_sql_postgres_nested_field() {
+        let filter = FilterExpr::Eq {
+            field: "user.address.city".to_string(),
+            value: json!("NYC"),
+        };
+        let (sql, _params) = filter_to_sql_postgres(&filter);
+        assert_eq!(sql, "value #>> '{user,address,city}' = ?");
+    }
+
+    #[cfg(feature = "postgres")]
+    #[test]
+    fn test_filter_to_sql_postgres_numeric_compare() {
+        let filter = FilterExpr::Lt {
+            field: "price".to_string(),
+            value: json!(100.0),
+        };
+        let (sql, _params) = filter_to_sql_postgres(&filter);
+        assert_eq!(sql, "(value #> '{price}')::numeric < CAST(? AS numeric)");
+    }
+
+    #[cfg(feature = "postgres")]
+    #[test]
+    fn test_filter_to_sql_postgres_and_or_not() {
+        let filter = FilterExpr::And {
+            expressions: vec![
+                FilterExpr::Eq {
+                    field: "a".to_string(),
+                    value: json!(1),
+                },
+                FilterExpr::Not {
+                    expr: Box::new(FilterExpr::Or {
+                        expressions: vec![
+                            FilterExpr::Eq {
+                                field: "b".to_string(),
+                                value: json!(2),
+                            },
+                            FilterExpr::Eq {
+                                field: "c".to_string(),
+                                value: json!(3),
+                            },
+                        ],
+                    }),
+                },
+            ],
+        };
+        let (sql, params) = filter_to_sql_postgres(&filter);
+        assert_eq!(params.len(), 3);
+        assert!(sql.contains("AND"));
+        assert!(sql.contains("NOT ("));
+        assert!(sql.contains("OR"));
     }
 }
