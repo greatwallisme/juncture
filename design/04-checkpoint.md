@@ -1057,6 +1057,20 @@ crates/
 
 ---
 
+## 11. Implementation Enhancements (Category C)
+
+The following enhancements are present in the implementation but not described in the design specification above:
+
+1. **C-04-001 - CheckpointSource::Interrupt variant**: Implementation adds the `CheckpointSource::Interrupt` variant for human-in-the-loop (HITL) pause point tracking. When a node triggers an interrupt via `Command::interrupt`, the checkpoint saved at that point is tagged with `source: Interrupt`. This allows `get_state_history` filters to distinguish HITL pause points from normal execution checkpoints, enabling UIs to display "awaiting human input" status and filter history by interrupt events.
+
+2. **C-04-002 - InterruptSignal persistence**: Interrupt signals (with index, ID, and payload) are persisted in checkpoints, enabling ID-based and namespace-based resume. This allows the resume system to match resume values to specific interrupts using the full 3-strategy matching algorithm (Single, ById, ByNamespace).
+
+3. **C-04-003 - PendingInterrupts vector**: The checkpoint struct includes a `pending_interrupts` vector that persists HITL state across crashes. This ensures that interrupted states survive process restarts and can be properly resumed after recovery.
+
+4. **C-04-004 - Three-layer serialization auto-detection**: The serialization system supports three layers: MsgPack (default high-performance binary), JSON (human-readable fallback), and an optional AES-256-GCM encryption wrapper. Auto-detection identifies the format on read via magic byte inspection, allowing seamless format migration without data loss.
+
+---
+
 ## 源码参考索引
 
 | 概念 | LangGraph 源码位置 | 说明 |
