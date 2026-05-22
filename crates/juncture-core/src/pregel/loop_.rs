@@ -814,6 +814,12 @@ impl<S: State> PregelLoop<S> {
             }
         }
 
+        // Save superstep checkpoint after state merge and next-task computation.
+        // This provides crash recovery for normal superstep completion (B-04-002).
+        // The checkpoint is only saved when no interrupts are pending; interrupt
+        // paths save their own checkpoint with richer context (pending_interrupts).
+        self.save_superstep_checkpoint().await;
+
         // Drain interrupt signals from the channel
         // These are signals sent by the interrupt!() macro during node execution
         let mut node_interrupts = Vec::new();
@@ -1308,6 +1314,130 @@ impl<S: State> PregelLoop<S> {
         }
     }
 
+    /// Save a checkpoint with [`CheckpointSource::Loop`] after normal superstep completion.
+    ///
+    /// This is the second phase of two-phase persistence (B-04-002):
+    /// - Phase 1: `put_writes()` after each task completes (already in runner)
+    /// - Phase 2: `put()` after each superstep completes (this method)
+    ///
+    /// Called from [`after_tick`](Self::after_tick) after state merge and
+    /// next-task computation, but before interrupt drain checks. This ensures
+    /// crash recovery can resume from the last completed superstep rather than
+    /// replaying from the initial state or last interrupt.
+    ///
+    /// No-op if no checkpointer is configured. Errors are logged but do not
+    /// propagate -- superstep checkpointing is best-effort and must not prevent
+    /// the graph from continuing execution.
+    async fn save_superstep_checkpoint(&mut self)
+    where
+        S: serde::Serialize,
+    {
+        let Some(ref checkpointer) = self.checkpointer else {
+            return;
+        };
+
+        let channel_values = match serde_json::to_value(&self.state) {
+            Ok(v) => v,
+            Err(err) => {
+                tracing::warn!(
+                    name: "juncture.checkpoint.superstep.serialize_failed",
+                    step = self.step,
+                    error = %err,
+                    "Failed to serialize state for superstep checkpoint"
+                );
+                return;
+            }
+        };
+
+        let channel_versions: HashMap<String, u64> = self
+            .field_versions
+            .versions()
+            .iter()
+            .enumerate()
+            .map(|(idx, ver)| (format!("field_{idx}"), *ver))
+            .collect();
+
+        let new_versions = channel_versions.clone();
+
+        let versions_seen: HashMap<String, HashMap<String, u64>> = self
+            .nodes
+            .keys()
+            .map(|node_name| {
+                let versions = self.versions_seen.get_versions(node_name);
+                let map: HashMap<String, u64> = versions
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, ver)| (format!("field_{idx}"), *ver))
+                    .collect();
+                (node_name.clone(), map)
+            })
+            .collect();
+
+        // Serialize pending tasks for crash recovery so the engine knows
+        // which nodes to execute next after resuming from this checkpoint.
+        let pending_tasks: Vec<crate::checkpoint::CheckpointPendingTask> = self
+            .pending_tasks
+            .iter()
+            .map(|task| crate::checkpoint::CheckpointPendingTask {
+                id: task.id.clone(),
+                node: task.node_name.clone(),
+                triggers: Vec::new(),
+                state_override: None,
+            })
+            .collect();
+
+        let checkpoint_id = generate_checkpoint_id();
+        let created_at = chrono::Utc::now().to_rfc3339();
+
+        let checkpoint = Checkpoint {
+            id: checkpoint_id,
+            channel_values,
+            channel_versions,
+            versions_seen,
+            pending_tasks,
+            pending_sends: Vec::new(),
+            pending_interrupts: Vec::new(),
+            schema_version: S::schema_version(),
+            created_at,
+            v: 1,
+            new_versions,
+            counters_since_delta_snapshot: HashMap::new(),
+        };
+
+        let metadata = CheckpointMetadata {
+            source: CheckpointSource::Loop,
+            step: i64::try_from(self.step).unwrap_or(i64::MAX),
+            writes: HashMap::new(),
+            parents: HashMap::new(),
+            run_id: self.run_id.clone(),
+        };
+
+        match checkpointer
+            .put(&self.runnable_config, checkpoint, metadata)
+            .await
+        {
+            Ok(updated_config) => {
+                self.runnable_config.checkpoint_id = updated_config.checkpoint_id;
+                tracing::debug!(
+                    name: "juncture.checkpoint.superstep.saved",
+                    step = self.step,
+                    "Superstep checkpoint saved"
+                );
+                if let Some(ref cp_id) = self.runnable_config.checkpoint_id {
+                    self.on_checkpoint_saved(cp_id, self.step);
+                }
+            }
+            Err(err) => {
+                tracing::warn!(
+                    name: "juncture.checkpoint.superstep.save_failed",
+                    step = self.step,
+                    error = %err,
+                    "Failed to save superstep checkpoint"
+                );
+            }
+        }
+    }
+
     /// Save a pending interrupt checkpoint for `interrupt_before` scenarios.
     ///
     /// When `tick()` detects an `interrupt_before`, the loop exits immediately
@@ -1762,6 +1892,223 @@ mod tests {
         assert!(
             loop_.scratchpad.is_interrupt_processed("int-2"),
             "int-2 from second superstep should be tracked"
+        );
+    }
+
+    // --- B-04-002: superstep checkpoint tests ---
+
+    /// Observed checkpointer call for test assertions
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    enum ObservedCall {
+        Put {
+            source: crate::checkpoint::CheckpointSource,
+            step: i64,
+        },
+    }
+
+    /// Mock checkpointer that records `put()` calls for test verification
+    struct TrackingCheckpointer {
+        observed: Arc<std::sync::Mutex<Vec<ObservedCall>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::checkpoint::CheckpointSaver for TrackingCheckpointer {
+        async fn get_tuple(
+            &self,
+            _: &crate::config::RunnableConfig,
+        ) -> Result<
+            Option<crate::checkpoint::CheckpointTuple>,
+            crate::checkpoint::CheckpointError,
+        > {
+            Ok(None)
+        }
+
+        async fn list(
+            &self,
+            _: &crate::config::RunnableConfig,
+            _: Option<crate::checkpoint::CheckpointFilter>,
+        ) -> Result<Vec<crate::checkpoint::CheckpointTuple>, crate::checkpoint::CheckpointError>
+        {
+            Ok(Vec::new())
+        }
+
+        async fn put(
+            &self,
+            _: &crate::config::RunnableConfig,
+            _checkpoint: crate::checkpoint::Checkpoint,
+            metadata: crate::checkpoint::CheckpointMetadata,
+        ) -> Result<crate::config::RunnableConfig, crate::checkpoint::CheckpointError> {
+            self.observed
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(ObservedCall::Put {
+                    source: metadata.source,
+                    step: metadata.step,
+                });
+            let mut cfg = crate::config::RunnableConfig::new();
+            cfg.checkpoint_id = Some("cp-test".to_string());
+            Ok(cfg)
+        }
+
+        async fn put_writes(
+            &self,
+            _: &crate::config::RunnableConfig,
+            _: Vec<crate::checkpoint::PendingWrite>,
+            _: &str,
+        ) -> Result<(), crate::checkpoint::CheckpointError> {
+            Ok(())
+        }
+    }
+
+    /// Verify that `after_tick` saves a checkpoint with `CheckpointSource::Loop`
+    /// after a normal (non-interrupt) superstep completes (B-04-002).
+    #[tokio::test]
+    async fn test_superstep_checkpoint_saved_on_normal_completion() {
+        let state = TestState;
+
+        let mut nodes = IndexMap::new();
+        nodes.insert(
+            "test_node".to_string(),
+            NodeFnCommand(|_s| async move { Ok(Command::end()) }).into_node("test_node"),
+        );
+
+        let trigger_table = TriggerTable::new();
+        let mut config = crate::config::RunnableConfig::new();
+        config.thread_id = Some("test-thread".to_string());
+
+        let mut loop_ = PregelLoop::new(state, nodes, trigger_table, config, 0).unwrap();
+
+        let observed = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let checkpointer = TrackingCheckpointer {
+            observed: Arc::clone(&observed),
+        };
+        loop_.set_checkpointer(Arc::new(checkpointer));
+
+        // Execute one superstep (no interrupts)
+        loop_.pending_tasks = vec![PendingTask::pull(
+            uuid::Uuid::new_v4().to_string(),
+            "test_node".to_string(),
+        )];
+
+        let _ = loop_.execute_superstep().await;
+        let _ = loop_.after_tick(SuperstepResult::empty()).await;
+
+        // Verify a checkpoint with Loop source was saved
+        let has_loop_checkpoint = {
+            let calls = observed
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            calls.iter().any(|c| matches!(
+                c,
+                ObservedCall::Put {
+                    source: crate::checkpoint::CheckpointSource::Loop,
+                    step: 0,
+                }
+            ))
+        };
+        assert!(
+            has_loop_checkpoint,
+            "expected a Loop checkpoint at step 0"
+        );
+    }
+
+    /// Verify that superstep checkpoint is saved at the correct step number
+    /// across multiple supersteps (B-04-002).
+    #[tokio::test]
+    async fn test_superstep_checkpoint_step_increments() {
+        let state = TestState;
+
+        let mut nodes = IndexMap::new();
+        nodes.insert(
+            "test_node".to_string(),
+            NodeFnCommand(|_s| async move { Ok(Command::end()) }).into_node("test_node"),
+        );
+
+        let trigger_table = TriggerTable::new();
+        let mut config = crate::config::RunnableConfig::new();
+        config.thread_id = Some("test-thread".to_string());
+
+        let mut loop_ = PregelLoop::new(state, nodes, trigger_table, config, 0).unwrap();
+
+        let observed = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let checkpointer = TrackingCheckpointer {
+            observed: Arc::clone(&observed),
+        };
+        loop_.set_checkpointer(Arc::new(checkpointer));
+
+        // First superstep at step 0
+        loop_.pending_tasks = vec![PendingTask::pull(
+            uuid::Uuid::new_v4().to_string(),
+            "test_node".to_string(),
+        )];
+        let _ = loop_.execute_superstep().await;
+        let _ = loop_.after_tick(SuperstepResult::empty()).await;
+
+        // Second superstep at step 1
+        loop_.pending_tasks = vec![PendingTask::pull(
+            uuid::Uuid::new_v4().to_string(),
+            "test_node".to_string(),
+        )];
+        let _ = loop_.execute_superstep().await;
+        let _ = loop_.after_tick(SuperstepResult::empty()).await;
+
+        let loop_steps: Vec<i64> = {
+            let calls = observed
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            calls
+                .iter()
+                .filter_map(|c| match c {
+                    ObservedCall::Put {
+                        source: crate::checkpoint::CheckpointSource::Loop,
+                        step,
+                    } => Some(*step),
+                    ObservedCall::Put { .. } => None,
+                })
+                .collect()
+        };
+
+        assert_eq!(
+            loop_steps,
+            vec![0, 1],
+            "expected Loop checkpoints at steps 0 and 1, got: {loop_steps:?}"
+        );
+    }
+
+    /// Verify that NO superstep checkpoint is saved when no checkpointer is configured
+    /// (B-04-002 -- should be a silent no-op).
+    #[tokio::test]
+    async fn test_superstep_checkpoint_noop_without_checkpointer() {
+        let state = TestState;
+
+        let mut nodes = IndexMap::new();
+        nodes.insert(
+            "test_node".to_string(),
+            NodeFnCommand(|_s| async move { Ok(Command::end()) }).into_node("test_node"),
+        );
+
+        let trigger_table = TriggerTable::new();
+        let config = crate::config::RunnableConfig::new();
+
+        let mut loop_ = PregelLoop::new(state, nodes, trigger_table, config, 0).unwrap();
+        assert!(
+            loop_.checkpointer.is_none(),
+            "no checkpointer should be configured by default"
+        );
+
+        // Execute one superstep without checkpointer -- should succeed without error
+        loop_.pending_tasks = vec![PendingTask::pull(
+            uuid::Uuid::new_v4().to_string(),
+            "test_node".to_string(),
+        )];
+
+        let result = loop_.execute_superstep().await;
+        assert!(result.is_ok(), "execute_superstep should succeed");
+
+        let after_result = loop_.after_tick(SuperstepResult::empty()).await;
+        assert!(
+            after_result.is_ok(),
+            "after_tick should succeed without checkpointer"
         );
     }
 }
