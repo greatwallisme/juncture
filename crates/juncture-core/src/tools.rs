@@ -456,7 +456,9 @@ pub fn tools_condition<S: State + serde::Serialize>(
 ///
 /// Serializes the state to JSON, extracts the messages array from the named
 /// field, and checks whether the last message with role `Ai` has non-empty
-/// `tool_calls`.
+/// `tool_calls`. The role comparison uses the serde-serialized form
+/// `"Ai"` (the variant name, since [`Role::Ai`](crate::state::messages::Role::Ai)
+/// has no serde rename in the current implementation).
 fn has_pending_tool_calls<S: serde::Serialize>(state: &S, messages_field: &str) -> bool {
     let Ok(value) = serde_json::to_value(state) else {
         return false;

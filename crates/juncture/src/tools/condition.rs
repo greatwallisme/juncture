@@ -1,12 +1,53 @@
 //! Conditional routing utilities for tool execution
 
+use juncture_core::State;
 use juncture_core::edge::END;
 use juncture_core::state::messages::Message;
 
-/// Check if the last message has tool calls (for conditional edge routing)
+/// State-based conditional routing: check if the last AI message has tool calls.
 ///
-/// This function is used in conditional edges to route to the tool node
-/// when the AI message contains tool calls, or to END otherwise.
+/// Extracts messages from the state by serializing to JSON and accessing the
+/// named field. This works with any state type that has a serializable field
+/// containing a `Vec<Message>` (or equivalent JSON array).
+///
+/// # Type Parameters
+///
+/// * `S` - The state type, must implement [`State`] and `serde::Serialize`
+///
+/// # Arguments
+///
+/// * `state` - The graph state
+/// * `messages_field` - The name of the field containing messages (e.g., `"messages"`)
+///
+/// # Returns
+///
+/// * `"tools"` - if the last AI message has tool calls
+/// * [`END`] - otherwise
+///
+/// # Example
+///
+/// ```ignore
+/// use juncture::tools::tools_condition;
+/// use juncture_core::edge::END;
+///
+/// graph.add_conditional_edges(
+///     "agent",
+///     |state: &MyState| tools_condition(state, "messages"),
+///     [("tools", "tools"), (END, END)],
+/// )?;
+/// ```
+#[must_use]
+pub fn tools_condition<S: State + serde::Serialize>(
+    state: &S,
+    messages_field: &str,
+) -> &'static str {
+    juncture_core::tools_condition(state, messages_field)
+}
+
+/// Check if the last message has tool calls from a pre-extracted messages slice.
+///
+/// This is a convenience variant for cases where messages are already extracted
+/// from the state. For the generic state-based version, use [`tools_condition`].
 ///
 /// # Arguments
 ///
@@ -20,19 +61,13 @@ use juncture_core::state::messages::Message;
 /// # Example
 ///
 /// ```ignore
-/// use juncture::tools::tools_condition;
-/// use juncture_core::{StateGraph, edge};
-/// use juncture_core::state::messages::Message;
+/// use juncture::tools::tools_condition_from_messages;
+/// use juncture_core::edge::END;
 ///
-/// let mut graph = StateGraph::new();
-/// graph.add_conditional_edges(
-///     "agent",
-///     tools_condition,
-///     [("tools", "tools"), (edge::END, edge::END)],
-/// )?;
+/// let result = tools_condition_from_messages(&state.messages);
 /// ```
 #[must_use]
-pub fn tools_condition(messages: &[Message]) -> &'static str {
+pub fn tools_condition_from_messages(messages: &[Message]) -> &'static str {
     messages
         .last()
         .map_or(END, |m| if m.has_tool_calls() { "tools" } else { END })
@@ -41,30 +76,31 @@ pub fn tools_condition(messages: &[Message]) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use juncture_core::state::messages::{MessagesState, ToolCall};
+    use serde_json::json;
+
+    // ── tools_condition_from_messages tests ──────────────────────────
 
     #[test]
-    fn test_tools_condition_with_empty_messages() {
+    fn test_from_messages_empty() {
         let messages: Vec<Message> = vec![];
-        assert_eq!(tools_condition(&messages), END);
+        assert_eq!(tools_condition_from_messages(&messages), END);
     }
 
     #[test]
-    fn test_tools_condition_with_human_message() {
+    fn test_from_messages_human() {
         let messages = vec![Message::human("Hello")];
-        assert_eq!(tools_condition(&messages), END);
+        assert_eq!(tools_condition_from_messages(&messages), END);
     }
 
     #[test]
-    fn test_tools_condition_with_ai_message_no_tools() {
+    fn test_from_messages_ai_no_tools() {
         let messages = vec![Message::ai("Hello")];
-        assert_eq!(tools_condition(&messages), END);
+        assert_eq!(tools_condition_from_messages(&messages), END);
     }
 
     #[test]
-    fn test_tools_condition_with_ai_message_with_tools() {
-        use juncture_core::state::messages::ToolCall;
-        use serde_json::json;
-
+    fn test_from_messages_ai_with_tools() {
         let messages = vec![Message::ai_with_tool_calls(
             "I'll search for that",
             vec![ToolCall {
@@ -73,14 +109,11 @@ mod tests {
                 arguments: json!({"query": "test"}),
             }],
         )];
-        assert_eq!(tools_condition(&messages), "tools");
+        assert_eq!(tools_condition_from_messages(&messages), "tools");
     }
 
     #[test]
-    fn test_tools_condition_last_message_only() {
-        use juncture_core::state::messages::ToolCall;
-        use serde_json::json;
-
+    fn test_from_messages_last_message_only() {
         let messages = vec![
             Message::human("Search"),
             Message::ai_with_tool_calls(
@@ -94,7 +127,99 @@ mod tests {
             Message::human("Never mind"),
         ];
         // Last message is human, so should go to END
-        assert_eq!(tools_condition(&messages), END);
+        assert_eq!(tools_condition_from_messages(&messages), END);
+    }
+
+    // ── tools_condition (state-based) tests ──────────────────────────
+
+    #[test]
+    fn test_state_based_empty_messages() {
+        let state = MessagesState { messages: vec![] };
+        assert_eq!(tools_condition(&state, "messages"), END);
+    }
+
+    #[test]
+    fn test_state_based_human_message() {
+        let state = MessagesState {
+            messages: vec![Message::human("Hello")],
+        };
+        assert_eq!(tools_condition(&state, "messages"), END);
+    }
+
+    #[test]
+    fn test_state_based_ai_no_tools() {
+        let state = MessagesState {
+            messages: vec![Message::ai("Hello")],
+        };
+        assert_eq!(tools_condition(&state, "messages"), END);
+    }
+
+    #[test]
+    fn test_state_based_ai_with_tools() {
+        let state = MessagesState {
+            messages: vec![Message::ai_with_tool_calls(
+                "I'll search",
+                vec![ToolCall {
+                    id: "call_1".to_string(),
+                    name: "search".to_string(),
+                    arguments: json!({"q": "test"}),
+                }],
+            )],
+        };
+        assert_eq!(tools_condition(&state, "messages"), "tools");
+    }
+
+    #[test]
+    fn test_state_based_last_ai_message_with_tools() {
+        let state = MessagesState {
+            messages: vec![
+                Message::human("Search"),
+                Message::ai_with_tool_calls(
+                    "Searching",
+                    vec![ToolCall {
+                        id: "call_1".to_string(),
+                        name: "search".to_string(),
+                        arguments: json!({}),
+                    }],
+                ),
+                Message::human("Never mind"),
+            ],
+        };
+        // The state-based version looks for the last AI message (not the last
+        // message overall). The last AI message has tool calls, so it returns
+        // "tools".
+        assert_eq!(tools_condition(&state, "messages"), "tools");
+    }
+
+    #[test]
+    fn test_state_based_custom_field_name() {
+        let state = MessagesState {
+            messages: vec![Message::ai_with_tool_calls(
+                "Working",
+                vec![ToolCall {
+                    id: "call_1".to_string(),
+                    name: "search".to_string(),
+                    arguments: json!({}),
+                }],
+            )],
+        };
+        assert_eq!(tools_condition(&state, "messages"), "tools");
+    }
+
+    #[test]
+    fn test_state_based_non_existent_field() {
+        let state = MessagesState {
+            messages: vec![Message::ai_with_tool_calls(
+                "Working",
+                vec![ToolCall {
+                    id: "call_1".to_string(),
+                    name: "search".to_string(),
+                    arguments: json!({}),
+                }],
+            )],
+        };
+        // Non-existent field -- should return END safely
+        assert_eq!(tools_condition(&state, "nonexistent"), END);
     }
 }
 

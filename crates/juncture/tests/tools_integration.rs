@@ -1,8 +1,10 @@
 //! Integration tests for the tools module
 
 use async_trait::async_trait;
-use juncture::tools::{Tool, ToolError, ToolNode, ValidationNode, tools_condition};
-use juncture_core::state::messages::{Message, ToolCall};
+use juncture::tools::{
+    Tool, ToolError, ToolNode, ValidationNode, tools_condition, tools_condition_from_messages,
+};
+use juncture_core::state::messages::{Message, MessagesState, ToolCall};
 use serde_json::json;
 
 /// Simple test tool
@@ -56,10 +58,13 @@ async fn test_tool_node_integration() {
 }
 
 #[tokio::test]
-async fn test_tools_condition_integration() {
+async fn test_tools_condition_from_messages_integration() {
     // Test with human message (no tools)
     let messages = vec![Message::human("Hello")];
-    assert_eq!(tools_condition(&messages), juncture_core::edge::END);
+    assert_eq!(
+        tools_condition_from_messages(&messages),
+        juncture_core::edge::END
+    );
 
     // Test with AI message with tools
     let messages_with_tools = vec![Message::ai_with_tool_calls(
@@ -70,7 +75,45 @@ async fn test_tools_condition_integration() {
             arguments: json!({}),
         }],
     )];
-    assert_eq!(tools_condition(&messages_with_tools), "tools");
+    assert_eq!(tools_condition_from_messages(&messages_with_tools), "tools");
+}
+
+#[tokio::test]
+async fn test_tools_condition_state_based_integration() {
+    // State with human message (no tools)
+    let state = MessagesState {
+        messages: vec![Message::human("Hello")],
+    };
+    assert_eq!(
+        tools_condition(&state, "messages"),
+        juncture_core::edge::END
+    );
+
+    // State with AI message with tool calls
+    let state_with_tools = MessagesState {
+        messages: vec![Message::ai_with_tool_calls(
+            "Execute",
+            vec![ToolCall {
+                id: "call_1".to_string(),
+                name: "test_tool".to_string(),
+                arguments: json!({}),
+            }],
+        )],
+    };
+    assert_eq!(tools_condition(&state_with_tools, "messages"), "tools");
+
+    // State with empty messages
+    let empty_state = MessagesState { messages: vec![] };
+    assert_eq!(
+        tools_condition(&empty_state, "messages"),
+        juncture_core::edge::END
+    );
+
+    // State with non-existent field name
+    assert_eq!(
+        tools_condition(&state, "non_existent_field"),
+        juncture_core::edge::END
+    );
 }
 
 #[test]
@@ -90,4 +133,4 @@ fn test_validation_node_integration() {
     validator.validate(&[Message::human("test")]).unwrap();
 }
 
-// Rust guideline compliant 2026-05-19
+// Rust guideline compliant 2026-05-22

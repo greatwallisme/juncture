@@ -60,7 +60,7 @@ mod trait_;
 mod transformer;
 mod validation;
 
-pub use condition::tools_condition;
+pub use condition::{tools_condition, tools_condition_from_messages};
 pub use error::ToolError;
 pub use interceptor::{CompositeInterceptor, NopToolInterceptor, ToolInterceptor};
 pub use node::{ToolExecutionTrace, ToolNode, ToolNodeConfig};
