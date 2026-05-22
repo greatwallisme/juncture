@@ -698,10 +698,6 @@ impl<S: State> PregelLoop<S> {
         clippy::too_many_lines,
         reason = "after_tick requires multiple steps: apply writes, bump versions, emit events, compute tasks, drain interrupts, check interrupts, finish channels, increment step"
     )]
-    #[expect(
-        clippy::cognitive_complexity,
-        reason = "after_tick orchestrates multiple sequential phases: error handler scheduling, stream events, interrupt checking. Splitting would obscure the control flow."
-    )]
     pub async fn after_tick(&mut self, result: SuperstepResult<S>) -> Result<(), JunctureError>
     where
         S: Clone + serde::Serialize,
@@ -837,6 +833,7 @@ impl<S: State> PregelLoop<S> {
 
             // Emit interrupt events to stream
             if let Some(ref tx) = self.stream_tx {
+                let ns = self.current_ns();
                 for signal in &node_interrupts {
                     let event = StreamEvent::Interrupt {
                         node: signal
@@ -847,7 +844,7 @@ impl<S: State> PregelLoop<S> {
                             .to_string(),
                         payload: signal.payload.clone(),
                         resumable: true,
-                        ns: Vec::new(),
+                        ns: ns.clone(),
                     };
                     let _ = tx.send(event);
                 }
@@ -898,6 +895,7 @@ impl<S: State> PregelLoop<S> {
 
                 // Emit interrupt events to stream
                 if let Some(ref tx) = self.stream_tx {
+                    let ns = self.current_ns();
                     for signal in &signals {
                         let event = StreamEvent::Interrupt {
                             node: signal
@@ -908,7 +906,7 @@ impl<S: State> PregelLoop<S> {
                                 .to_string(),
                             payload: signal.payload.clone(),
                             resumable: true,
-                            ns: Vec::new(),
+                            ns: ns.clone(),
                         };
                         let _ = tx.send(event);
                     }
@@ -986,6 +984,7 @@ impl<S: State> PregelLoop<S> {
         self.status = LoopStatus::InterruptAfter(graph_interrupt.interrupts.clone());
 
         if let Some(ref tx) = self.stream_tx {
+            let ns = self.current_ns();
             for signal in &graph_interrupt.interrupts {
                 let event = StreamEvent::Interrupt {
                     node: signal
@@ -996,7 +995,7 @@ impl<S: State> PregelLoop<S> {
                         .to_string(),
                     payload: signal.payload.clone(),
                     resumable: true,
-                    ns: Vec::new(),
+                    ns: ns.clone(),
                 };
                 let _ = tx.send(event);
             }
@@ -1478,6 +1477,25 @@ impl<S: State> PregelLoop<S> {
             .and_then(|s| s.payload.get("node"))
             .and_then(|v| v.as_str())
             .unwrap_or(UNKNOWN)
+    }
+
+    /// Convert the current checkpoint namespace into a `Vec<String>` suitable
+    /// for the `ns` field of [`StreamEvent::Interrupt`].
+    ///
+    /// Each [`NamespaceSegment`] contributes only its `node_name`; the
+    /// invocation UUID is omitted because stream consumers only need the
+    /// logical nesting path (e.g. `["review", "detail"]`).
+    fn current_ns(&self) -> Vec<String> {
+        self.runnable_config
+            .checkpoint_ns
+            .as_ref()
+            .map(|ns| {
+                ns.segments
+                    .iter()
+                    .map(|seg| seg.node_name.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     /// Finish all channels in the state
@@ -2110,6 +2128,123 @@ mod tests {
             after_result.is_ok(),
             "after_tick should succeed without checkpointer"
         );
+    }
+
+    // --- B-06-003: current_ns tests ---
+
+    #[test]
+    fn test_current_ns_empty_when_no_checkpoint_ns() {
+        let state = TestState;
+        let mut nodes = IndexMap::new();
+        nodes.insert(
+            "test_node".to_string(),
+            NodeFnCommand(|_s| async move { Ok(Command::end()) }).into_node("test_node"),
+        );
+        let trigger_table = TriggerTable::new();
+        let config = crate::config::RunnableConfig::new();
+
+        let loop_ = PregelLoop::new(state, nodes, trigger_table, config, 0).unwrap();
+        assert!(
+            loop_.current_ns().is_empty(),
+            "root-level graph should have empty ns"
+        );
+    }
+
+    #[test]
+    fn test_current_ns_extracts_node_names_from_checkpoint_ns() {
+        let state = TestState;
+        let mut nodes = IndexMap::new();
+        nodes.insert(
+            "test_node".to_string(),
+            NodeFnCommand(|_s| async move { Ok(Command::end()) }).into_node("test_node"),
+        );
+        let trigger_table = TriggerTable::new();
+        let config = crate::config::RunnableConfig::new()
+            .with_checkpoint_ns(crate::checkpoint::CheckpointNamespace::new(vec![
+                crate::checkpoint::NamespaceSegment::new(
+                    "review".to_string(),
+                    "uuid-1".to_string(),
+                ),
+                crate::checkpoint::NamespaceSegment::new(
+                    "detail".to_string(),
+                    "uuid-2".to_string(),
+                ),
+            ]));
+
+        let loop_ = PregelLoop::new(state, nodes, trigger_table, config, 0).unwrap();
+        let ns = loop_.current_ns();
+        assert_eq!(ns, vec!["review", "detail"]);
+    }
+
+    #[test]
+    fn test_current_ns_single_segment() {
+        let state = TestState;
+        let mut nodes = IndexMap::new();
+        nodes.insert(
+            "test_node".to_string(),
+            NodeFnCommand(|_s| async move { Ok(Command::end()) }).into_node("test_node"),
+        );
+        let trigger_table = TriggerTable::new();
+        let config = crate::config::RunnableConfig::new()
+            .with_checkpoint_ns(crate::checkpoint::CheckpointNamespace::new(vec![
+                crate::checkpoint::NamespaceSegment::new(
+                    "agent".to_string(),
+                    "uuid-single".to_string(),
+                ),
+            ]));
+
+        let loop_ = PregelLoop::new(state, nodes, trigger_table, config, 0).unwrap();
+        let ns = loop_.current_ns();
+        assert_eq!(ns, vec!["agent"]);
+    }
+
+    /// Verify that a bubble-up interrupt emitted to the stream carries the
+    /// namespace from the execution context (fix for B-06-003).
+    #[test]
+    fn test_bubble_up_interrupt_emits_ns_from_checkpoint_ns() {
+        let state = TestState;
+        let mut nodes = IndexMap::new();
+        nodes.insert(
+            "test_node".to_string(),
+            NodeFnCommand(|_s| async move { Ok(Command::end()) }).into_node("test_node"),
+        );
+
+        let trigger_table = TriggerTable::new();
+        let checkpoint_ns = crate::checkpoint::CheckpointNamespace::new(vec![
+            crate::checkpoint::NamespaceSegment::new(
+                "review".to_string(),
+                "uuid-parent".to_string(),
+            ),
+        ]);
+        let config =
+            crate::config::RunnableConfig::new().with_checkpoint_ns(checkpoint_ns);
+
+        let mut loop_ = PregelLoop::new(state, nodes, trigger_table, config, 0).unwrap();
+
+        // Attach a stream receiver to capture emitted events
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        loop_.stream_tx = Some(tx);
+
+        let signals = vec![crate::interrupt::InterruptSignal {
+            index: 0,
+            id: Some("int-ns-0".to_string()),
+            payload: serde_json::json!({"node": "child_node"}),
+        }];
+        let bubble_ups = vec![BubbleUp::Interrupt(crate::pregel::types::GraphInterrupt {
+            interrupts: signals,
+            step: 1,
+        })];
+
+        let _ = loop_.handle_bubble_ups(&bubble_ups);
+
+        // The emitted event should carry the checkpoint namespace
+        let event = rx.try_recv().expect("should have received an interrupt event");
+        match event {
+            StreamEvent::Interrupt { ns, .. } => {
+                assert_eq!(ns, vec!["review"]);
+            }
+            other => panic!("expected Interrupt event, got {other:?}"),
+        }
     }
 }
 
