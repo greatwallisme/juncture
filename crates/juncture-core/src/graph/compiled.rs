@@ -187,6 +187,26 @@ impl<S: State, I: IntoState<S>, O: FromState<S>> CompiledGraph<S, I, O> {
             .collect()
     }
 
+    /// Builds a `HashMap<String, RetryPolicy>` mapping node names to their
+    /// first configured retry policy by scanning builder metadata.
+    ///
+    /// Nodes configured via [`StateGraph::add_node_with_retry`](super::StateGraph::add_node_with_retry)
+    /// are wrapped in a [`RetryingNode`](super::builder::RetryingNode) at graph construction
+    /// time and do NOT appear here -- this map captures engine-level retry policies
+    /// from [`NodeMetadata::retry_policies`] that are applied by the Pregel runner
+    /// during superstep execution.
+    fn build_retry_policy_map(&self) -> std::collections::HashMap<String, super::builder::RetryPolicy> {
+        self.inner
+            .builder_metadata
+            .iter()
+            .filter_map(|(node_name, meta)| {
+                meta.retry_policies
+                    .first()
+                    .map(|policy| (node_name.clone(), policy.clone()))
+            })
+            .collect()
+    }
+
     /// Merge compile-time interrupt defaults with runtime config.
     ///
     /// Runtime values (from `RunnableConfig`) take precedence when present.
@@ -297,6 +317,9 @@ impl<S: State, I: IntoState<S>, O: FromState<S>> CompiledGraph<S, I, O> {
         // Extract error handler map from builder metadata
         let error_handler_map = self.build_error_handler_map();
 
+        // Extract per-node retry policies from builder metadata
+        let retry_policy_map = self.build_retry_policy_map();
+
         // Convert input type I into state type S
         let state_input = input.into_state();
 
@@ -309,6 +332,8 @@ impl<S: State, I: IntoState<S>, O: FromState<S>> CompiledGraph<S, I, O> {
             num_fields,
             error_handler_map,
         )?;
+
+        pregel.set_retry_policies(retry_policy_map);
 
         // Execute the loop
         while pregel.tick()? {
@@ -490,6 +515,9 @@ impl<S: State, I: IntoState<S>, O: FromState<S>> CompiledGraph<S, I, O> {
         // Extract error handler map from builder metadata
         let error_handler_map = self.build_error_handler_map();
 
+        // Extract per-node retry policies from builder metadata
+        let retry_policy_map = self.build_retry_policy_map();
+
         // Create Pregel loop
         let state_input = input.into_state();
         let mut pregel = PregelLoop::with_error_handlers(
@@ -500,6 +528,8 @@ impl<S: State, I: IntoState<S>, O: FromState<S>> CompiledGraph<S, I, O> {
             num_fields,
             error_handler_map,
         )?;
+
+        pregel.set_retry_policies(retry_policy_map);
 
         // Extract run_id before moving pregel into the spawned task
         let run_id = pregel.run_id().to_string();
@@ -719,6 +749,7 @@ impl<S: State, I: IntoState<S>, O: FromState<S>> CompiledGraph<S, I, O> {
         }
 
         let error_handler_map = self.build_error_handler_map();
+        let retry_policy_map = self.build_retry_policy_map();
 
         let mut pregel = PregelLoop::with_error_handlers(
             input,
@@ -728,6 +759,8 @@ impl<S: State, I: IntoState<S>, O: FromState<S>> CompiledGraph<S, I, O> {
             num_fields,
             error_handler_map,
         )?;
+
+        pregel.set_retry_policies(retry_policy_map);
 
         if let Some(cp) = self.inner.checkpointer.clone() {
             pregel.set_checkpointer(cp);
@@ -869,6 +902,7 @@ impl<S: State, I: IntoState<S>, O: FromState<S>> CompiledGraph<S, I, O> {
         // Create Pregel loop with restored state
         let num_fields = 64; // Maximum number of fields
         let error_handler_map = self.build_error_handler_map();
+        let retry_policy_map = self.build_retry_policy_map();
         let mut pregel = crate::pregel::PregelLoop::with_error_handlers(
             state,
             self.inner.nodes.clone(),
@@ -877,6 +911,8 @@ impl<S: State, I: IntoState<S>, O: FromState<S>> CompiledGraph<S, I, O> {
             num_fields,
             error_handler_map,
         )?;
+
+        pregel.set_retry_policies(retry_policy_map);
 
         // Set checkpointer
         if let Some(cp) = self.inner.checkpointer.clone() {
@@ -1052,6 +1088,7 @@ impl<S: State, I: IntoState<S>, O: FromState<S>> CompiledGraph<S, I, O> {
         // Create Pregel loop with restored state
         let num_fields = 64;
         let error_handler_map = self.build_error_handler_map();
+        let retry_policy_map = self.build_retry_policy_map();
         let mut pregel = PregelLoop::with_error_handlers(
             state,
             self.inner.nodes.clone(),
@@ -1060,6 +1097,8 @@ impl<S: State, I: IntoState<S>, O: FromState<S>> CompiledGraph<S, I, O> {
             num_fields,
             error_handler_map,
         )?;
+
+        pregel.set_retry_policies(retry_policy_map);
 
         // Set checkpointer on the Pregel loop
         if let Some(cp) = self.inner.checkpointer.clone() {

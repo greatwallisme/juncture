@@ -6,6 +6,7 @@
 use crate::{
     JunctureError, Node, State,
     config::RunnableConfig,
+    graph::{RetryPolicy, execute_with_retry},
     interrupt::{InterruptContext, InterruptSignal, ResumeValue, Scratchpad},
     pregel::types::{PendingTask, SuperstepResult, TaskOutput},
 };
@@ -35,6 +36,9 @@ use tracing::{Level, event};
 /// * `checkpointer` - Optional checkpointer for immediate write persistence
 /// * `pending_interrupts` - Interrupt signals from prior supersteps (for multi-interrupt matching)
 /// * `scratchpad` - Scratchpad tracking processed interrupts (for null-resume detection)
+/// * `error_handler_map` - Maps node names to their error handler node names
+/// * `retry_policies` - Per-node retry policies; nodes with entries are wrapped
+///   with [`execute_with_retry`] using exponential backoff and jitter
 /// * `step` - Current superstep number (for observability span attribute `juncture.step`)
 ///
 /// # Returns
@@ -69,6 +73,7 @@ use tracing::{Level, event};
 /// # let token = CancellationToken::new();
 /// # let pending_interrupts = vec![];
 /// # let scratchpad = Scratchpad::new();
+/// let retry_policies = std::collections::HashMap::new();
 /// let (result, _interrupt_rx) = execute_superstep(
 ///     &pending_tasks,
 ///     &state,
@@ -78,6 +83,8 @@ use tracing::{Level, event};
 ///     None::<Arc<dyn CheckpointSaver>>,
 ///     &pending_interrupts,
 ///     &scratchpad,
+///     &std::collections::HashMap::new(),
+///     &retry_policies,
 ///     0, // step
 /// ).await?;
 /// ```
@@ -87,11 +94,11 @@ use tracing::{Level, event};
 )]
 #[expect(
     clippy::too_many_arguments,
-    reason = "execute_superstep requires: tasks, state, nodes, config, cancellation token, checkpointer, pending interrupts, scratchpad, and error handler map. All are necessary for the multi-interrupt matching algorithm and error recovery."
+    reason = "execute_superstep requires: tasks, state, nodes, config, cancellation token, checkpointer, pending interrupts, scratchpad, error handler map, retry policies, and step. All are necessary for the multi-interrupt matching algorithm, error recovery, and retry execution."
 )]
 #[expect(
     clippy::implicit_hasher,
-    reason = "error_handler_map uses std::collections::HashMap as the canonical type matching the builder metadata extraction; no alternative hasher is needed."
+    reason = "error_handler_map and retry_policies use std::collections::HashMap as the canonical type matching the builder metadata extraction; no alternative hasher is needed."
 )]
 pub async fn execute_superstep<S: State>(
     pending_tasks: &[PendingTask<S>],
@@ -103,6 +110,7 @@ pub async fn execute_superstep<S: State>(
     pending_interrupts: &[InterruptSignal],
     scratchpad: &Scratchpad,
     error_handler_map: &HashMap<String, String>,
+    retry_policies: &HashMap<String, RetryPolicy>,
     step: usize,
 ) -> Result<
     (
@@ -149,6 +157,9 @@ where
         let ctx = Arc::clone(&interrupt_context);
         let has_error_handler = error_handler_map.contains_key(&node_name);
 
+        // Extract per-node retry policy (if any) before moving into the async block
+        let retry_policy = retry_policies.get(&task.node_name).cloned();
+
         // Extract callback handler separately so it can be used after task_config
         // is moved into the async block for node.call()
         let callback_handler = task_config.callback_handler.clone();
@@ -182,9 +193,19 @@ where
 
                 let start = Instant::now();
 
-                // Execute task with cancellation support and interrupt context
+                // Clone node_name for use inside the async execution block.
+                // The outer node_name is retained for error reporting paths
+                // and the final TaskOutput construction below.
+                let exec_node_name = node_name.clone();
+
+                // Execute task with cancellation support, interrupt context, and
+                // optional retry wrapping.
                 // The INTERRUPT_CONTEXT.scope() makes the context available to
-                // the interrupt!() macro within node execution
+                // the interrupt!() macro within node execution.
+                //
+                // When a retry policy is configured for this node, each attempt
+                // is executed inside the interrupt context so that interrupt!
+                // macros work correctly across retries.
                 let result = tokio::select! {
                     biased;
                     () = token.cancelled() => {
@@ -196,9 +217,29 @@ where
                         }
                         return Err((node_name.clone(), err));
                     }
-                    result = crate::interrupt::INTERRUPT_CONTEXT.scope(ctx, async move {
-                        node.call(task_state, &task_config).await
-                    }) => result,
+                    result = async {
+                        if let Some(ref policy) = retry_policy {
+                            // Retry-enabled execution: each attempt runs inside
+                            // the interrupt context so interrupt!() works across
+                            // retries. State is cloned per-attempt by execute_with_retry.
+                            let ctx_ref = Arc::clone(&ctx);
+                            crate::interrupt::INTERRUPT_CONTEXT.scope(ctx_ref, async move {
+                                execute_with_retry(
+                                    &exec_node_name,
+                                    policy,
+                                    |s, cfg| node.call(s, cfg),
+                                    task_state,
+                                    &task_config,
+                                )
+                                .await
+                            }).await
+                        } else {
+                            // Standard execution (no retry)
+                            crate::interrupt::INTERRUPT_CONTEXT.scope(ctx, async move {
+                                node.call(task_state, &task_config).await
+                            }).await
+                        }
+                    } => result,
                 };
 
                 let duration = start.elapsed();
@@ -506,6 +547,7 @@ mod tests {
             &pending_interrupts,
             &scratchpad,
             &HashMap::new(),
+            &HashMap::new(),
             0,
         )
         .await
@@ -542,6 +584,7 @@ mod tests {
             None,
             &pending_interrupts,
             &scratchpad,
+            &HashMap::new(),
             &HashMap::new(),
             0,
         )
@@ -583,6 +626,7 @@ mod tests {
             None,
             &pending_interrupts,
             &scratchpad,
+            &HashMap::new(),
             &HashMap::new(),
             0,
         )
@@ -629,6 +673,7 @@ mod tests {
             &pending_interrupts,
             &scratchpad,
             &HashMap::new(),
+            &HashMap::new(),
             0,
         )
         .await;
@@ -660,6 +705,7 @@ mod tests {
             None,
             &pending_interrupts,
             &scratchpad,
+            &HashMap::new(),
             &HashMap::new(),
             0,
         )
@@ -975,6 +1021,371 @@ mod tests {
         let update = EmptyUpdate { a: None, b: None };
         let writes = serialize_pending_writes("task-x", &update);
         assert!(writes.is_empty());
+    }
+
+    // --- Retry integration tests in execute_superstep ---
+
+    #[tokio::test]
+    async fn test_execute_superstep_with_retry_succeeds_after_failure() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        let state = TestState;
+        let attempt_count = Arc::new(AtomicU32::new(0));
+        let attempt_clone = Arc::clone(&attempt_count);
+
+        let mut nodes = indexmap::IndexMap::new();
+        nodes.insert(
+            "flaky_node".to_string(),
+            NodeFnCommand(move |_s: TestState| {
+                let counter = Arc::clone(&attempt_clone);
+                async move {
+                    let n = counter.fetch_add(1, Ordering::Relaxed);
+                    if n == 0 {
+                        Err(crate::JunctureError::execution("transient failure"))
+                    } else {
+                        Ok(crate::Command::end())
+                    }
+                }
+            })
+            .into_node("flaky_node"),
+        );
+
+        let config = RunnableConfig::new();
+        let token = CancellationToken::new();
+        let pending_interrupts = vec![];
+        let scratchpad = Scratchpad::new();
+
+        let retry_policies = {
+            let mut map = HashMap::new();
+            map.insert(
+                "flaky_node".to_string(),
+                RetryPolicy {
+                    max_attempts: 3,
+                    initial_interval: std::time::Duration::from_millis(1),
+                    backoff_factor: 2.0,
+                    max_interval: std::time::Duration::from_secs(1),
+                    jitter: false,
+                    retry_on: None,
+                },
+            );
+            map
+        };
+
+        let tasks = vec![PendingTask::pull(
+            uuid::Uuid::new_v4().to_string(),
+            "flaky_node".to_string(),
+        )];
+
+        let (result, _rx) = execute_superstep(
+            &tasks,
+            &state,
+            &nodes,
+            &config,
+            &token,
+            None,
+            &pending_interrupts,
+            &scratchpad,
+            &HashMap::new(),
+            &retry_policies,
+            0,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.len(), 1);
+        assert!(result.task_outputs[0].error.is_none());
+        assert_eq!(
+            attempt_count.load(Ordering::Relaxed),
+            2,
+            "should succeed on second attempt"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_execute_superstep_with_retry_exhausts_attempts() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        let state = TestState;
+        let attempt_count = Arc::new(AtomicU32::new(0));
+        let attempt_clone = Arc::clone(&attempt_count);
+
+        let mut nodes = indexmap::IndexMap::new();
+        nodes.insert(
+            "always_fail".to_string(),
+            NodeFnCommand(move |_s: TestState| {
+                let counter = Arc::clone(&attempt_clone);
+                async move {
+                    counter.fetch_add(1, Ordering::Relaxed);
+                    Err(crate::JunctureError::execution("persistent failure"))
+                }
+            })
+            .into_node("always_fail"),
+        );
+
+        let config = RunnableConfig::new();
+        let token = CancellationToken::new();
+        let pending_interrupts = vec![];
+        let scratchpad = Scratchpad::new();
+
+        let retry_policies = {
+            let mut map = HashMap::new();
+            map.insert(
+                "always_fail".to_string(),
+                RetryPolicy {
+                    max_attempts: 3,
+                    initial_interval: std::time::Duration::from_millis(1),
+                    backoff_factor: 2.0,
+                    max_interval: std::time::Duration::from_secs(1),
+                    jitter: false,
+                    retry_on: None,
+                },
+            );
+            map
+        };
+
+        let tasks = vec![PendingTask::pull(
+            uuid::Uuid::new_v4().to_string(),
+            "always_fail".to_string(),
+        )];
+
+        let result = execute_superstep(
+            &tasks,
+            &state,
+            &nodes,
+            &config,
+            &token,
+            None,
+            &pending_interrupts,
+            &scratchpad,
+            &HashMap::new(),
+            &retry_policies,
+            0,
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().is_execution());
+        assert_eq!(
+            attempt_count.load(Ordering::Relaxed),
+            3,
+            "should attempt exactly max_attempts times"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_execute_superstep_retry_does_not_retry_cancelled() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        let state = TestState;
+        let attempt_count = Arc::new(AtomicU32::new(0));
+        let attempt_clone = Arc::clone(&attempt_count);
+
+        let mut nodes = indexmap::IndexMap::new();
+        nodes.insert(
+            "cancel_node".to_string(),
+            NodeFnCommand(move |_s: TestState| {
+                let counter = Arc::clone(&attempt_clone);
+                async move {
+                    counter.fetch_add(1, Ordering::Relaxed);
+                    Err(crate::JunctureError::cancelled())
+                }
+            })
+            .into_node("cancel_node"),
+        );
+
+        let config = RunnableConfig::new();
+        let token = CancellationToken::new();
+        let pending_interrupts = vec![];
+        let scratchpad = Scratchpad::new();
+
+        let retry_policies = {
+            let mut map = HashMap::new();
+            map.insert(
+                "cancel_node".to_string(),
+                RetryPolicy {
+                    max_attempts: 3,
+                    initial_interval: std::time::Duration::from_millis(1),
+                    backoff_factor: 2.0,
+                    max_interval: std::time::Duration::from_secs(1),
+                    jitter: false,
+                    retry_on: None,
+                },
+            );
+            map
+        };
+
+        let tasks = vec![PendingTask::pull(
+            uuid::Uuid::new_v4().to_string(),
+            "cancel_node".to_string(),
+        )];
+
+        let result = execute_superstep(
+            &tasks,
+            &state,
+            &nodes,
+            &config,
+            &token,
+            None,
+            &pending_interrupts,
+            &scratchpad,
+            &HashMap::new(),
+            &retry_policies,
+            0,
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().is_cancelled(),
+            "cancelled errors should not be retried"
+        );
+        assert_eq!(
+            attempt_count.load(Ordering::Relaxed),
+            1,
+            "cancelled errors should not be retried"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_execute_superstep_retry_only_applies_to_configured_node() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        let state = TestState;
+        let attempt_count_a = Arc::new(AtomicU32::new(0));
+        let attempt_count_b = Arc::new(AtomicU32::new(0));
+        let clone_a = Arc::clone(&attempt_count_a);
+        let clone_b = Arc::clone(&attempt_count_b);
+
+        let mut nodes = indexmap::IndexMap::new();
+        // node_a has a retry policy
+        nodes.insert(
+            "node_a".to_string(),
+            NodeFnCommand(move |_s: TestState| {
+                let counter = Arc::clone(&clone_a);
+                async move {
+                    counter.fetch_add(1, Ordering::Relaxed);
+                    Err(crate::JunctureError::execution("node_a fails"))
+                }
+            })
+            .into_node("node_a"),
+        );
+        // node_b has NO retry policy
+        nodes.insert(
+            "node_b".to_string(),
+            NodeFnCommand(move |_s: TestState| {
+                let counter = Arc::clone(&clone_b);
+                async move {
+                    counter.fetch_add(1, Ordering::Relaxed);
+                    Err(crate::JunctureError::execution("node_b fails"))
+                }
+            })
+            .into_node("node_b"),
+        );
+
+        let config = RunnableConfig::new();
+        let token = CancellationToken::new();
+        let pending_interrupts = vec![];
+        let scratchpad = Scratchpad::new();
+
+        // Only node_a has a retry policy
+        let retry_policies = {
+            let mut map = HashMap::new();
+            map.insert(
+                "node_a".to_string(),
+                RetryPolicy {
+                    max_attempts: 3,
+                    initial_interval: std::time::Duration::from_millis(1),
+                    backoff_factor: 2.0,
+                    max_interval: std::time::Duration::from_secs(1),
+                    jitter: false,
+                    retry_on: None,
+                },
+            );
+            map
+        };
+
+        // node_b has an error handler so the superstep doesn't abort
+        let error_handlers = {
+            let mut map = HashMap::new();
+            map.insert("node_b".to_string(), "handler".to_string());
+            map
+        };
+
+        let tasks = vec![
+            PendingTask::pull(uuid::Uuid::new_v4().to_string(), "node_a".to_string()),
+            PendingTask::pull(uuid::Uuid::new_v4().to_string(), "node_b".to_string()),
+        ];
+
+        let result = execute_superstep(
+            &tasks,
+            &state,
+            &nodes,
+            &config,
+            &token,
+            None,
+            &pending_interrupts,
+            &scratchpad,
+            &error_handlers,
+            &retry_policies,
+            0,
+        )
+        .await;
+
+        // node_a exhausted retries (3 attempts), node_b failed once with error handler
+        // Since node_a has no error handler and exhausted retries, the superstep fails
+        let err = result.unwrap_err();
+        assert!(err.is_execution(), "expected execution error, got: {err}");
+        assert_eq!(
+            attempt_count_a.load(Ordering::Relaxed),
+            3,
+            "node_a should retry max_attempts times"
+        );
+        assert_eq!(
+            attempt_count_b.load(Ordering::Relaxed),
+            1,
+            "node_b should execute only once (no retry policy)"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_execute_superstep_no_retry_policy_same_behavior() {
+        // Verify that without retry policies, behavior is identical to before
+        let state = TestState;
+
+        let mut nodes = indexmap::IndexMap::new();
+        nodes.insert(
+            "simple_node".to_string(),
+            NodeFnCommand(|_s| async move { Ok(crate::Command::end()) }).into_node("simple_node"),
+        );
+
+        let config = RunnableConfig::new();
+        let token = CancellationToken::new();
+        let pending_interrupts = vec![];
+        let scratchpad = Scratchpad::new();
+
+        let tasks = vec![PendingTask::pull(
+            uuid::Uuid::new_v4().to_string(),
+            "simple_node".to_string(),
+        )];
+
+        let (result, _rx) = execute_superstep(
+            &tasks,
+            &state,
+            &nodes,
+            &config,
+            &token,
+            None,
+            &pending_interrupts,
+            &scratchpad,
+            &HashMap::new(),
+            &HashMap::new(),
+            0,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.len(), 1);
+        assert!(result.task_outputs[0].error.is_none());
     }
 }
 

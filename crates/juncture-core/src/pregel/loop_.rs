@@ -190,6 +190,13 @@ pub struct PregelLoop<S: State> {
     /// task fails and its node has a handler in this map, the engine creates
     /// a recovery task targeting the handler instead of canceling all tasks.
     error_handler_map: HashMap<String, String>,
+
+    /// Per-node retry policies extracted from builder metadata.
+    ///
+    /// When a node has an entry here, its execution in `execute_superstep` is
+    /// wrapped with [`crate::graph::builder::execute_with_retry`] for automatic
+    /// retries with exponential backoff and jitter.
+    retry_policies: HashMap<String, crate::graph::RetryPolicy>,
 }
 
 impl<S: State> std::fmt::Debug for PregelLoop<S> {
@@ -216,6 +223,7 @@ impl<S: State> std::fmt::Debug for PregelLoop<S> {
             .field("interrupt_versions_seen", &self.interrupt_versions_seen)
             .field("superstep_start", &self.superstep_start.is_some())
             .field("error_handler_map", &self.error_handler_map.len())
+            .field("retry_policies", &self.retry_policies.keys().collect::<Vec<_>>())
             .finish()
     }
 }
@@ -326,6 +334,7 @@ impl<S: State> PregelLoop<S> {
             interrupt_versions_seen: HashMap::new(),
             superstep_start: None,
             error_handler_map,
+            retry_policies: HashMap::new(),
         })
     }
 
@@ -360,6 +369,19 @@ impl<S: State> PregelLoop<S> {
     /// ```
     pub fn set_budget_tracker(&mut self, tracker: BudgetTracker) {
         self.budget_tracker = Some(tracker);
+    }
+
+    /// Set per-node retry policies
+    ///
+    /// Each entry maps a node name to its [`RetryPolicy`]. During superstep
+    /// execution, nodes with a configured policy are wrapped with
+    /// [`crate::graph::builder::execute_with_retry`] for automatic retries
+    /// with exponential backoff and jitter.
+    pub fn set_retry_policies(
+        &mut self,
+        policies: HashMap<String, crate::graph::RetryPolicy>,
+    ) {
+        self.retry_policies = policies;
     }
 
     /// Compute initial tasks from entry point
@@ -584,6 +606,7 @@ impl<S: State> PregelLoop<S> {
             &self.pending_interrupts,
             &self.scratchpad,
             &self.error_handler_map,
+            &self.retry_policies,
             self.step,
         )
         .await?;
