@@ -1111,6 +1111,19 @@ crates/juncture/src/
 
 ---
 
+## 11. Implementation Enhancements (Category C)
+
+1. **[C-08-001]** ToolError has additional variants: ToolNotFound, ValidationFailed, Intercepted
+2. **[C-08-002]** CompositeInterceptor/CompositeTransformer for chaining behaviors
+3. **[C-08-003]** ToolError helper methods (constructors + is_fatal()/is_retryable())
+4. **[C-08-004]** ToolDefinition provider conversion methods (to_openai_format, to_anthropic_format)
+5. **[C-08-005]** ToolNodeConfig with rich validation/interceptor/transformer options
+6. **[C-08-006]** PricingTable with comprehensive Claude/GPT/Gemini coverage
+7. **[C-08-007]** RetryingModel with full exponential backoff + retry_after extraction
+8. **[C-08-008]** MessagesState uses #[derive(State)] with custom messages_reducer
+
+---
+
 ## 源码参考索引
 
 | LangGraph 源码路径 | 说明 |
