@@ -112,7 +112,7 @@ pub const REMOVE_ALL_MESSAGES: &str = "__remove_all__";
 /// # Examples
 ///
 /// ```
-/// use juncture_core::state::MessagesState;
+/// use juncture_core::state::messages::{MessagesState, Message};
 ///
 /// let mut state = MessagesState::default();
 /// state.messages.push(Message::human("Hello"));

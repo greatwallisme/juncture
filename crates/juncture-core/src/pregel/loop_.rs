@@ -708,7 +708,7 @@ impl<S: State> PregelLoop<S> {
     /// ```
     #[expect(
         clippy::too_many_lines,
-        reason = "after_tick requires multiple steps: apply writes, bump versions, emit events, compute tasks, drain interrupts, check interrupts, finish channels, increment step"
+        reason = "after_tick requires multiple steps: apply writes, bump versions, consume channels, emit events, compute tasks, drain interrupts, check interrupts, finish channels, increment step"
     )]
     pub async fn after_tick(&mut self, result: SuperstepResult<S>) -> Result<(), JunctureError>
     where
@@ -730,6 +730,12 @@ impl<S: State> PregelLoop<S> {
         // fields get update+superstep increments too, providing a consistent
         // view of write activity across all channels.
         self.update_delta_counters(&total_changed);
+
+        // Consume all triggered channels after writes have been applied.
+        // For EphemeralChannel fields, this marks the consumed flag so the
+        // channel knows its value has been read by the framework. The value
+        // itself is cleared by the subsequent reset_ephemeral() call.
+        self.consume_triggered_channels(&total_changed);
 
         // Mark versions as consumed after bumping
         for task_output in &result.task_outputs {
@@ -1573,6 +1579,24 @@ impl<S: State> PregelLoop<S> {
     fn finish_all_channels(&mut self) {
         for &field_idx in S::replace_after_finish_field_indices() {
             self.state.finish_field(field_idx);
+        }
+    }
+
+    /// Consume all channels that were triggered (changed) in the current superstep.
+    ///
+    /// Called after `apply_writes()` in `after_tick()` to mark triggered channels
+    /// as consumed. For ephemeral fields backed by `EphemeralChannel`, this sets
+    /// the consumed flag. Other channel types (`UntrackedChannel`,
+    /// `LastValueAfterFinishChannel`, `DeltaChannel`) have no-op consume semantics.
+    ///
+    /// Only calls `consume_field()` for fields that actually changed, as indicated
+    /// by the `FieldsChanged` bitmask. This matches the design spec where all
+    /// triggered channels call `consume()` after `apply_writes()`.
+    fn consume_triggered_channels(&mut self, changed: &crate::FieldsChanged) {
+        for &field_idx in S::consume_field_indices() {
+            if changed.has_field(field_idx) {
+                self.state.consume_field(field_idx);
+            }
         }
     }
 
