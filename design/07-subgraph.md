@@ -879,32 +879,3 @@ let subgraph_stream = subgraph.stream(input, &config, StreamMode::Updates).await
     .filter_map(|event| transformer.transform(event));
 ```
 
----
-
-## 10. Implementation Enhancements (Category C)
-
-1. **[C-07-001]** SubgraphTransformer uses `/` separator for stream events (more readable than `:`)
-2. **[C-07-002]** CheckpointNamespace implements Display trait for idiomatic formatting
-3. **[C-07-003]** SubgraphTransformer provides with_filter_types() convenience method
-4. **[C-07-004]** SubgraphConfig simplified to single persistence field (cleaner than design)
-5. **[C-07-005]** StateSubset proc-macro generates stricter trait bounds (Clone + Send + Sync + Debug)
-6. **[C-07-006]** compute_child_namespace returns Option (Stateless mode returns None correctly)
-7. **[C-07-007]** ParentCommand implemented as JunctureError variant (reuses error infrastructure)
-8. **[C-07-008]** BubbleUp enum has richer variants: Interrupt, Drained, ParentCommand
-
----
-
-## 源码参考索引
-
-| 概念 | LangGraph 源码位置 | 说明 |
-|------|-------------------|------|
-| 子图作为节点 | `langgraph/graph/state.py:1443` | attach_node() 处理 CompiledGraph 作为节点 |
-| checkpoint_ns 格式 | `langgraph/_internal/_constants.py` (NS_SEP, NS_END) | 命名空间分隔符 `:`、嵌套分隔符 `\|` |
-| 子图 checkpoint 隔离 | `langgraph/pregel/_loop.py` | 子图使用独立 checkpoint_ns |
-| 子图 streaming | `langgraph-doc/use-subgraphs.md` | subgraphs=True 参数 |
-| 子图持久化模式 | `langgraph-doc/use-subgraphs.md` | checkpointer=None/True/False |
-| 中断传播 | `langgraph/errors.py:101` | GraphInterrupt 从子图冒泡到父图 |
-| Send + 子图 | `langgraph/types.py:654` | Send 目标可以是子图节点 |
-| 子图 state 映射 | `langgraph-doc/use-subgraphs.md` | 两种模式：共享 key / 包装函数 |
-| CONFIG_KEY_CHECKPOINT_NS | `langgraph/_internal/_constants.py` | checkpoint 命名空间配置键 |
-| 子图 input/output schema | `langgraph/graph/state.py:130` | StateGraph 支持 input_schema/output_schema |

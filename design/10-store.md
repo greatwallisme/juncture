@@ -710,25 +710,3 @@ let _sweep_handle = store.start_sweep_task();
 | `batch(ops: Iterable[Op])` | `batch(ops: Vec<StoreOp>)` | Rust 所有权模型 |
 | `Store` 基类继承 | `Store` trait | Rust 无继承，使用 trait |
 
----
-
-## 11. Implementation Enhancements (Category C)
-
-1. **[C-10-001]** FilterExpr::matches() evaluation engine with dot-notation path access and type-aware JSON comparison
-2. **[C-10-002]** Item::is_expired() helper method for clean TTL checking
-
----
-
-## 源码参考索引
-
-| Juncture 概念 | LangGraph 源码 |
-|---------------|----------------|
-| Store trait | `libs/checkpoint/langgraph/store/base/__init__.py` - `BaseStore` |
-| Item | `libs/checkpoint/langgraph/store/base/__init__.py:51` - `Item` class |
-| SearchQuery | `libs/checkpoint/langgraph/store/base/__init__.py:203` - `SearchOp` |
-| 过滤操作符 | `libs/checkpoint/langgraph/store/base/__init__.py:250` - filter 支持 |
-| 向量搜索 | `libs/checkpoint/langgraph/store/base/__init__.py:570` - `IndexConfig` |
-| 命名空间列举 | `libs/checkpoint/langgraph/store/base/__init__.py:368` - `ListNamespacesOp` |
-| MemoryStore | `libs/checkpoint/langgraph/store/memory/__init__.py` - `InMemoryStore` |
-| TTL 配置 | `libs/checkpoint/langgraph/store/base/__init__.py:545` - `TTLConfig` |
-| 批量操作 | `libs/checkpoint/langgraph/store/base/__init__.py:724` - `batch/abatch` |

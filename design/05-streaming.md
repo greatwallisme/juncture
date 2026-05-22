@@ -811,32 +811,3 @@ crates/juncture-core/src/
 
 StreamWriter 通过 `RunnableConfig` 或节点参数传递给用户代码，不需要用户直接依赖 `juncture-core` 的内部类型。
 
----
-
-## 9. Implementation Enhancements (Category C)
-
-The following enhancements are present in the implementation but not described in the design specification above:
-
-1. **C-05-001 - FilteredValues/FilteredUpdates events**: When `output_keys` filtering is configured, the implementation emits `FilteredValues` and `FilteredUpdates` events that contain only the specified fields rather than the entire state. This avoids cloning the full state for every superstep, reducing memory overhead in large-state graphs.
-
-2. **C-05-002 - StreamResumption with should_skip()**: The `StreamResumption` struct provides a `should_skip()` method for checkpoint-based stream replay. During resumption, this method filters out events that were already delivered in a previous stream session, enabling seamless reconnection without duplicate events.
-
-3. **C-05-003 - StreamHandle with run_id exposure**: The `StreamHandle` exposes the `run_id` for observability and resumption correlation. This enables external monitoring systems to track stream sessions across reconnections and correlate stream events with the originating graph execution run.
-
----
-
-## 源码参考索引
-
-| LangGraph 源码路径 | 说明 |
-|---|---|
-| `langgraph/libs/langgraph/langgraph/types.py:120` | StreamMode 类型定义（Literal 联合） |
-| `langgraph/libs/langgraph/langgraph/pregel/_loop.py:1348` | _emit() — 事件发射入口 |
-| `langgraph/libs/langgraph/langgraph/pregel/_loop.py:583` | tick() — stream 事件在此触发 |
-| `langgraph/libs/langgraph/langgraph/pregel/_loop.py:667` | after_tick() — superstep 后 stream 发射 |
-| `langgraph/libs/langgraph/langgraph/stream/__init__.py` | Stream 基础设施模块 |
-| `langgraph/libs/langgraph/langgraph/stream/run_stream.py` | 运行时 stream 管理 |
-| `langgraph/libs/langgraph/langgraph/stream/_types.py` | StreamMode 导入与类型 |
-| `langgraph/libs/langgraph/langgraph/stream/_mux.py` | 多模式 stream 复用 |
-| `langgraph/libs/langgraph/langgraph/stream/transformers.py` | Stream 数据转换器 |
-| `langgraph/libs/langgraph/langgraph/pregel/_messages.py` | Messages stream 模式实现 |
-| `langgraph-doc/streaming.md` | Streaming 官方文档 |

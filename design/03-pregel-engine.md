@@ -2152,33 +2152,3 @@ let previous: Option<Output> = checkpoint
     .and_then(|v| serde_json::from_value(v.clone()).ok());
 ```
 
----
-
-## 15. Implementation Enhancements (Category C)
-
-The following items represent code-level enhancements that extend beyond the design specification. These are categorized as Category C (Implementation Enhancements) findings from the design-to-code conformance audit.
-
-- **C-03-001: Enhanced error handler integration** -- Implementation extends error handling with `error_handler_map` (node-name to error-handler mapping), `schedule_error_handlers()` (dynamic recovery task creation for failed nodes), and `TaskOutput::error` variant for propagating error metadata through the superstep result pipeline.
-- **C-03-002: Comprehensive OpenTelemetry integration** -- Implementation adds structured span attributes (node name, task ID, superstep number, field versions) and metrics (node duration histograms, superstep latency, task counts) beyond the basic tracing specification, enabling production observability.
-- **C-03-003: StreamHandle with run_id** -- Implementation introduces `StreamHandle` carrying a `run_id` for stream resumption and correlation, allowing consumers to reconnect to an interrupted stream and correlate events across restarts.
-- **C-03-004: Interrupt version tracking** -- Implementation adds `interrupt_versions_seen` tracking to prevent infinite interrupt loops where the same channel update triggers the same interrupt repeatedly on resume.
-- **C-03-005: Multi-interrupt matching with scratchpad** -- Implementation supports multiple pending interrupts with a scratchpad buffer and three resume strategies (Single, ById, ByNamespace), enabling selective interruption of specific paths in parallel execution.
-- **C-03-006: finish_all_channels() implementation** -- Implementation provides a concrete `finish_all_channels()` that calls `State::finish_field()` on every field when the graph completes, enabling `LastValueAfterFinishChannel` semantics where values become available only after all nodes finish.
-- **C-03-007: RunControl graceful shutdown with drain** -- Implementation integrates `RunControl::drain_requested()` into the tick() loop with proper checkpoint saving before shutdown, ensuring graceful termination under SIGTERM with full state persistence.
-- **C-03-008: GraphCallbackHandler lifecycle callbacks** -- Implementation introduces `GraphCallbackHandler` with lifecycle hooks (on_graph_start, on_graph_end, on_node_start, on_node_end, on_superstep_end) called throughout the Pregel engine, enabling external monitoring and audit logging.
-
----
-
-## 16. 源码参考索引
-
-| Juncture 模块 | LangGraph 对应源码 | 说明 |
-|---|---|---|
-| `pregel/loop_.rs` | `langgraph/pregel/_loop.py` | PregelLoop 状态机 |
-| `pregel/loop_.rs::tick()` | `_loop.py:583-665` | tick() 方法 |
-| `pregel/loop_.rs::after_tick()` | `_loop.py:667-705` | after_tick() 方法 |
-| `pregel/runner.rs` | `langgraph/pregel/_runner.py:135` | PregelRunner 并发行 |
-| `pregel/scheduler.rs` | `langgraph/pregel/_algo.py:392-450` | prepare_next_tasks |
-| `pregel/loop_.rs::apply_writes()` | `langgraph/pregel/_algo.py:260-345` | apply_writes |
-| `pregel/budget.rs` | 无对应（Juncture 独有） | 预算控制 |
-| `config.rs::RunnableConfig` | `langchain_core/runnables/config.py` | 运行配置 |
-| `error.rs::JunctureError` | `langgraph/errors.py` | 错误类型 |

@@ -1545,24 +1545,3 @@ DeltaChannel 的 reducer 必须满足：
 | `langgraph/libs/langgraph/langgraph/pregel/_loop.py:831` | channel_versions 使用位置 |
 | `langgraph-doc/persistence.md` | Checkpoint 与 channel_versions 文档 |
 
----
-
-## 8. Implementation Enhancements (Category C)
-
-The implementation exceeds the design in the following areas:
-
-- **[C-01-001]** Overwrite&lt;T&gt; serialization correctly uses `{"__overwrite__": value}` format per design. The serde implementation matches LangGraph Python's wire format exactly, ensuring checkpoint compatibility beyond the design's specification.
-
-- **[C-01-002]** REMOVE_ALL_MESSAGES provides factory methods (`Message::remove_all()`, `Message::remove()`) instead of the design's const-based approach. More ergonomic and avoids `String::new()` limitations in const context.
-
-- **[C-01-003]** `Message::content_text()` helper extracts text from both `Content::Text` and `Content::MultiPart` variants. A convenience method not described in the design.
-
-- **[C-01-004]** `Message::ai_with_tool_calls()` constructor creates AI messages with tool calls in a single call. Eliminates boilerplate that the design's basic constructors require.
-
-- **[C-01-005]** DeltaBlob uses `serde_json::Value` for its `Snapshot` variant instead of generic `T`. Simplifies checkpoint serialization by avoiding generic serde trait constraints.
-
-- **[C-01-006]** `FieldVersions` derives `Debug`. Enables structured logging and troubleshooting output not required by the design.
-
-- **[C-01-007]** `FieldsChanged` methods (`is_empty()`, `has_field()`) are `const fn`. Enables compile-time evaluation and zero-cost field tracking beyond the design's runtime-only specification.
-
-- **[C-01-008]** Proc-macro supports 8 reducer types (`replace`, `append`, `ephemeral`, `custom`, `last_write_wins`, `any`, `messages`, `untracked`) rather than the 5 listed in design section 2.4. Covers additional LangGraph semantics not captured in the original design.

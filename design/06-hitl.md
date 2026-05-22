@@ -968,16 +968,3 @@ pub struct Runtime<C: Clone + Send + Sync + 'static> {
 }
 ```
 
----
-
-## 10. Implementation Enhancements (Category C)
-
-The following enhancements are present in the implementation but not described in the design specification above:
-
-1. **C-06-001 - Interrupt ID generation with xxh3_128**: Interrupt IDs are generated using `xxhash_rust::xxh3::xxh3_128` for deterministic, collision-resistant IDs. The 128-bit hash produces 32-character hex strings, providing stronger collision resistance than XxHash64 while maintaining deterministic output for the same (node_name, index) input pair.
-
-2. **C-06-002 - Multi-interrupt resume with 3-strategy matching**: The multi-interrupt resume algorithm is fully implemented with three matching strategies: `Single` (one value resumes all pending interrupts), `ById` (HashMap matching by interrupt ID), and `ByNamespace` (namespace-routed resume for subgraph interrupts). The algorithm correctly handles mixed strategies and processes interrupts in order.
-
-3. **C-06-003 - Scratchpad lifecycle management**: Scratchpad integration is complete with full lifecycle management including interrupt processed-tracking, null-resume support via `get_null_resume()`, and task-level temporary data storage. The scratchpad properly resets between task executions and persists interrupt-processed state across node re-executions.
-
-4. **C-06-004 - Checkpoint persistence with CheckpointSource::Interrupt**: Interrupt checkpoints are fully persisted with `CheckpointSource::Interrupt` source tagging. Each checkpoint includes pending interrupts, the interrupted node's state, and proper metadata for accurate resume routing. This ensures that interrupted graph executions survive process restarts and can be resumed from the correct state.
