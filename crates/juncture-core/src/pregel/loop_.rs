@@ -1264,11 +1264,12 @@ impl<S: State> PregelLoop<S> {
                 // Reset delta counters after a successful interrupt checkpoint
                 // save, same as superstep checkpoint logic.
                 self.reset_delta_counters();
-                tracing::debug!(
-                    name: "juncture.checkpoint.interrupt.saved",
-                    node = node,
-                    step = self.step,
-                    "Interrupt checkpoint saved"
+                tracing::info!(
+                    name: "juncture.checkpoint.put",
+                    checkpoint_id = %self.runnable_config.checkpoint_id.as_deref().unwrap_or("unknown"),
+                    checkpoint_step = self.step,
+                    checkpoint_source = "Interrupt",
+                    "Interrupt checkpoint persisted"
                 );
                 // Notify callback handler about checkpoint save
                 if let Some(ref cp_id) = self.runnable_config.checkpoint_id {
@@ -1394,10 +1395,12 @@ impl<S: State> PregelLoop<S> {
                 // The checkpoint now carries the cumulative counters, and a
                 // fresh counting window starts for the next checkpoint cycle.
                 self.reset_delta_counters();
-                tracing::debug!(
-                    name: "juncture.checkpoint.superstep.saved",
-                    step = self.step,
-                    "Superstep checkpoint saved"
+                tracing::info!(
+                    name: "juncture.checkpoint.put",
+                    checkpoint_id = %self.runnable_config.checkpoint_id.as_deref().unwrap_or("unknown"),
+                    checkpoint_step = self.step,
+                    checkpoint_source = "Loop",
+                    "Superstep checkpoint persisted"
                 );
                 if let Some(ref cp_id) = self.runnable_config.checkpoint_id {
                     self.on_checkpoint_saved(cp_id, self.step);
