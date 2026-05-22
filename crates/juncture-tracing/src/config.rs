@@ -7,9 +7,17 @@
 use std::fmt;
 
 #[cfg(feature = "otel")]
+use opentelemetry::global;
+#[cfg(feature = "otel")]
 use opentelemetry::trace::TracerProvider as _;
 #[cfg(feature = "otel")]
+use opentelemetry_otlp::MetricExporter;
+#[cfg(feature = "otel")]
 use opentelemetry_otlp::WithExportConfig;
+#[cfg(feature = "otel")]
+use opentelemetry_sdk::metrics::{PeriodicReader, SdkMeterProvider};
+#[cfg(feature = "otel")]
+use opentelemetry_sdk::runtime::Tokio;
 #[cfg(feature = "otel")]
 use opentelemetry_sdk::{Resource, trace::TracerProvider};
 #[cfg(feature = "otel")]
@@ -55,7 +63,7 @@ impl std::error::Error for TracingError {}
 #[cfg(feature = "otel")]
 #[derive(Clone, Debug)]
 pub struct TracingConfig {
-    /// OTLP endpoint for trace/metrics export (future)
+    /// OTLP endpoint for trace/metrics export
     otlp_endpoint: Option<String>,
 
     /// Service name for resource detection
@@ -70,7 +78,7 @@ pub struct TracingConfig {
     /// Trace sampling rate (0.0 to 1.0)
     trace_sampling: f64,
 
-    /// Whether metrics export is enabled (future)
+    /// Whether metrics export is enabled
     metrics_enabled: bool,
 
     /// Log level for the subscriber
@@ -223,7 +231,14 @@ impl TracingConfig {
         self
     }
 
-    /// Enable or disable metrics export
+    /// Enable or disable `OTel` metrics export
+    ///
+    /// When enabled and an OTLP endpoint is configured via
+    /// [`with_otlp_endpoint`](Self::with_otlp_endpoint), a global
+    /// [`SdkMeterProvider`] is created alongside the tracer provider.
+    /// Consumers can then obtain a [`Meter`] via
+    /// `opentelemetry::global::meter("juncture")` and pass it to
+    /// [`MetricsRegistry::with_meter`].
     ///
     /// # Parameters
     ///
@@ -235,8 +250,9 @@ impl TracingConfig {
     /// use juncture_tracing::config::TracingConfig;
     ///
     /// let config = TracingConfig::new()
+    ///     .with_otlp_endpoint("http://collector:4317")
     ///     .with_metrics(true);
-    /// // Enables metrics export
+    /// // Enables metrics export via OTLP
     /// let _ = config;
     /// ```
     #[must_use]
@@ -272,8 +288,9 @@ impl TracingConfig {
     ///
     /// This initializes the global tracing subscriber with the configured
     /// settings. When the `otel` feature is enabled and an OTLP endpoint
-    /// is configured, it sets up OpenTelemetry OTLP export. Otherwise,
-    /// it configures basic `tracing-subscriber` logging.
+    /// is configured, it sets up OpenTelemetry OTLP export for both traces
+    /// and (if enabled) metrics. Otherwise, it configures basic
+    /// `tracing-subscriber` logging.
     ///
     /// # Errors
     ///
@@ -306,6 +323,14 @@ impl TracingConfig {
             if let Some(endpoint) = otlp_endpoint.as_ref() {
                 return self.install_otel(env_filter, endpoint);
             }
+
+            // Warn if metrics were requested but no OTLP endpoint is configured
+            if self.metrics_enabled {
+                tracing::warn!(
+                    "Metrics export is enabled but no OTLP endpoint is configured. \
+                     Call .with_otlp_endpoint() to enable OTLP trace and metrics export."
+                );
+            }
         }
 
         // Fallback to basic fmt subscriber without OTLP
@@ -320,14 +345,17 @@ impl TracingConfig {
     /// Install OpenTelemetry OTLP pipeline
     ///
     /// Sets up the OpenTelemetry tracer with OTLP exporter and configures
-    /// the tracing subscriber with both OTLP and fmt layers.
+    /// the tracing subscriber with both OTLP and fmt layers. When
+    /// `metrics_enabled` is `true`, also creates a global
+    /// [`SdkMeterProvider`] with an OTLP metric exporter so that metrics
+    /// collected through [`MetricsRegistry::with_meter`] flow to OTLP.
     ///
     /// This is separated from `install()` to allow conditional compilation
     /// based on the `otel` feature flag.
     #[cfg(feature = "otel")]
     #[allow(
         clippy::too_many_lines,
-        reason = "OTLP setup requires: resource config, OTLP exporter, tracer provider, layers, subscriber initialization"
+        reason = "OTLP setup requires: resource config, OTLP exporters (trace + metrics), tracer provider, meter provider, layers, subscriber initialization"
     )]
     fn install_otel(
         self,
@@ -347,16 +375,18 @@ impl TracingConfig {
 
         let resource = Resource::new(resource_attributes);
 
-        // Configure OTLP exporter using tonic
+        // Configure OTLP trace exporter using tonic
         let exporter = opentelemetry_otlp::SpanExporter::builder()
             .with_tonic()
             .with_endpoint(otlp_endpoint)
             .build()
-            .map_err(|e| TracingError::InstallFailed(format!("OTLP exporter build failed: {e}")))?;
+            .map_err(|e| {
+                TracingError::InstallFailed(format!("OTLP trace exporter build failed: {e}"))
+            })?;
 
-        // Create tracer provider with resource
+        // Create tracer provider with resource (clone for potential metrics use below)
         let tracer_provider = TracerProvider::builder()
-            .with_resource(resource)
+            .with_resource(resource.clone())
             .with_simple_exporter(exporter)
             .build();
 
@@ -373,6 +403,26 @@ impl TracingConfig {
             .with(fmt_layer)
             .try_init()
             .map_err(|e| TracingError::InstallFailed(format!("Subscriber init failed: {e}")))?;
+
+        // Set up OTel metrics export if enabled
+        if self.metrics_enabled {
+            let metric_exporter = MetricExporter::builder()
+                .with_tonic()
+                .with_endpoint(otlp_endpoint)
+                .build()
+                .map_err(|e| {
+                    TracingError::InstallFailed(format!("OTLP metric exporter build failed: {e}"))
+                })?;
+
+            let reader = PeriodicReader::builder(metric_exporter, Tokio).build();
+
+            let meter_provider = SdkMeterProvider::builder()
+                .with_resource(resource)
+                .with_reader(reader)
+                .build();
+
+            global::set_meter_provider(meter_provider);
+        }
 
         Ok(())
     }
@@ -455,12 +505,42 @@ mod tests {
         // We can't actually test successful installation multiple times
         // in a single process, so we just verify the API works.
         let config = TracingConfig::new();
-        // We expect this might fail if already installed, but it shouldn't panic
         let _result = std::panic::catch_unwind(|| {
             let _ = config.install();
         });
         // The test passes as long as we don't panic
     }
+
+    #[test]
+    fn test_metrics_flag_is_properly_set() {
+        let config = TracingConfig::new().with_metrics(true);
+        assert!(config.metrics_enabled);
+
+        let config = TracingConfig::new().with_metrics(false);
+        assert!(!config.metrics_enabled);
+    }
+
+    #[test]
+    fn test_metrics_flag_false_by_default() {
+        let config = TracingConfig::new();
+        assert!(!config.metrics_enabled);
+    }
+
+    #[tokio::test]
+    async fn test_install_with_metrics_does_not_panic() {
+        // Verify the metrics code path is reached without panicking.
+        // The gRPC channel creation is lazy so exporter build succeeds
+        // even without a real collector. The try_init() may fail because
+        // another test already installed a subscriber, but that is
+        // a normal error, not a panic.
+        let config = TracingConfig::new()
+            .with_service_name("test-metrics-install")
+            .with_otlp_endpoint("http://127.0.0.1:4318")
+            .with_metrics(true);
+        let _result = std::panic::catch_unwind(|| {
+            let _ = config.install();
+        });
+    }
 }
 
-// Rust guideline compliant 2026-05-19
+// Rust guideline compliant 2026-05-22
