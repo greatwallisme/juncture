@@ -351,6 +351,20 @@ impl ToolNode {
                 return Err(e);
             }
 
+            // Validate input against the tool's JSON schema if enabled
+            if self.validate_input
+                && let Err(e) = self.validate_tool_call(&tool_call)
+            {
+                if self.handle_errors {
+                    tool_messages.push(Message::tool_result(
+                        tool_call.id.clone(),
+                        format!("Error: {e}"),
+                    ));
+                    continue;
+                }
+                return Err(e);
+            }
+
             let interceptor = Arc::clone(&interceptor);
 
             results.spawn(async move {
@@ -501,6 +515,174 @@ impl ToolNode {
     pub fn tool_count(&self) -> usize {
         self.tools.len()
     }
+
+    /// Validate tool call arguments against the registered tool's JSON schema
+    ///
+    /// Checks that the tool exists and that the arguments conform to its schema.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ToolError::ValidationFailed`] if:
+    /// - The tool is not registered
+    /// - The arguments do not match the tool's JSON schema
+    fn validate_tool_call(&self, tool_call: &ToolCall) -> Result<(), ToolError> {
+        let tool = self.tools.get(&tool_call.name).ok_or_else(|| {
+            ToolError::validation_failed(format!(
+                "Tool '{}' not found in registered tools",
+                tool_call.name
+            ))
+        })?;
+        Self::validate_arguments_against_schema(&tool_call.arguments, &tool.schema())
+    }
+
+    /// Validate JSON arguments against a JSON Schema
+    ///
+    /// Performs basic structural validation:
+    /// - Type checking (object, array, string, number, boolean)
+    /// - Required property verification for object schemas
+    /// - Property type matching
+    fn validate_arguments_against_schema(
+        arguments: &serde_json::Value,
+        schema: &serde_json::Value,
+    ) -> Result<(), ToolError> {
+        let Some(schema_obj) = schema.as_object() else {
+            return Ok(());
+        };
+
+        if schema_obj.is_empty() {
+            return Ok(());
+        }
+
+        // Check the schema-level type
+        let Some(schema_type) = schema.get("type").and_then(serde_json::Value::as_str) else {
+            return Ok(());
+        };
+
+        match schema_type {
+            "object" => Self::validate_object_arguments(arguments, schema)?,
+            "array" => {
+                if !arguments.is_array() {
+                    return Err(ToolError::validation_failed(format!(
+                        "Expected array arguments, got '{}'",
+                        Self::value_type_name(arguments)
+                    )));
+                }
+            }
+            "string" => {
+                if !arguments.is_string() {
+                    return Err(ToolError::validation_failed(format!(
+                        "Expected string arguments, got '{}'",
+                        Self::value_type_name(arguments)
+                    )));
+                }
+            }
+            "number" | "integer" => {
+                if !arguments.is_number() {
+                    return Err(ToolError::validation_failed(format!(
+                        "Expected number arguments, got '{}'",
+                        Self::value_type_name(arguments)
+                    )));
+                }
+            }
+            "boolean" => {
+                if !arguments.is_boolean() {
+                    return Err(ToolError::validation_failed(format!(
+                        "Expected boolean arguments, got '{}'",
+                        Self::value_type_name(arguments)
+                    )));
+                }
+            }
+            _ => {} // Unknown type, skip validation
+        }
+
+        Ok(())
+    }
+
+    /// Validate object-type arguments against an object schema
+    fn validate_object_arguments(
+        arguments: &serde_json::Value,
+        schema: &serde_json::Value,
+    ) -> Result<(), ToolError> {
+        if !arguments.is_object() {
+            return Err(ToolError::validation_failed(format!(
+                "Expected object arguments, got '{}'",
+                Self::value_type_name(arguments)
+            )));
+        }
+
+        // Check required fields exist
+        if let Some(required) = schema.get("required").and_then(|r| r.as_array()) {
+            let obj = arguments.as_object().expect("already checked is_object");
+            for field in required {
+                let field_name = field.as_str().ok_or_else(|| {
+                    ToolError::validation_failed(
+                        "Invalid schema: required field name is not a string".to_string(),
+                    )
+                })?;
+                if !obj.contains_key(field_name) {
+                    return Err(ToolError::validation_failed(format!(
+                        "Missing required field: '{field_name}'"
+                    )));
+                }
+            }
+        }
+
+        // Validate property types if schema defines them
+        if let Some(properties) = schema.get("properties").and_then(|p| p.as_object()) {
+            let obj = arguments.as_object().expect("already checked is_object");
+            for (prop_name, prop_schema) in properties {
+                if let Some(arg_val) = obj.get(prop_name) {
+                    Self::validate_property_type(arg_val, prop_schema, prop_name)?;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Validate a single property value against its JSON Schema type definition
+    fn validate_property_type(
+        value: &serde_json::Value,
+        prop_schema: &serde_json::Value,
+        prop_name: &str,
+    ) -> Result<(), ToolError> {
+        let Some(expected_type) = prop_schema.get("type").and_then(serde_json::Value::as_str)
+        else {
+            return Ok(());
+        };
+
+        let matches = match expected_type {
+            "object" => value.is_object(),
+            "array" => value.is_array(),
+            "string" => value.is_string(),
+            "number" => value.is_number(),
+            "integer" => value.is_i64() || value.is_u64(),
+            "boolean" => value.is_boolean(),
+            "null" => value.is_null(),
+            _ => true, // Unknown schema type, accept
+        };
+
+        if !matches {
+            return Err(ToolError::validation_failed(format!(
+                "Field '{prop_name}' expected type '{expected_type}', got '{}'",
+                Self::value_type_name(value)
+            )));
+        }
+
+        Ok(())
+    }
+
+    /// Get a human-readable name for a JSON value type
+    const fn value_type_name(value: &serde_json::Value) -> &'static str {
+        match value {
+            serde_json::Value::Null => "null",
+            serde_json::Value::Bool(_) => "boolean",
+            serde_json::Value::Number(_) => "number",
+            serde_json::Value::String(_) => "string",
+            serde_json::Value::Array(_) => "array",
+            serde_json::Value::Object(_) => "object",
+        }
+    }
 }
 
 impl ToolError {
@@ -569,42 +751,6 @@ mod tests {
             Err(ToolError::execution_failed(
                 "Intentional failure".to_string(),
             ))
-        }
-    }
-
-    /// Test tool that validates input
-    #[allow(dead_code, reason = "reserved for future validation tests")]
-    struct ValidateTool {
-        require_field: String,
-    }
-
-    #[async_trait]
-    impl Tool for ValidateTool {
-        fn name(&self) -> &'static str {
-            "validate"
-        }
-
-        fn description(&self) -> &'static str {
-            "Validates input"
-        }
-
-        fn schema(&self) -> serde_json::Value {
-            json!({
-                "type": "object",
-                "properties": {
-                    "value": {"type": "string"}
-                },
-                "required": ["value"]
-            })
-        }
-
-        async fn invoke(&self, input: serde_json::Value) -> Result<String, ToolError> {
-            input[self.require_field.as_str()]
-                .as_str()
-                .map(std::string::ToString::to_string)
-                .ok_or_else(|| {
-                    ToolError::invalid_input(format!("Missing '{}'", self.require_field))
-                })
         }
     }
 
@@ -990,6 +1136,159 @@ mod tests {
         assert!(!err_trace.success);
         assert!(err_trace.output.is_none());
         assert_eq!(err_trace.error, Some("timeout".to_string()));
+    }
+
+    // --- Validation tests ---
+
+    /// Test tool with a defined JSON schema for validation testing
+    struct SchemaTool;
+
+    #[async_trait]
+    impl Tool for SchemaTool {
+        fn name(&self) -> &'static str {
+            "schema_tool"
+        }
+
+        fn description(&self) -> &'static str {
+            "Tool with defined schema for validation"
+        }
+
+        fn schema(&self) -> serde_json::Value {
+            json!({
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "count": {"type": "integer"},
+                    "active": {"type": "boolean"}
+                },
+                "required": ["name", "count"]
+            })
+        }
+
+        async fn invoke(&self, input: serde_json::Value) -> Result<String, ToolError> {
+            Ok(format!("Processed: {input}"))
+        }
+    }
+
+    #[tokio::test]
+    async fn test_validation_valid_input_passes() {
+        let node = ToolNode::new(vec![Box::new(SchemaTool) as Box<dyn Tool>]);
+        let messages = vec![Message::ai_with_tool_calls(
+            "test",
+            vec![ToolCall {
+                id: "call_1".to_string(),
+                name: "schema_tool".to_string(),
+                arguments: json!({"name": "test", "count": 42, "active": true}),
+            }],
+        )];
+
+        let results = node.execute(&messages).await.unwrap();
+        assert_eq!(results.len(), 1);
+        match &results[0].content {
+            juncture_core::state::messages::Content::Text(text) => {
+                assert!(text.contains("Processed"));
+            }
+            juncture_core::state::messages::Content::MultiPart(_) => {
+                panic!("Expected Text content");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_validation_missing_required_field_rejected() {
+        let node = ToolNode::new(vec![Box::new(SchemaTool) as Box<dyn Tool>]);
+        let messages = vec![Message::ai_with_tool_calls(
+            "test",
+            vec![ToolCall {
+                id: "call_1".to_string(),
+                name: "schema_tool".to_string(),
+                arguments: json!({"name": "test"}), // missing required "count" field
+            }],
+        )];
+
+        let results = node.execute(&messages).await.unwrap();
+        assert_eq!(results.len(), 1);
+        match &results[0].content {
+            juncture_core::state::messages::Content::Text(text) => {
+                assert!(text.contains("Missing required field"));
+                assert!(text.contains("count"));
+            }
+            juncture_core::state::messages::Content::MultiPart(_) => {
+                panic!("Expected Text content with error message");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_validation_wrong_type_rejected() {
+        let node = ToolNode::new(vec![Box::new(SchemaTool) as Box<dyn Tool>]);
+        let messages = vec![Message::ai_with_tool_calls(
+            "test",
+            vec![ToolCall {
+                id: "call_1".to_string(),
+                name: "schema_tool".to_string(),
+                arguments: json!({"name": "test", "count": "not_a_number"}), // count should be integer
+            }],
+        )];
+
+        let results = node.execute(&messages).await.unwrap();
+        assert_eq!(results.len(), 1);
+        match &results[0].content {
+            juncture_core::state::messages::Content::Text(text) => {
+                assert!(text.contains("expected type"));
+                assert!(text.contains("count"));
+            }
+            juncture_core::state::messages::Content::MultiPart(_) => {
+                panic!("Expected Text content with error message");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_validation_disabled_skips_checks() {
+        let node =
+            ToolNode::new(vec![Box::new(SchemaTool) as Box<dyn Tool>]).with_validation(false);
+        let messages = vec![Message::ai_with_tool_calls(
+            "test",
+            vec![ToolCall {
+                id: "call_1".to_string(),
+                name: "schema_tool".to_string(),
+                arguments: json!({"name": "test"}), // missing required "count" but validation is off
+            }],
+        )];
+
+        let results = node.execute(&messages).await.unwrap();
+        assert_eq!(results.len(), 1);
+        // Tool processes the input even though it's missing required fields (validation bypassed)
+        match &results[0].content {
+            juncture_core::state::messages::Content::Text(text) => {
+                assert!(text.contains("Processed"));
+            }
+            juncture_core::state::messages::Content::MultiPart(_) => {
+                panic!("Expected Text content");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_validation_propagates_error_when_not_handled() {
+        let node =
+            ToolNode::new(vec![Box::new(SchemaTool) as Box<dyn Tool>]).with_error_handling(false);
+        let messages = vec![Message::ai_with_tool_calls(
+            "test",
+            vec![ToolCall {
+                id: "call_1".to_string(),
+                name: "schema_tool".to_string(),
+                arguments: json!({"name": "test"}), // missing required "count"
+            }],
+        )];
+
+        let result = node.execute(&messages).await;
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            ToolError::ValidationFailed(_)
+        ));
     }
 }
 
