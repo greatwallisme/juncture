@@ -64,7 +64,6 @@ pub struct SqliteSaver {
     pool: Arc<sqlx::sqlite::SqlitePool>,
     /// Database file path
     #[cfg(feature = "sqlite")]
-    #[allow(dead_code, reason = "Path stored for debugging and future use")]
     db_path: PathBuf,
     /// Serializer for checkpoint data fields
     serializer: SerializerKind,
