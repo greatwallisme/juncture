@@ -132,6 +132,12 @@ pub struct Item {
     pub updated_at: DateTime<Utc>,
     /// Optional expiration timestamp for TTL support
     pub expires_at: Option<DateTime<Utc>>,
+    /// Optional embedding vector for vector search.
+    ///
+    /// Pre-computed during `put()` when an [`IndexConfig`] with an
+    /// [`EmbeddingFunc`] is configured and index fields are provided.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub embedding: Option<Vec<f32>>,
 }
 
 impl Item {
@@ -499,15 +505,36 @@ impl Store for MemoryStore {
 
     #[allow(
         clippy::significant_drop_tightening,
-        reason = "Lock must be held for entire put operation"
+        reason = "Lock must be held for entire put operation after embedding"
     )]
     async fn put(
         &self,
         namespace: &str,
         key: &str,
         value: serde_json::Value,
-        _index: Option<Vec<String>>,
+        index: Option<Vec<String>>,
     ) -> Result<(), StoreError> {
+        // Compute embedding outside the write lock (embeddings may be async)
+        let embedding = if let Some(ref index_config) = self.index_config {
+            if let (Some(embed_fn), Some(index_fields)) = (&index_config.embed, &index) {
+                if index_fields.is_empty() {
+                    None
+                } else {
+                    let text = extract_index_text(&value, index_fields);
+                    if text.is_empty() {
+                        None
+                    } else {
+                        let mut embeddings = embed_fn.embed(vec![text]).await?;
+                        embeddings.pop()
+                    }
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         let now = Utc::now();
         let expires_at = self
             .ttl_config
@@ -528,6 +555,7 @@ impl Store for MemoryStore {
             created_at: existing.map_or(now, |i| i.created_at),
             updated_at: now,
             expires_at,
+            embedding,
         };
 
         namespace_map.insert(key.to_string(), item);
@@ -548,36 +576,73 @@ impl Store for MemoryStore {
 
     #[allow(
         clippy::significant_drop_tightening,
-        reason = "Lock must be held for entire search operation"
+        reason = "Lock must be held for entire search iteration"
     )]
     async fn search(&self, query: SearchQuery) -> Result<SearchResult, StoreError> {
-        let data = self.data.read().await;
-        let mut items = Vec::new();
+        // Compute query embedding outside the read lock
+        let query_embedding: Option<Vec<f32>> = if let Some(ref index_config) = self.index_config {
+            if let (Some(embed_fn), Some(query_text)) = (&index_config.embed, &query.query) {
+                if query_text.is_empty() {
+                    None
+                } else {
+                    let mut embeddings = embed_fn.embed(vec![query_text.clone()]).await?;
+                    embeddings.pop()
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
 
-        for (namespace, namespace_map) in data.iter() {
-            if namespace.starts_with(&query.namespace_prefix) {
-                for item in namespace_map.values() {
-                    if item.is_expired() {
-                        continue;
-                    }
+        // Phase 1: Gather items under read lock
+        let mut items: Vec<SearchItem> = {
+            let data = self.data.read().await;
+            let mut results = Vec::new();
 
-                    if query
-                        .filter
-                        .as_ref()
-                        .is_some_and(|filter| !evaluate_filter(filter, &item.value))
-                    {
-                        continue;
+            for (namespace, namespace_map) in data.iter() {
+                if namespace.starts_with(&query.namespace_prefix) {
+                    for item in namespace_map.values() {
+                        if item.is_expired() {
+                            continue;
+                        }
+
+                        if query
+                            .filter
+                            .as_ref()
+                            .is_some_and(|filter| !evaluate_filter(filter, &item.value))
+                        {
+                            continue;
+                        }
+
+                        let score = query_embedding.as_ref().and_then(|q_emb| {
+                            item.embedding
+                                .as_ref()
+                                .map(|i_emb| f64::from(cosine_similarity(q_emb, i_emb)))
+                        });
+
+                        results.push(SearchItem {
+                            item: item.clone(),
+                            score,
+                        });
                     }
-                    items.push(SearchItem {
-                        item: item.clone(),
-                        score: None,
-                    });
                 }
             }
+            results
+        };
+
+        let total = items.len();
+
+        // Phase 2: Sort by similarity when vector search is active
+        if query_embedding.is_some() {
+            items.sort_by(|a, b| {
+                b.score
+                    .partial_cmp(&a.score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
         }
 
-        // Apply pagination
-        let total = items.len();
+        // Phase 3: Apply pagination
         let start = query.offset.min(items.len());
         let end = (start + query.limit).min(items.len());
         let page = items.drain(start..end).collect();
@@ -747,6 +812,46 @@ fn compare_numbers(
     }
 }
 
+/// Compute cosine similarity between two vectors.
+///
+/// Returns a value in `[-1, 1]` where 1 means identical direction,
+/// 0 means orthogonal, and -1 means opposite direction.
+/// Returns `0.0` if either vector has zero magnitude.
+/// When vectors differ in length, only the common prefix is compared.
+#[must_use]
+pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
+    let len = a.len().min(b.len());
+    if len == 0 {
+        return 0.0;
+    }
+    let a = &a[..len];
+    let b = &b[..len];
+    let dot_product: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
+    let norm_a = a.iter().map(|x| x * x).sum::<f32>().sqrt();
+    let norm_b = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if norm_a == 0.0 || norm_b == 0.0 {
+        return 0.0;
+    }
+    dot_product / (norm_a * norm_b)
+}
+
+/// Extract indexable text from a JSON value for the given field paths.
+///
+/// Concatenates string representations of each field's value, separated by
+/// spaces, for use as input to an embedding function.
+fn extract_index_text(value: &serde_json::Value, fields: &[String]) -> String {
+    fields
+        .iter()
+        .filter_map(|field| {
+            get_field(value, field).map(|v| {
+                v.as_str()
+                    .map_or_else(|| v.to_string(), ToString::to_string)
+            })
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// SQLite-based store implementation
 ///
 /// Provides persistent storage using `SQLite` database.
@@ -860,6 +965,7 @@ impl Store for SqliteStore {
                     .map_err(|e| StoreError::Database(format!("invalid timestamp: {e}")))?
                     .with_timezone(&chrono::Utc),
                 expires_at: None,
+                embedding: None,
             }))
         } else {
             Ok(None)
@@ -1139,6 +1245,7 @@ impl Store for PostgresStore {
                 created_at,
                 updated_at,
                 expires_at: None,
+                embedding: None,
             }))
         } else {
             Ok(None)
@@ -1632,7 +1739,255 @@ mod tests {
         );
     }
 
-    // --- Offset pagination tests ---
+    // --- Vector search tests ---
+
+    /// Test embedding function for deterministic vector search testing.
+    ///
+    /// Produces an 8-dimensional normalized embedding from text using
+    /// a polynomial hash. Same text always produces the same embedding;
+    /// different texts produce (with high probability) different embeddings.
+    struct TestEmbeddingFunc;
+
+    #[async_trait::async_trait]
+    impl EmbeddingFunc for TestEmbeddingFunc {
+        async fn embed(&self, texts: Vec<String>) -> Result<Vec<Vec<f32>>, StoreError> {
+            Ok(texts
+                .iter()
+                .map(|text| {
+                    // FNV-1a-like hash for deterministic embedding
+                    let hash: u64 = text.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| {
+                        (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3)
+                    });
+                    let mut vec: Vec<f32> = (0..8)
+                        .map(|i| f32::from(((hash >> (i * 8)) & 0xFF) as u8) / 255.0)
+                        .collect();
+                    let norm = vec.iter().map(|x| x * x).sum::<f32>().sqrt();
+                    if norm > 0.0 {
+                        for v in &mut vec {
+                            *v /= norm;
+                        }
+                    }
+                    vec
+                })
+                .collect())
+        }
+    }
+
+    #[test]
+    fn test_cosine_similarity_identical_vectors() {
+        let v = vec![1.0, 0.0, 0.0];
+        let sim = cosine_similarity(&v, &v);
+        let expected = 1.0;
+        assert!(
+            (sim - expected).abs() < f32::EPSILON,
+            "identical vectors should have similarity 1.0, got {sim}"
+        );
+    }
+
+    #[test]
+    fn test_cosine_similarity_orthogonal_vectors() {
+        let a = vec![1.0, 0.0, 0.0];
+        let b = vec![0.0, 1.0, 0.0];
+        let sim = cosine_similarity(&a, &b);
+        let expected = 0.0;
+        assert!(
+            (sim - expected).abs() < f32::EPSILON,
+            "orthogonal vectors should have similarity 0.0, got {sim}"
+        );
+    }
+
+    #[test]
+    fn test_cosine_similarity_opposite_vectors() {
+        let a = vec![1.0, 0.0];
+        let b = vec![-1.0, 0.0];
+        let sim = cosine_similarity(&a, &b);
+        let expected = -1.0;
+        assert!(
+            (sim - expected).abs() < f32::EPSILON,
+            "opposite vectors should have similarity -1.0, got {sim}"
+        );
+    }
+
+    #[test]
+    fn test_cosine_similarity_zero_norm() {
+        let a = vec![0.0, 0.0, 0.0];
+        let b = vec![1.0, 0.0, 0.0];
+        let sim = cosine_similarity(&a, &b);
+        let expected = 0.0;
+        assert!(
+            (sim - expected).abs() < f32::EPSILON,
+            "zero-norm vector should give similarity 0.0, got {sim}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_search_with_embeddings_returns_scored_results() {
+        let index_config = IndexConfig {
+            dims: 8,
+            embed: Some(Box::new(TestEmbeddingFunc)),
+            fields: Some(vec!["text".to_string()]),
+        };
+        let store = MemoryStore::new().with_vector_search(index_config);
+
+        // Put items with index fields
+        store
+            .put(
+                "docs",
+                "item1",
+                json!({"text": "hello world"}),
+                Some(vec!["text".to_string()]),
+            )
+            .await
+            .expect("put failed");
+        store
+            .put(
+                "docs",
+                "item2",
+                json!({"text": "quantum physics"}),
+                Some(vec!["text".to_string()]),
+            )
+            .await
+            .expect("put failed");
+
+        // Search with a query text
+        let query = SearchQuery {
+            namespace_prefix: "docs".to_string(),
+            filter: None,
+            query: Some("hello world".to_string()),
+            limit: 10,
+            offset: 0,
+        };
+        let result = store.search(query).await.expect("search failed");
+
+        assert!(
+            !result.items.is_empty(),
+            "search should return matching items"
+        );
+        // All returned items should have scores since they have embeddings
+        for item in &result.items {
+            assert!(
+                item.score.is_some(),
+                "items with embeddings should have similarity scores"
+            );
+        }
+
+        // The most relevant result should have a high score (> 0.9)
+        if let Some(score) = result.items.first().and_then(|i| i.score) {
+            assert!(
+                score > 0.9,
+                "top result should have high similarity score, got {score}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_search_ordering_respects_similarity() {
+        let index_config = IndexConfig {
+            dims: 8,
+            embed: Some(Box::new(TestEmbeddingFunc)),
+            fields: Some(vec!["text".to_string()]),
+        };
+        let store = MemoryStore::new().with_vector_search(index_config);
+
+        // Put items with clearly different content
+        store
+            .put(
+                "docs",
+                "hello-world",
+                json!({"text": "hello world"}),
+                Some(vec!["text".to_string()]),
+            )
+            .await
+            .expect("put failed");
+        store
+            .put(
+                "docs",
+                "hello-there",
+                json!({"text": "hello there"}),
+                Some(vec!["text".to_string()]),
+            )
+            .await
+            .expect("put failed");
+        store
+            .put(
+                "docs",
+                "quantum-physics",
+                json!({"text": "quantum physics"}),
+                Some(vec!["text".to_string()]),
+            )
+            .await
+            .expect("put failed");
+
+        // Search with query matching the first item
+        let query = SearchQuery {
+            namespace_prefix: "docs".to_string(),
+            filter: None,
+            query: Some("hello world".to_string()),
+            limit: 10,
+            offset: 0,
+        };
+        let result = store.search(query).await.expect("search failed");
+
+        assert_eq!(
+            result.items.len(),
+            3,
+            "should return all 3 items in the namespace"
+        );
+
+        // The most similar item should be first
+        let first = result
+            .items
+            .first()
+            .expect("should have at least one result");
+        assert_eq!(
+            first.item.key, "hello-world",
+            "the most similar item should be ranked first"
+        );
+
+        // Scores should be in descending order (best match first)
+        for pair in result.items.windows(2) {
+            if let (Some(a), Some(b)) = (pair[0].score, pair[1].score) {
+                assert!(
+                    a >= b,
+                    "scores should be in descending order: {a} should be >= {b}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_search_without_index_returns_no_scores() {
+        // Store with no vector search configured
+        let store = MemoryStore::new();
+
+        store
+            .put("docs", "item1", json!({"text": "hello"}), None)
+            .await
+            .expect("put failed");
+        store
+            .put("docs", "item2", json!({"text": "world"}), None)
+            .await
+            .expect("put failed");
+
+        // Search with a query should still work but without scores
+        let query = SearchQuery {
+            namespace_prefix: "docs".to_string(),
+            filter: None,
+            query: Some("hello".to_string()),
+            limit: 10,
+            offset: 0,
+        };
+        let result = store.search(query).await.expect("search failed");
+
+        assert_eq!(result.items.len(), 2, "should return all items");
+        // All scores should be None since no index is configured
+        for item in &result.items {
+            assert!(
+                item.score.is_none(),
+                "items without index should have no score"
+            );
+        }
+    }
 
     #[tokio::test]
     async fn test_list_namespaces_offset_skips_first_n() {
