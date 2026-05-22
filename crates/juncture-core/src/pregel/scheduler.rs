@@ -813,12 +813,14 @@ pub fn get_error_handler_node(
 mod scheduler_tests {
     use super::*;
     use crate::node::IntoNode;
+    use crate::state::FieldVersions;
 
     #[derive(Clone, Debug)]
     struct TestState;
 
     impl State for TestState {
         type Update = TestUpdate;
+        type FieldVersions = FieldVersions;
 
         fn apply(&mut self, _: Self::Update) -> FieldsChanged {
             FieldsChanged(0)

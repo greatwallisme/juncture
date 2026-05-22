@@ -1932,6 +1932,7 @@ mod tests {
         node::NodeFnCommand,
         pregel::types::{TaskOutput, TaskTrigger},
     };
+    use crate::state::FieldVersions;
 
     #[test]
     fn test_pregel_loop_creation() {
@@ -2133,6 +2134,7 @@ mod tests {
 
     impl State for TestState {
         type Update = TestUpdate;
+        type FieldVersions = FieldVersions;
 
         fn apply(&mut self, _: Self::Update) -> crate::FieldsChanged {
             crate::FieldsChanged(0)
@@ -2161,6 +2163,7 @@ mod tests {
 
     impl State for DeltaTestState {
         type Update = DeltaTestUpdate;
+        type FieldVersions = FieldVersions;
 
         fn apply(&mut self, update: Self::Update) -> crate::FieldsChanged {
             let mut changed = crate::FieldsChanged(0);

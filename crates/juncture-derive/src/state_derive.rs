@@ -239,6 +239,7 @@ pub fn derive_state_impl(input: DeriveInput) -> proc_macro::TokenStream {
             Self: Clone + Send + Sync + std::fmt::Debug + 'static,
         {
             type Update = #update_name #ty_generics;
+            type FieldVersions = juncture_core::state::FieldVersions;
 
             fn apply(&mut self, update: Self::Update) -> juncture_core::FieldsChanged {
                 let mut changed = juncture_core::FieldsChanged::default();

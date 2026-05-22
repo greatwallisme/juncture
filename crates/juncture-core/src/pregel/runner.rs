@@ -639,6 +639,7 @@ where
 mod tests {
     use super::*;
     use crate::node::{IntoNode, NodeFnCommand};
+    use crate::state::FieldVersions;
 
     #[tokio::test]
     async fn test_execute_superstep_empty() {
@@ -1124,6 +1125,7 @@ mod tests {
 
     impl State for TestState {
         type Update = TestUpdate;
+        type FieldVersions = FieldVersions;
 
         fn apply(&mut self, _: Self::Update) -> crate::FieldsChanged {
             crate::FieldsChanged(0)

@@ -233,6 +233,7 @@ pub use pregel::{
 };
 pub use runtime::{
     ExecutionInfo, Heartbeat, HeartbeatWatcher, ManagedValues, RunControl, Runtime, RuntimeStore,
+    StreamWriterTrait,
 };
 pub use send::Send;
 pub use state::{

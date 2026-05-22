@@ -424,6 +424,8 @@ mod tests {
 
     impl crate::State for TestState {
         type Update = TestUpdate;
+        type FieldVersions = crate::state::FieldVersions;
+
         fn apply(&mut self, _: Self::Update) -> crate::FieldsChanged {
             crate::FieldsChanged(0)
         }

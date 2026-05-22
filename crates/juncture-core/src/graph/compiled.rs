@@ -3059,6 +3059,7 @@ mod tests {
 
     impl crate::State for StateDummy {
         type Update = StateDummyUpdate;
+        type FieldVersions = crate::state::FieldVersions;
 
         fn apply(&mut self, _update: Self::Update) -> crate::FieldsChanged {
             crate::FieldsChanged(0)
@@ -3083,6 +3084,7 @@ mod tests {
 
     impl crate::State for StateV2 {
         type Update = StateV2Update;
+        type FieldVersions = crate::state::FieldVersions;
 
         fn apply(&mut self, _update: Self::Update) -> crate::FieldsChanged {
             crate::FieldsChanged(0)
@@ -3284,6 +3286,7 @@ mod tests {
 
     impl crate::State for MultiFieldState {
         type Update = MultiFieldStateUpdate;
+        type FieldVersions = crate::state::FieldVersions;
 
         fn apply(&mut self, update: Self::Update) -> crate::FieldsChanged {
             let mut mask = 0u64;

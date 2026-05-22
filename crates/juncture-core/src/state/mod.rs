@@ -11,6 +11,6 @@ pub use messages::{
     Content, ContentPart, ImageData, ImageSource, Message, MessagesState, MessagesStateUpdate,
     REMOVE_ALL_MESSAGES, Role, TokenUsage, ToolCall, messages_reducer,
 };
-pub use trait_::{CowState, FieldsChanged, FromState, IntoState, State};
+pub use trait_::{CowState, FieldsChanged, FieldVersions, FromState, IntoState, State};
 
 // Rust guideline compliant 2026-05-19

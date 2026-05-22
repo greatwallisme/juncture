@@ -1602,6 +1602,7 @@ mod tests {
 
     impl crate::State for ChildState {
         type Update = ChildStateUpdate;
+        type FieldVersions = crate::state::FieldVersions;
 
         fn apply(&mut self, update: Self::Update) -> crate::FieldsChanged {
             if let Some(v) = update.value {
@@ -1904,6 +1905,7 @@ mod tests {
 
     impl crate::State for StateWithBadReplaceIndex {
         type Update = StateWithBadReplaceIndexUpdate;
+        type FieldVersions = crate::state::FieldVersions;
 
         fn apply(&mut self, update: Self::Update) -> crate::FieldsChanged {
             let mut changed = crate::FieldsChanged::default();
@@ -1949,6 +1951,7 @@ mod tests {
 
     impl crate::State for StateWithBadAfterFinishIndex {
         type Update = StateWithBadAfterFinishIndexUpdate;
+        type FieldVersions = crate::state::FieldVersions;
 
         fn apply(&mut self, update: Self::Update) -> crate::FieldsChanged {
             let mut changed = crate::FieldsChanged::default();
@@ -1983,6 +1986,7 @@ mod tests {
 
     impl crate::State for StateDummy {
         type Update = StateDummyUpdate;
+        type FieldVersions = crate::state::FieldVersions;
 
         fn apply(&mut self, _update: Self::Update) -> crate::FieldsChanged {
             crate::FieldsChanged(0)

@@ -4,6 +4,30 @@
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use tokio::sync::mpsc;
+
+/// Non-generic stream writer trait for [`Runtime`] integration.
+///
+/// [`StreamWriter<S>`](crate::stream::StreamWriter) is parameterized over the
+/// state type `S` which prevents it from being stored directly in
+/// `Runtime<C>`. This trait provides type-erased access so nodes can emit
+/// custom stream events through the runtime regardless of the state type.
+pub trait StreamWriterTrait: Send + Sync + 'static {
+    /// Emit a custom stream data payload.
+    fn emit_custom(&self, node: &str, data: serde_json::Value);
+}
+
+impl StreamWriterTrait for mpsc::UnboundedSender<(String, serde_json::Value)> {
+    fn emit_custom(&self, node: &str, data: serde_json::Value) {
+        let _ = self.send((node.to_string(), data));
+    }
+}
+
+impl std::fmt::Debug for dyn StreamWriterTrait {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StreamWriterTrait").finish_non_exhaustive()
+    }
+}
 
 /// Execution context for graph nodes
 ///
@@ -47,6 +71,14 @@ pub struct Runtime<C: Clone + Send + Sync + 'static = ()> {
 
     /// Collaborative drain control for graceful shutdown
     pub control: Option<RunControl>,
+
+    /// Custom stream event emitter.
+    ///
+    /// When set, nodes can emit custom stream data through this writer
+    /// regardless of the state type. The writer is type-erased via
+    /// [`StreamWriterTrait`] because `Runtime<C>` cannot directly hold
+    /// the state-parameterized [`StreamWriter<S>`](crate::stream::StreamWriter).
+    pub stream_writer: Option<Arc<dyn StreamWriterTrait>>,
 }
 
 impl<C: Clone + Send + Sync + 'static> std::fmt::Debug for Runtime<C>
@@ -61,6 +93,7 @@ where
             .field("previous", &self.previous)
             .field("execution_info", &self.execution_info)
             .field("control", &self.control)
+            .field("stream_writer", &self.stream_writer)
             .finish()
     }
 }
@@ -79,6 +112,7 @@ impl<C: Clone + Send + Sync + 'static> Runtime<C> {
             previous: None,
             execution_info: None,
             control: None,
+            stream_writer: None,
         }
     }
 
@@ -92,6 +126,7 @@ impl<C: Clone + Send + Sync + 'static> Runtime<C> {
             previous: None,
             execution_info: None,
             control: None,
+            stream_writer: None,
         }
     }
 
