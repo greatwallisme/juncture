@@ -427,7 +427,7 @@ impl<M: ChatModel> Node<MessagesState> for AgentNode<M> {
     fn call(
         &self,
         state: MessagesState,
-        _config: &RunnableConfig,
+        config: &RunnableConfig,
     ) -> std::pin::Pin<
         Box<
             dyn std::future::Future<Output = Result<Command<MessagesState>, JunctureError>>
@@ -435,6 +435,9 @@ impl<M: ChatModel> Node<MessagesState> for AgentNode<M> {
                 + '_,
         >,
     > {
+        // Clone the budget tracker Arc so it can be moved into the async block
+        let budget_tracker = config.budget_tracker().cloned();
+
         // Apply pre_model_hook to transform state before building messages
         let state = match &self.pre_model_hook {
             Some(hook) => hook(&state),
@@ -458,6 +461,13 @@ impl<M: ChatModel> Node<MessagesState> for AgentNode<M> {
                 Some(hook) => hook(&state, &response),
                 None => response,
             };
+
+            // Report token usage to the budget tracker, if configured
+            if let Some(usage) = &response.usage
+                && let Some(ref tracker) = budget_tracker
+            {
+                tracker.report_model_call(usage.input_tokens, usage.output_tokens);
+            }
 
             let update = MessagesStateUpdate {
                 messages: Some(vec![response]),

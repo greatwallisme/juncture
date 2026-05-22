@@ -158,8 +158,8 @@ pub struct PregelLoop<S: State> {
     /// Pending tasks for next superstep
     pub pending_tasks: Vec<PendingTask<S>>,
 
-    /// Optional budget tracker
-    budget_tracker: Option<BudgetTracker>,
+    /// Optional budget tracker (shared with `RunnableConfig` via Arc)
+    budget_tracker: Option<Arc<BudgetTracker>>,
 
     /// Run control for graceful shutdown
     run_control: RunControl,
@@ -387,6 +387,11 @@ impl<S: State> PregelLoop<S> {
 
     /// Set the budget tracker
     ///
+    /// Wraps the tracker in an `Arc` so it can be shared between the
+    /// `PregelLoop` (for budget checking) and the `RunnableConfig` (for
+    /// node-level token reporting). Both share the same underlying
+    /// counters via atomic operations.
+    ///
     /// # Examples
     ///
     /// ```ignore
@@ -396,7 +401,9 @@ impl<S: State> PregelLoop<S> {
     /// loop.set_budget_tracker(budget);
     /// ```
     pub fn set_budget_tracker(&mut self, tracker: BudgetTracker) {
-        self.budget_tracker = Some(tracker);
+        let shared = Arc::new(tracker);
+        self.runnable_config.budget_tracker = Some(Arc::clone(&shared));
+        self.budget_tracker = Some(shared);
     }
 
     /// Set per-node retry policies
@@ -3298,6 +3305,106 @@ mod tests {
             has_interrupt_checkpoint,
             "Exit mode should still save interrupt checkpoints"
         );
+    }
+
+    // --- B-08-001: Budget tracker Arc sharing tests ---
+
+    /// Verify that `BudgetTracker` is shared between `PregelLoop` and `RunnableConfig`
+    /// via Arc, so tokens reported through `config.budget_tracker()` are visible
+    /// to the loop's budget check method.
+    #[tokio::test]
+    async fn test_budget_tracker_arc_sharing() {
+        let state = TestState;
+        let mut nodes = IndexMap::new();
+        nodes.insert(
+            "test_node".to_string(),
+            NodeFnCommand(|_s| async move { Ok(Command::end()) }).into_node("test_node"),
+        );
+
+        let trigger_table = TriggerTable::new();
+        let budget = crate::pregel::budget::BudgetConfig::new().with_max_tokens(100);
+        let config = crate::config::RunnableConfig::new().with_budget(budget);
+
+        let mut loop_ = PregelLoop::new(state, nodes, trigger_table, config, 0).unwrap();
+
+        // Set up the shared budget tracker (normally done in compiled.rs)
+        let tracker_config = loop_.runnable_config.budget.clone().unwrap();
+        loop_.set_budget_tracker(BudgetTracker::new(tracker_config));
+
+        // Initially, no tokens reported, budget not exceeded
+        assert!(loop_.budget_tracker.as_ref().unwrap().check().is_none());
+
+        // Report tokens via the RunnableConfig's budget_tracker (the node's view)
+        if let Some(ref tracker) = loop_.runnable_config.budget_tracker {
+            tracker.report_model_call(30, 20); // 50 total tokens
+        }
+
+        // The loop's budget tracker should reflect the same usage (Arc sharing)
+        let usage = loop_.budget_tracker.as_ref().unwrap().current_usage();
+        assert_eq!(usage.tokens_used, 50);
+
+        // Budget not exceeded yet
+        assert!(loop_.budget_tracker.as_ref().unwrap().check().is_none());
+
+        // Report more tokens to exceed the limit via the same shared tracker
+        if let Some(ref tracker) = loop_.runnable_config.budget_tracker {
+            tracker.report_model_call(40, 30); // 70 more, total 120 > 100
+        }
+
+        // Budget should now be exceeded
+        assert!(loop_.budget_tracker.as_ref().unwrap().check().is_some());
+        assert_eq!(
+            loop_.budget_tracker.as_ref().unwrap().current_usage().tokens_used,
+            120
+        );
+
+        // tick() should detect the exceeded budget and return an error
+        let _ = loop_.tick().unwrap_err();
+        assert!(loop_.status.is_terminal());
+    }
+
+    /// Verify that multiple token reports via the `RunnableConfig` path
+    /// accumulate correctly and pass through budget checks when a
+    /// cost limit is configured.
+    #[tokio::test]
+    async fn test_budget_tracker_cost_via_config() {
+        let state = TestState;
+        let mut nodes = IndexMap::new();
+        nodes.insert(
+            "test_node".to_string(),
+            NodeFnCommand(|_s| async move { Ok(Command::end()) }).into_node("test_node"),
+        );
+
+        let trigger_table = TriggerTable::new();
+        let budget = crate::pregel::budget::BudgetConfig::new().with_max_cost_usd(0.01);
+        let config = crate::config::RunnableConfig::new().with_budget(budget);
+
+        let mut loop_ = PregelLoop::new(state, nodes, trigger_table, config, 0).unwrap();
+
+        let tracker_config = loop_.runnable_config.budget.clone().unwrap();
+        loop_.set_budget_tracker(BudgetTracker::new(tracker_config));
+
+        // Report costs via the RunnableConfig (simulating multiple LLM calls)
+        if let Some(ref tracker) = loop_.runnable_config.budget_tracker {
+            tracker.report_cost(0.003);
+            tracker.report_cost(0.004);
+        }
+
+        // Combined cost is below limit
+        let usage = loop_.budget_tracker.as_ref().unwrap().current_usage();
+        assert!((usage.cost_usd - 0.007).abs() < 0.0001);
+        assert!(loop_.budget_tracker.as_ref().unwrap().check().is_none());
+
+        // Third call pushes cost over the limit
+        if let Some(ref tracker) = loop_.runnable_config.budget_tracker {
+            tracker.report_cost(0.004); // total now 0.011 > 0.01
+        }
+
+        assert!(loop_.budget_tracker.as_ref().unwrap().check().is_some());
+
+        // tick() should detect the exceeded budget
+        let _ = loop_.tick().unwrap_err();
+        assert!(loop_.status.is_terminal());
     }
 
     /// Verify that `Durability::Async` does not block on checkpoint persistence.

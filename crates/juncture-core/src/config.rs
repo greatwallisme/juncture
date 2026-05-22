@@ -13,8 +13,7 @@ use crate::interrupt::ResumeValue;
 use crate::observability::{
     CachePolicy as LlmCachePolicy, GraphLifecycleCallback, MetricsCollector,
 };
-use crate::pregel::BudgetConfig;
-use crate::pregel::Durability;
+use crate::pregel::{BudgetConfig, BudgetTracker, Durability};
 use crate::runtime::{Heartbeat, RuntimeStore};
 
 /// Configuration for graph execution
@@ -105,6 +104,13 @@ pub struct RunnableConfig {
     /// `config.heartbeat.as_ref().map(Heartbeat::ping)` periodically
     /// to prevent idle timeout detection.
     pub heartbeat: Option<Heartbeat>,
+
+    /// Runtime budget tracker shared across nodes for token/cost tracking
+    ///
+    /// Set by the execution engine when a [`BudgetConfig`] is configured.
+    /// Nodes can access this via [`Self::budget_tracker`] to report LLM
+    /// token usage for automatic budget enforcement.
+    pub budget_tracker: Option<Arc<BudgetTracker>>,
 }
 
 impl std::fmt::Debug for RunnableConfig {
@@ -156,6 +162,10 @@ impl std::fmt::Debug for RunnableConfig {
                 &self.llm_cache_policy.as_ref().map(|_| "<CachePolicy>"),
             )
             .field("heartbeat", &self.heartbeat.as_ref().map(|_| "<Heartbeat>"))
+            .field(
+                "budget_tracker",
+                &self.budget_tracker.as_ref().map(|_| "<BudgetTracker>"),
+            )
             .finish()
     }
 }
@@ -331,6 +341,15 @@ impl RunnableConfig {
     pub fn with_llm_cache_policy(mut self, policy: LlmCachePolicy) -> Self {
         self.llm_cache_policy = Some(policy);
         self
+    }
+
+    /// Get a reference to the budget tracker, if configured
+    ///
+    /// Nodes can call this to report LLM token usage for automatic
+    /// budget enforcement during graph execution.
+    #[must_use]
+    pub const fn budget_tracker(&self) -> Option<&Arc<BudgetTracker>> {
+        self.budget_tracker.as_ref()
     }
 }
 

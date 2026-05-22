@@ -13,7 +13,7 @@ use crate::{
     config::RunnableConfig,
     edge::TriggerTable,
     interrupt::ResumeValue,
-    pregel::PregelLoop,
+    pregel::{BudgetTracker, PregelLoop},
     state::{FromState, IntoState},
     stream::{EventEmitter, StreamEvent, StreamMode},
 };
@@ -365,6 +365,11 @@ impl<S: State, I: IntoState<S>, O: FromState<S>> CompiledGraph<S, I, O> {
         pregel.set_retry_policies(retry_policy_map);
         pregel.set_timeout_policies(timeout_policy_map);
 
+        // Wire up budget tracking when budget limits are configured
+        if let Some(budget_config) = &pregel.runnable_config.budget {
+            pregel.set_budget_tracker(BudgetTracker::new(budget_config.clone()));
+        }
+
         // Execute the loop
         while pregel.tick()? {
             let result = pregel.execute_superstep().await?;
@@ -564,6 +569,11 @@ impl<S: State, I: IntoState<S>, O: FromState<S>> CompiledGraph<S, I, O> {
 
         pregel.set_retry_policies(retry_policy_map);
         pregel.set_timeout_policies(timeout_policy_map);
+
+        // Wire up budget tracking when budget limits are configured
+        if let Some(budget_config) = &pregel.runnable_config.budget {
+            pregel.set_budget_tracker(BudgetTracker::new(budget_config.clone()));
+        }
 
         // Extract run_id before moving pregel into the spawned task
         let run_id = pregel.run_id().to_string();
@@ -798,6 +808,11 @@ impl<S: State, I: IntoState<S>, O: FromState<S>> CompiledGraph<S, I, O> {
         pregel.set_retry_policies(retry_policy_map);
         pregel.set_timeout_policies(timeout_policy_map);
 
+        // Wire up budget tracking when budget limits are configured
+        if let Some(budget_config) = &pregel.runnable_config.budget {
+            pregel.set_budget_tracker(BudgetTracker::new(budget_config.clone()));
+        }
+
         if let Some(cp) = self.inner.checkpointer.clone() {
             pregel.set_checkpointer(cp);
         }
@@ -951,6 +966,11 @@ impl<S: State, I: IntoState<S>, O: FromState<S>> CompiledGraph<S, I, O> {
 
         pregel.set_retry_policies(retry_policy_map);
         pregel.set_timeout_policies(timeout_policy_map);
+
+        // Wire up budget tracking when budget limits are configured
+        if let Some(budget_config) = &pregel.runnable_config.budget {
+            pregel.set_budget_tracker(BudgetTracker::new(budget_config.clone()));
+        }
 
         // Set checkpointer
         if let Some(cp) = self.inner.checkpointer.clone() {
@@ -1139,6 +1159,11 @@ impl<S: State, I: IntoState<S>, O: FromState<S>> CompiledGraph<S, I, O> {
 
         pregel.set_retry_policies(retry_policy_map);
         pregel.set_timeout_policies(timeout_policy_map);
+
+        // Wire up budget tracking when budget limits are configured
+        if let Some(budget_config) = &pregel.runnable_config.budget {
+            pregel.set_budget_tracker(BudgetTracker::new(budget_config.clone()));
+        }
 
         // Set checkpointer on the Pregel loop
         if let Some(cp) = self.inner.checkpointer.clone() {

@@ -237,6 +237,26 @@ impl BudgetTracker {
         self.report_cost(cost_usd);
     }
 
+    /// Report token usage from a model call with separate input/output counts
+    ///
+    /// Adds the sum of input and output tokens to the total token counter.
+    /// This is the primary method for integrating LLM provider usage reporting
+    /// with budget enforcement.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// use juncture_core::pregel::budget::{BudgetTracker, BudgetConfig};
+    ///
+    /// let tracker = BudgetTracker::new(BudgetConfig::new());
+    /// tracker.report_model_call(50, 150);
+    /// assert_eq!(tracker.current_usage().tokens_used, 200);
+    /// ```
+    pub fn report_model_call(&self, input_tokens: u64, output_tokens: u64) {
+        self.tokens_used
+            .fetch_add(input_tokens + output_tokens, Ordering::Relaxed);
+    }
+
     /// Check if any budget limit has been exceeded
     ///
     /// Returns `Some(BudgetExceededReason)` if a limit was exceeded,
@@ -456,6 +476,28 @@ mod tests {
 
         let usage = tracker.current_usage();
         assert_eq!(usage.steps_completed, 6);
+    }
+
+    #[test]
+    fn test_budget_tracker_model_call() {
+        let tracker = BudgetTracker::new(BudgetConfig::new());
+        assert_eq!(tracker.current_usage().tokens_used, 0);
+
+        tracker.report_model_call(50, 100);
+        assert_eq!(tracker.current_usage().tokens_used, 150);
+
+        tracker.report_model_call(10, 20);
+        assert_eq!(tracker.current_usage().tokens_used, 180);
+    }
+
+    #[test]
+    fn test_budget_tracker_model_call_exceeds_limit() {
+        let config = BudgetConfig::new().with_max_tokens(100);
+        let tracker = BudgetTracker::new(config);
+
+        assert!(tracker.check().is_none());
+        tracker.report_model_call(60, 50);
+        assert!(tracker.check().is_some());
     }
 
     #[test]
