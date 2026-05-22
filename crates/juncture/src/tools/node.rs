@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use juncture_core::state::messages::{Message, Role, ToolCall};
+use juncture_core::stream::ToolsEvent;
 use juncture_tracing::spans::attrs;
 use tokio::task::JoinSet;
 
@@ -198,6 +199,13 @@ pub struct ToolNode {
 
     /// Optional interceptor for pre/post execution hooks
     interceptor: Option<Arc<dyn ToolInterceptor>>,
+
+    /// Optional sender for tool lifecycle streaming events.
+    ///
+    /// When set, [`ToolStarted`](ToolsEvent::ToolStarted) and
+    /// [`ToolFinished`](ToolsEvent::ToolFinished) events are emitted
+    /// during tool execution.
+    tools_event_tx: Option<tokio::sync::mpsc::UnboundedSender<ToolsEvent>>,
 }
 
 impl std::fmt::Debug for ToolNode {
@@ -208,6 +216,7 @@ impl std::fmt::Debug for ToolNode {
             .field("validate_input", &self.validate_input)
             .field("call_transformer", &self.call_transformer.is_some())
             .field("interceptor", &self.interceptor.is_some())
+            .field("tools_event_tx", &self.tools_event_tx.is_some())
             .finish()
     }
 }
@@ -230,6 +239,7 @@ impl ToolNode {
             validate_input: true,
             call_transformer: None,
             interceptor: None,
+            tools_event_tx: None,
         }
     }
 
@@ -248,6 +258,7 @@ impl ToolNode {
             validate_input: config.validate_input,
             call_transformer: config.call_transformer.map(Arc::from),
             interceptor: config.interceptor,
+            tools_event_tx: None,
         }
     }
 
@@ -279,6 +290,20 @@ impl ToolNode {
     #[must_use]
     pub fn with_interceptor(mut self, interceptor: Arc<dyn ToolInterceptor>) -> Self {
         self.interceptor = Some(interceptor);
+        self
+    }
+
+    /// Attach a tool event sender for streaming lifecycle events.
+    ///
+    /// When set, [`ToolStarted`](ToolsEvent::ToolStarted) and
+    /// [`ToolFinished`](ToolsEvent::ToolFinished) events are emitted
+    /// during tool execution.
+    #[must_use]
+    pub fn with_tools_event_tx(
+        mut self,
+        tx: tokio::sync::mpsc::UnboundedSender<ToolsEvent>,
+    ) -> Self {
+        self.tools_event_tx = Some(tx);
         self
     }
 
@@ -366,9 +391,16 @@ impl ToolNode {
             }
 
             let interceptor = Arc::clone(&interceptor);
+            let tools_event_tx = self.tools_event_tx.clone();
 
             results.spawn(async move {
-                Self::execute_single_tool(&tool_call, tool.as_ref(), &interceptor).await
+                Self::execute_single_tool(
+                    &tool_call,
+                    tool.as_ref(),
+                    &interceptor,
+                    tools_event_tx,
+                )
+                .await
             });
         }
 
@@ -403,12 +435,13 @@ impl ToolNode {
     /// Execute a single tool call
     #[allow(
         clippy::cognitive_complexity,
-        reason = "execute_single_tool requires: span creation, interceptor hooks, tool invocation, error handling, metrics emission, and result transformation. The complexity is justified by the comprehensive tool execution with observability."
+        reason = "execute_single_tool requires: span creation, interceptor hooks, tool invocation, error handling, metrics emission, result transformation, and streaming event emission. The complexity is justified by the comprehensive tool execution with observability."
     )]
     async fn execute_single_tool(
         tool_call: &ToolCall,
         tool: &dyn Tool,
         interceptor: &Arc<dyn ToolInterceptor>,
+        tools_event_tx: Option<tokio::sync::mpsc::UnboundedSender<ToolsEvent>>,
     ) -> Result<(String, String), ToolError> {
         let span = tracing::info_span!(
             "juncture.tool.call",
@@ -417,6 +450,18 @@ impl ToolNode {
             "juncture.tool.error" = tracing::field::Empty,
         );
         let _enter = span.enter();
+
+        // Emit ToolStarted event before execution
+        if let Some(ref tx) = tools_event_tx {
+            let input = tool_call.arguments.clone();
+            let event = ToolsEvent::ToolStarted {
+                tool_name: tool.name().to_string(),
+                tool_call_id: tool_call.id.clone(),
+                node: "tools".to_string(),
+                input,
+            };
+            let _ = tx.send(event);
+        }
 
         let state = serde_json::Value::Null;
 
@@ -456,11 +501,33 @@ impl ToolNode {
             Ok(out) => {
                 // Complete trace with success details
                 trace.complete(duration_ms, true, Some(out.clone()), None);
+
+                // Emit ToolFinished event with output
+                if let Some(ref tx) = tools_event_tx {
+                    let output_json = serde_json::json!({"result": out});
+                    let event = ToolsEvent::ToolFinished {
+                        tool_call_id: tool_call.id.clone(),
+                        output: output_json,
+                        duration_ms,
+                    };
+                    let _ = tx.send(event);
+                }
+
                 out
             }
             Err(e) => {
                 // Complete trace with failure details
                 trace.complete(duration_ms, false, None, Some(e.to_string()));
+
+                // Emit ToolFinished event with error
+                if let Some(ref tx) = tools_event_tx {
+                    let event = ToolsEvent::ToolFinished {
+                        tool_call_id: tool_call.id.clone(),
+                        output: serde_json::json!({"error": e.to_string()}),
+                        duration_ms,
+                    };
+                    let _ = tx.send(event);
+                }
 
                 // Log execution trace before returning error
                 tracing::debug!(
@@ -1289,6 +1356,135 @@ mod tests {
             result.unwrap_err(),
             ToolError::ValidationFailed(_)
         ));
+    }
+
+    // --- Tool lifecycle streaming event tests ---
+
+    #[tokio::test]
+    async fn test_tool_node_emits_started_and_finished_events() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        #[allow(clippy::redundant_clone, reason = "clarity in test setup")]
+        let node = ToolNode::new(vec![Box::new(EchoTool) as Box<dyn Tool>])
+            .with_tools_event_tx(tx);
+
+        let messages = vec![Message::ai_with_tool_calls(
+            "test",
+            vec![ToolCall {
+                id: "call_1".to_string(),
+                name: "echo".to_string(),
+                arguments: json!({"message": "hello"}),
+            }],
+        )];
+
+        let _results = node.execute(&messages).await.unwrap();
+
+        // Collect the events
+        let mut events = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            events.push(event);
+        }
+
+        // Should have ToolStarted and ToolFinished
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                juncture_core::stream::ToolsEvent::ToolStarted {
+                    tool_call_id,
+                    ..
+                } if tool_call_id == "call_1"
+            )),
+            "expected ToolStarted event"
+        );
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                juncture_core::stream::ToolsEvent::ToolFinished {
+                    tool_call_id,
+                    ..
+                } if tool_call_id == "call_1"
+            )),
+            "expected ToolFinished event"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_tool_node_emits_events_in_order() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        #[allow(clippy::redundant_clone, reason = "clarity in test setup")]
+        let node = ToolNode::new(vec![Box::new(EchoTool) as Box<dyn Tool>])
+            .with_tools_event_tx(tx);
+
+        let messages = vec![Message::ai_with_tool_calls(
+            "test",
+            vec![ToolCall {
+                id: "call_1".to_string(),
+                name: "echo".to_string(),
+                arguments: json!({"message": "hello"}),
+            }],
+        )];
+
+        let _results = node.execute(&messages).await.unwrap();
+
+        // Collect the events in order
+        let mut events = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            events.push(event);
+        }
+
+        // First event should be ToolStarted, last should be ToolFinished
+        if !events.is_empty() {
+            assert!(
+                matches!(events[0], juncture_core::stream::ToolsEvent::ToolStarted { .. }),
+                "first event should be ToolStarted"
+            );
+            assert!(
+                matches!(
+                    events[events.len() - 1],
+                    juncture_core::stream::ToolsEvent::ToolFinished { .. }
+                ),
+                "last event should be ToolFinished"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_tool_node_multiple_tools_emit_multiple_events() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        #[allow(clippy::redundant_clone, reason = "clarity in test setup")]
+        let node = ToolNode::new(vec![Box::new(EchoTool) as Box<dyn Tool>])
+            .with_tools_event_tx(tx);
+
+        let messages = vec![Message::ai_with_tool_calls(
+            "test",
+            vec![
+                ToolCall {
+                    id: "call_1".to_string(),
+                    name: "echo".to_string(),
+                    arguments: json!({"message": "first"}),
+                },
+                ToolCall {
+                    id: "call_2".to_string(),
+                    name: "echo".to_string(),
+                    arguments: json!({"message": "second"}),
+                },
+            ],
+        )];
+
+        let _results = node.execute(&messages).await.unwrap();
+
+        // Count events
+        let mut started_count = 0;
+        let mut finished_count = 0;
+        while let Ok(event) = rx.try_recv() {
+            match event {
+                juncture_core::stream::ToolsEvent::ToolStarted { .. } => started_count += 1,
+                juncture_core::stream::ToolsEvent::ToolFinished { .. } => finished_count += 1,
+                _ => {}
+            }
+        }
+
+        assert_eq!(started_count, 2, "should have 2 ToolStarted events");
+        assert_eq!(finished_count, 2, "should have 2 ToolFinished events");
     }
 }
 

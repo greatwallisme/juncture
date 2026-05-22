@@ -688,14 +688,9 @@ fn check_replace_conflicts_from_state<S: State>(
 /// This function implements the `consume()` step that happens after
 /// `apply_writes` merges all writes but before `reset_ephemeral()`.
 ///
-/// For `EphemeralValue` channels, this clears the value (making it
-/// only valid for the current superstep). For other channels, this
-/// updates version numbers to indicate the channel value has been
-/// consumed by nodes.
-///
-/// The `consume()` operation is currently handled by `reset_ephemeral()`
-/// which is called after `apply_writes`. This function exists to match
-/// the design specification and documents the consume step semantics.
+/// For `ephemeral` fields, this marks the channel's consumed flag, indicating
+/// that the value has been read by the framework. The consumed flag is reset
+/// on the next `update()` call.
 ///
 /// # Arguments
 ///
@@ -710,12 +705,12 @@ fn check_replace_conflicts_from_state<S: State>(
 /// let triggered_channels = vec![0, 2]; // channels 0 and 2 were triggered
 /// consume_triggered_channels(&mut state, &triggered_channels);
 /// ```
-pub const fn consume_triggered_channels<S: State>(state: &mut S, triggered_channels: &[usize]) {
-    // The consume operation is currently integrated into reset_ephemeral().
-    // This function is called for documentation purposes and to maintain
-    // consistency with the design specification. The actual work happens
-    // in State::reset_ephemeral() which clears ephemeral field values.
-    let _ = (state, triggered_channels);
+pub fn consume_triggered_channels<S: State>(state: &mut S, triggered_channels: &[usize]) {
+    for &field_idx in S::consume_field_indices() {
+        if triggered_channels.contains(&field_idx) {
+            state.consume_field(field_idx);
+        }
+    }
 }
 
 /// Schedule error handler tasks for failed nodes

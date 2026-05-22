@@ -1,43 +1,47 @@
-# Task Plan: Fix Conformance Review Findings
+# Task Plan: Fix B-08-006 -- ToolCallTransformer and ToolExecutionTrace
 
 ## Goal
-Fix A/B findings from conformance review (one at a time via rust-expert) and update design docs with Category C findings.
+Wire up `ToolCallTransformer` and `ToolExecutionTrace` in the tool execution path. Both are currently defined but unused in `ToolNode.execute()` / `execute_single_tool()`.
 
-## Strategy
-1. Phase 1: Fix Critical (A) findings -- one per rust-expert agent
-2. Phase 2: Fix Major (B) findings -- one per rust-expert agent
-3. Phase 3: Update design docs with Category C findings
-4. Build/test after every code change
+## Files modified
+- `crates/juncture/src/tools/node.rs` -- ToolNode, execute(), execute_single_tool(), ToolExecutionTrace
 
----
+## Phases
 
-## Phase 1: Critical (A) Finding Fixes [in_progress]
-Priority order (highest impact first):
+### Phase 1: Research [complete]
+- Read node.rs, transformer.rs, interceptor.rs, runtime.rs, trait_.rs, error.rs, mod.rs
+- Understanding: transformer is stored but never applied; trace struct exists but never instantiated
 
-1. [A-01-001] Proc-macro try_apply() for multi-write detection (Module 01)
-2. [A-01-002] finish_field() implementation (Module 01)
-3. [A-01-003] field_versions()/bump_versions() integration (Module 01)
-4. [A-02-001] StateGraph I/O Schema generics (Module 02)
-5. [A-02-002] add_node() return type doc update (Module 02)
-6. [A-02-003] compile() signature doc update (Module 02)
-7. [A-02-004] validate_keys() field-level validation (Module 02)
-8. [A-03-001] apply_writes merge order in after_tick() (Module 03)
-9. [A-04-001] DeltaChannel ancestor walk (Module 04)
-10. [A-04-002] CheckpointNamespace separator doc update (Module 04)
-11. [A-08-001] StatefulTool trait (Module 08)
-12. [A-08-002] ToolRuntime.emit_output_delta() (Module 08)
-13. [A-10-001] Store crate duplication (Module 10)
-14. [A-10-002] FilterExpr serialization (Module 10)
-15. [A-10-003] TTL background sweep (Module 10)
-16. [A-10-004] Store Debug bound (Module 10)
+### Phase 2: Extend ToolExecutionTrace struct [complete]
+- Added `input: serde_json::Value`, `output: Option<String>`, `error: Option<String>` fields
+- Updated `new()` to accept `input` parameter
+- Updated `complete()` to accept `output` and `error`
 
-## Phase 2: Major (B) Finding Fixes [pending]
-32 items total -- to be determined after Phase 1.
+### Phase 3: Wire up ToolCallTransformer in execute() [complete]
+- Transformer applied to cloned tool_call before spawning task in the loop
+- Transformer errors handled consistently: returned as tool result when handle_errors=true, propagated when false
 
-## Phase 3: Design Doc Updates (Category C) [pending]
-Update all 58 Category C findings into their respective design documents.
+### Phase 4: Wire up ToolExecutionTrace in execute_single_tool() [complete]
+- Trace created at start of execution with input
+- Trace completed after execution with duration, output/error
+- Trace logged via tracing::debug! in both success and error paths
 
-## Errors Encountered
-| Error | Attempt | Resolution |
-|-------|---------|------------|
-| (none yet) | | |
+### Phase 5: Add tests [complete]
+- test_tool_node_with_transformer: verifies transformer modifies arguments before execution
+- test_tool_node_with_transformer_error_handling: verifies transformer errors become tool results
+- test_tool_node_with_transformer_no_error_handling: verifies transformer errors propagate
+- test_tool_execution_trace_with_fields: verifies trace captures input, output, error
+
+### Phase 6: Verify [complete]
+- cargo build -p juncture: OK
+- cargo clippy -p juncture --all-targets -- -D warnings: OK (zero warnings)
+- cargo test -p juncture -- tools --nocapture: OK (69/69 passed)
+- Commit: 4843806, 1 file changed, 255 insertions, 10 deletions
+
+## Status
+- [x] Phase 1: Research
+- [x] Phase 2: Extend ToolExecutionTrace
+- [x] Phase 3: Wire up transformer
+- [x] Phase 4: Wire up trace
+- [x] Phase 5: Add tests
+- [x] Phase 6: Verify

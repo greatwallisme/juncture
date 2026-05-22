@@ -717,6 +717,10 @@ impl<S: State> PregelLoop<S> {
         clippy::too_many_lines,
         reason = "after_tick orchestrates multiple sequential phases: apply writes, bump versions, consume channels, emit events including stream_data, compute tasks, drain interrupts, check interrupts, finish channels, increment step"
     )]
+    #[allow(
+        clippy::cognitive_complexity,
+        reason = "after_tick orchestrates multiple sequential phases: apply writes, bump versions, consume channels, emit events including stream_data, compute tasks, drain interrupts, check interrupts, finish channels, increment step"
+    )]
     pub async fn after_tick(&mut self, result: SuperstepResult<S>) -> Result<(), JunctureError>
     where
         S: Clone + serde::Serialize,
@@ -3590,8 +3594,7 @@ mod tests {
                 TaskOutput {
                     task_id: "task-1".to_string(),
                     node_name: "node_a".to_string(),
-                    command: Command::end()
-                        .with_stream_data(serde_json::json!("from_a")),
+                    command: Command::end().with_stream_data(serde_json::json!("from_a")),
                     duration: std::time::Duration::from_millis(1),
                     trigger: TaskTrigger::Pull,
                     error: None,
@@ -3618,7 +3621,11 @@ mod tests {
             }
         }
 
-        assert_eq!(custom_events.len(), 1, "only node_a should emit a custom event");
+        assert_eq!(
+            custom_events.len(),
+            1,
+            "only node_a should emit a custom event"
+        );
         assert_eq!(custom_events[0].0, "node_a");
         assert_eq!(custom_events[0].1, serde_json::json!("from_a"));
     }

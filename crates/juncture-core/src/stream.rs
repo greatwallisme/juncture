@@ -597,6 +597,13 @@ pub async fn call_llm_streaming<S: State, M: crate::llm::ChatModel>(
     let mut tool_calls: Vec<crate::state::ToolCall> = Vec::new();
     let mut total_usage = crate::state::TokenUsage::default();
 
+    // Extract tags from CallOptions for nostream filtering
+    #[allow(clippy::option_if_let_else, reason = "explicit match is clearer")]
+    let tags: Vec<String> = match options {
+        Some(opts) => opts.tags.clone(),
+        None => Vec::new(),
+    };
+
     while let Some(chunk_result) = stream.next().await {
         let chunk = chunk_result?;
 
@@ -652,7 +659,7 @@ pub async fn call_llm_streaming<S: State, M: crate::llm::ChatModel>(
             metadata: MessageStreamMetadata {
                 node: node_name.to_string(),
                 model: model.model_name().to_string(),
-                tags: vec![],
+                tags: tags.clone(),
                 ns: emitter.ns().to_vec(),
             },
         };
@@ -933,7 +940,28 @@ impl StreamTransformer for BatchTransformer {
 
 #[cfg(test)]
 mod tests {
-    use super::{MessageBatchConfig, StreamConfig, StreamMode, StreamResumption};
+    use super::{
+        EventEmitter, MessageBatchConfig, MessageChunk, MessageStreamMetadata, StreamConfig,
+        StreamEvent, StreamMode, StreamResumption, ToolsEvent,
+    };
+    use crate::state::{FieldsChanged, State};
+
+    /// Minimal state implementation for `EventEmitter` tests.
+    #[derive(Clone, Debug)]
+    struct TestState;
+
+    impl State for TestState {
+        type Update = TestStateUpdate;
+
+        fn apply(&mut self, _update: Self::Update) -> FieldsChanged {
+            FieldsChanged(0)
+        }
+
+        fn reset_ephemeral(&mut self) {}
+    }
+
+    #[derive(Clone, Debug, Default)]
+    struct TestStateUpdate;
 
     #[test]
     fn message_batch_config_default() {
@@ -1008,5 +1036,113 @@ mod tests {
         assert_eq!(resumption.run_id, "run1");
         assert_eq!(resumption.last_checkpoint_id, Some("cp-5".to_string()));
         assert_eq!(resumption.last_step, Some(5));
+    }
+
+    // --- EventEmitter nostream tag filtering ---
+
+    #[test]
+    fn should_emit_messages_event_without_nostream() {
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        let emitter = EventEmitter::<TestState>::new(tx, StreamMode::Messages);
+        let event = StreamEvent::Messages {
+            chunk: MessageChunk {
+                content: "hello".to_string(),
+                tool_call_chunks: Vec::new(),
+                usage_delta: None,
+            },
+            metadata: MessageStreamMetadata {
+                node: "agent".to_string(),
+                model: "test".to_string(),
+                tags: vec![],
+                ns: Vec::new(),
+            },
+        };
+        assert!(emitter.should_emit(&event));
+    }
+
+    #[test]
+    fn should_emit_messages_event_with_nostream_suppressed() {
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        let emitter = EventEmitter::<TestState>::new(tx, StreamMode::Messages);
+        let event = StreamEvent::Messages {
+            chunk: MessageChunk {
+                content: "hello".to_string(),
+                tool_call_chunks: Vec::new(),
+                usage_delta: None,
+            },
+            metadata: MessageStreamMetadata {
+                node: "agent".to_string(),
+                model: "test".to_string(),
+                tags: vec!["nostream".to_string()],
+                ns: Vec::new(),
+            },
+        };
+        assert!(!emitter.should_emit(&event));
+    }
+
+    #[test]
+    fn should_emit_messages_event_with_other_tags_not_suppressed() {
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        let emitter = EventEmitter::<TestState>::new(tx, StreamMode::Messages);
+        let event = StreamEvent::Messages {
+            chunk: MessageChunk {
+                content: "hello".to_string(),
+                tool_call_chunks: Vec::new(),
+                usage_delta: None,
+            },
+            metadata: MessageStreamMetadata {
+                node: "agent".to_string(),
+                model: "test".to_string(),
+                tags: vec!["fast".to_string(), "stream".to_string()],
+                ns: Vec::new(),
+            },
+        };
+        assert!(emitter.should_emit(&event));
+    }
+
+    #[test]
+    fn should_emit_end_event_always_in_messages_mode() {
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        let emitter = EventEmitter::<TestState>::new(tx, StreamMode::Messages);
+        let event = StreamEvent::End {
+            output: TestState,
+        };
+        assert!(emitter.should_emit(&event));
+    }
+
+    #[test]
+    fn should_emit_tools_event_in_tools_mode() {
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        let emitter = EventEmitter::<TestState>::new(tx, StreamMode::Tools);
+        let event = StreamEvent::Tools(ToolsEvent::ToolStarted {
+            tool_name: "search".to_string(),
+            tool_call_id: "call_1".to_string(),
+            node: "tools".to_string(),
+            input: serde_json::json!({}),
+        });
+        assert!(emitter.should_emit(&event));
+    }
+
+    #[test]
+    fn should_emit_tool_output_delta_in_tools_mode() {
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        let emitter = EventEmitter::<TestState>::new(tx, StreamMode::Tools);
+        let event = StreamEvent::Tools(ToolsEvent::ToolOutputDelta {
+            tool_call_id: "call_1".to_string(),
+            delta: "partial".to_string(),
+        });
+        assert!(emitter.should_emit(&event));
+    }
+
+    #[test]
+    fn should_emit_tool_finished_in_tools_mode() {
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        let emitter = EventEmitter::<TestState>::new(tx, StreamMode::Tools);
+        let event = StreamEvent::Tools(ToolsEvent::ToolFinished {
+            tool_call_id: "call_1".to_string(),
+            output: serde_json::json!({"result": "ok"}),
+            duration_ms: 100,
+        });
+        assert!(emitter.should_emit(&event));
     }
 }

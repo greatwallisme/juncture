@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use juncture_core::{config::RunnableConfig, state::State, store::Store};
+use juncture_core::{config::RunnableConfig, state::State, store::Store, stream::ToolsEvent};
 
 /// Runtime context for stateful tool execution
 ///
@@ -55,6 +55,12 @@ pub struct ToolRuntime<S: State> {
 
     /// Optional cross-thread persistent store for long-term memory
     pub store: Option<Arc<dyn Store>>,
+
+    /// Optional sender for tool lifecycle streaming events.
+    ///
+    /// When set, [`emit_output_delta`](Self::emit_output_delta) sends
+    /// [`ToolsEvent::ToolOutputDelta`] events through this channel.
+    tools_event_tx: Option<tokio::sync::mpsc::UnboundedSender<ToolsEvent>>,
 }
 
 impl<S: State> ToolRuntime<S> {
@@ -71,6 +77,7 @@ impl<S: State> ToolRuntime<S> {
             tool_call_id,
             config,
             store,
+            tools_event_tx: None,
         }
     }
 
@@ -82,7 +89,18 @@ impl<S: State> ToolRuntime<S> {
             tool_call_id,
             config,
             store: None,
+            tools_event_tx: None,
         }
+    }
+
+    /// Attach a tool event sender for streaming output deltas.
+    #[must_use]
+    pub fn with_tools_event_tx(
+        mut self,
+        tx: tokio::sync::mpsc::UnboundedSender<ToolsEvent>,
+    ) -> Self {
+        self.tools_event_tx = Some(tx);
+        self
     }
 
     /// Get a reference to the state
@@ -111,12 +129,17 @@ impl<S: State> ToolRuntime<S> {
 
     /// Emit an incremental output delta during tool execution.
     ///
-    /// Sends a partial result chunk for streaming tool output observation.
-    /// Currently logs the delta at debug level; will be connected to the
-    /// graph's event stream via `StreamEvent::Tools(ToolsEvent::ToolOutputDelta)`
-    /// when tool streaming is fully integrated with the Pregel execution
-    /// pipeline.
+    /// Sends a [`ToolsEvent::ToolOutputDelta`] through the tools event channel
+    /// when one is configured. Falls back to debug logging when no channel
+    /// is available (e.g., in test contexts).
     pub fn emit_output_delta(&self, delta: &str) {
+        if let Some(ref tx) = self.tools_event_tx {
+            let event = ToolsEvent::ToolOutputDelta {
+                tool_call_id: self.tool_call_id.clone(),
+                delta: delta.to_string(),
+            };
+            let _ = tx.send(event);
+        }
         tracing::debug!(
             tool_call_id = %self.tool_call_id,
             delta_len = delta.len(),
@@ -132,6 +155,7 @@ impl<S: State> Clone for ToolRuntime<S> {
             tool_call_id: self.tool_call_id.clone(),
             config: self.config.clone(),
             store: self.store.clone(),
+            tools_event_tx: self.tools_event_tx.clone(),
         }
     }
 }
@@ -144,6 +168,10 @@ impl<S: State> std::fmt::Debug for ToolRuntime<S> {
             .field(
                 "store",
                 &self.store.as_ref().map_or("None", |_| "Some(...)"),
+            )
+            .field(
+                "tools_event_tx",
+                &self.tools_event_tx.as_ref().map_or("None", |_| "Some(...)"),
             )
             .field("state", &std::any::type_name::<S>())
             .finish()
@@ -220,6 +248,29 @@ mod tests {
         runtime.emit_output_delta("partial result chunk");
         runtime.emit_output_delta("");
         runtime.emit_output_delta("another delta");
+    }
+
+    #[test]
+    fn test_emit_output_delta_with_tx_sends_event() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let state = TestState;
+        let config = RunnableConfig::default();
+        let runtime = ToolRuntime::new_without_store(state, "call_delta".to_string(), config)
+            .with_tools_event_tx(tx);
+
+        runtime.emit_output_delta("delta_chunk");
+
+        let event = rx.try_recv().expect("should receive ToolOutputDelta");
+        match event {
+            juncture_core::stream::ToolsEvent::ToolOutputDelta {
+                tool_call_id,
+                delta,
+            } => {
+                assert_eq!(tool_call_id, "call_delta");
+                assert_eq!(delta, "delta_chunk");
+            }
+            other => panic!("expected ToolOutputDelta, got {other:?}"),
+        }
     }
 }
 

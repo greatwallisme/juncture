@@ -162,6 +162,12 @@ pub struct CallOptions {
 
     /// Response format specification.
     pub response_format: Option<ResponseFormat>,
+
+    /// Tags for streaming metadata and filtering.
+    ///
+    /// Tags are propagated into stream events as [`MessageStreamMetadata::tags`].
+    /// The `"nostream"` tag causes streaming events to be suppressed for this call.
+    pub tags: Vec<String>,
 }
 
 /// Tool definition for function calling.

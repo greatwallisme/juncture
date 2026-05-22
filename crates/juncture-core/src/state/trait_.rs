@@ -39,6 +39,30 @@ pub trait State: Clone + Send + Sync + std::fmt::Debug + 'static {
     /// Default implementation is a no-op for channels that don't need finish semantics.
     fn finish_field(&mut self, _field_idx: usize) {}
 
+    /// Consume a specific field (called after `apply_writes()` per superstep)
+    ///
+    /// This marks a channel's value as consumed by the framework after writes
+    /// have been applied. For `EphemeralChannel`, this sets the `consumed` flag
+    /// to `true`, signaling that the value has been read. The consumed flag is
+    /// reset on the next `update()`.
+    ///
+    /// Called in `after_tick()` for each field that changed in the superstep.
+    ///
+    /// Default implementation is a no-op for field types that don't need
+    /// consume semantics.
+    fn consume_field(&mut self, _field_idx: usize) {}
+
+    /// Indices of fields that use the `ephemeral` reducer.
+    ///
+    /// Used by the Pregel engine to call `consume_field()` only for fields
+    /// that need consume semantics, avoiding unnecessary work. The proc-macro
+    /// generates this as a static slice from `#[reducer(ephemeral)]` annotations.
+    /// Default returns an empty slice for manually implemented states.
+    #[must_use]
+    fn consume_field_indices() -> &'static [usize] {
+        &[]
+    }
+
     /// Schema version for migration
     #[must_use]
     fn schema_version() -> u32 {

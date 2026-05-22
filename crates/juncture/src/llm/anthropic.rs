@@ -893,18 +893,55 @@ struct AnthropicStreamError {
 /// Convert Anthropic SSE event to `MessageChunk`.
 fn convert_sse_event(event: AnthropicSSEEvent) -> Result<crate::llm::MessageChunk, LlmError> {
     match event {
-        AnthropicSSEEvent::ContentBlockDelta { delta, .. } => {
+        AnthropicSSEEvent::ContentBlockStart { index, content_block } => {
+            let mut tool_call_chunks = Vec::new();
+            // content_block_start for tool_use carries the tool id and name
+            if let Some(ref block) = content_block
+                && let Some(block_type) = block.get("type").and_then(|v| v.as_str())
+                && block_type == "tool_use"
+            {
+                let id = block
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .map(std::borrow::ToOwned::to_owned);
+                let name = block
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .map(std::borrow::ToOwned::to_owned);
+                tool_call_chunks.push(crate::llm::ToolCallChunk {
+                    id,
+                    name,
+                    args_delta: String::new(),
+                    index,
+                });
+            }
+            Ok(crate::llm::MessageChunk {
+                content: String::new(),
+                tool_call_chunks,
+                usage_delta: None,
+            })
+        }
+        AnthropicSSEEvent::ContentBlockDelta { delta, index } => {
             let content = if delta.type_ == "text" {
                 delta.text.unwrap_or_default()
-            } else if delta.type_ == "tool_use" {
-                delta.partial_json.unwrap_or_default()
             } else {
                 String::new()
             };
 
+            let tool_call_chunks = if delta.type_ == "tool_use" {
+                vec![crate::llm::ToolCallChunk {
+                    id: None,
+                    name: None,
+                    args_delta: delta.partial_json.unwrap_or_default(),
+                    index,
+                }]
+            } else {
+                Vec::new()
+            };
+
             Ok(crate::llm::MessageChunk {
                 content,
-                tool_call_chunks: Vec::new(),
+                tool_call_chunks,
                 usage_delta: None,
             })
         }
@@ -922,6 +959,163 @@ fn convert_sse_event(event: AnthropicSSEEvent) -> Result<crate::llm::MessageChun
             tool_call_chunks: Vec::new(),
             usage_delta: None,
         }),
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::too_many_lines,
+    reason = "test helper constructs SSE event values with known shapes"
+)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_convert_sse_text_delta() {
+        // Simulate a text delta event
+        let event = AnthropicSSEEvent::ContentBlockDelta {
+            index: 0,
+            delta: DeltaContent {
+                type_: "text".to_string(),
+                text: Some("Hello ".to_string()),
+                partial_json: None,
+            },
+        };
+        let chunk = convert_sse_event(event).unwrap();
+        assert_eq!(chunk.content, "Hello ");
+        assert!(chunk.tool_call_chunks.is_empty());
+        assert!(chunk.usage_delta.is_none());
+    }
+
+    #[test]
+    fn test_convert_sse_tool_use_delta() {
+        // Simulate a tool_use delta event with partial JSON
+        let event = AnthropicSSEEvent::ContentBlockDelta {
+            index: 0,
+            delta: DeltaContent {
+                type_: "tool_use".to_string(),
+                text: None,
+                partial_json: Some("{\"location\": \"San \"}".to_string()),
+            },
+        };
+        let chunk = convert_sse_event(event).unwrap();
+        assert_eq!(chunk.content, ""); // tool_use content is NOT text
+        assert_eq!(chunk.tool_call_chunks.len(), 1);
+        assert_eq!(chunk.tool_call_chunks[0].args_delta, "{\"location\": \"San \"}");
+        assert_eq!(chunk.tool_call_chunks[0].index, 0);
+        assert!(chunk.tool_call_chunks[0].id.is_none());
+        assert!(chunk.tool_call_chunks[0].name.is_none());
+    }
+
+    #[test]
+    fn test_convert_sse_tool_use_delta_with_index() {
+        // Multiple tool blocks: index 1 indicates second tool
+        let event = AnthropicSSEEvent::ContentBlockDelta {
+            index: 1,
+            delta: DeltaContent {
+                type_: "tool_use".to_string(),
+                text: None,
+                partial_json: Some("{\"query\": \"weather\"}".to_string()),
+            },
+        };
+        let chunk = convert_sse_event(event).unwrap();
+        assert_eq!(chunk.content, "");
+        assert_eq!(chunk.tool_call_chunks.len(), 1);
+        assert_eq!(chunk.tool_call_chunks[0].index, 1);
+        assert_eq!(chunk.tool_call_chunks[0].args_delta, "{\"query\": \"weather\"}");
+    }
+
+    #[test]
+    fn test_convert_sse_tool_use_start() {
+        // content_block_start with tool_use provides id and name
+        let content_block = serde_json::json!({
+            "type": "tool_use",
+            "id": "toolu_abc123",
+            "name": "get_weather"
+        });
+        let event = AnthropicSSEEvent::ContentBlockStart {
+            index: 0,
+            content_block: Some(content_block),
+        };
+        let chunk = convert_sse_event(event).unwrap();
+        assert_eq!(chunk.content, "");
+        assert_eq!(chunk.tool_call_chunks.len(), 1);
+        assert_eq!(
+            chunk.tool_call_chunks[0].id.as_deref(),
+            Some("toolu_abc123")
+        );
+        assert_eq!(
+            chunk.tool_call_chunks[0].name.as_deref(),
+            Some("get_weather")
+        );
+        assert!(chunk.tool_call_chunks[0].args_delta.is_empty());
+        assert_eq!(chunk.tool_call_chunks[0].index, 0);
+    }
+
+    #[test]
+    fn test_convert_sse_tool_use_start_non_tool_block() {
+        // content_block_start for a text block should produce no chunks
+        let content_block = serde_json::json!({
+            "type": "text",
+            "text": "Hello"
+        });
+        let event = AnthropicSSEEvent::ContentBlockStart {
+            index: 0,
+            content_block: Some(content_block),
+        };
+        let chunk = convert_sse_event(event).unwrap();
+        assert_eq!(chunk.content, "");
+        assert!(chunk.tool_call_chunks.is_empty());
+    }
+
+    #[test]
+    fn test_convert_sse_message_delta() {
+        let usage = crate::state::TokenUsage {
+            input_tokens: 10,
+            output_tokens: 20,
+            total_tokens: 30,
+        };
+        let event = AnthropicSSEEvent::MessageDelta {
+            delta: DeltaMessage {
+                stop_reason: Some("end_turn".to_string()),
+                stop_sequence: None,
+            },
+            usage: Some(usage),
+        };
+        let chunk = convert_sse_event(event).unwrap();
+        assert_eq!(chunk.content, "");
+        assert!(chunk.tool_call_chunks.is_empty());
+        assert!(chunk.usage_delta.is_some());
+        let usage_delta = chunk.usage_delta.unwrap();
+        assert_eq!(usage_delta.output_tokens, 20);
+    }
+
+    #[test]
+    fn test_convert_sse_message_stop() {
+        let event = AnthropicSSEEvent::MessageStop;
+        let chunk = convert_sse_event(event).unwrap();
+        assert_eq!(chunk.content, "");
+        assert!(chunk.tool_call_chunks.is_empty());
+        assert!(chunk.usage_delta.is_none());
+    }
+
+    #[test]
+    fn test_convert_sse_error() {
+        let error = AnthropicStreamError {
+            type_: "invalid_request_error".to_string(),
+            message: "Bad request".to_string(),
+        };
+        let event = AnthropicSSEEvent::Error { error };
+        convert_sse_event(event).unwrap_err();
+    }
+
+    #[test]
+    fn test_convert_sse_unknown_event() {
+        let event = AnthropicSSEEvent::MessageStart;
+        let chunk = convert_sse_event(event).unwrap();
+        assert_eq!(chunk.content, "");
+        assert!(chunk.tool_call_chunks.is_empty());
     }
 }
 

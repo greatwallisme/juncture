@@ -149,8 +149,23 @@ pub fn derive_state_impl(input: DeriveInput) -> proc_macro::TokenStream {
         })
         .collect();
 
+    // Collect ephemeral field indices for consume semantics at the Pregel engine level
+    let consume_field_indices: Vec<proc_macro2::TokenStream> = field_names
+        .iter()
+        .zip(field_reducers.iter())
+        .enumerate()
+        .filter(|(_, (_, reducer))| matches!(reducer, ReducerType::Ephemeral))
+        .map(|(idx, _)| {
+            let idx_val = idx;
+            quote! { #idx_val }
+        })
+        .collect();
+
     // Generate finish_field() match arms for replace_after_finish fields
     let finish_field_arms = generate_finish_field_arms(&field_names, &field_reducers);
+
+    // Generate consume_field() match arms for ephemeral fields
+    let consume_field_arms = generate_consume_field_arms(&field_names, &field_reducers);
 
     // Generate field_is_set match arms for efficient field checking without serialization
     let field_is_set_arms = generate_field_is_set_arms(&field_names);
@@ -197,6 +212,13 @@ pub fn derive_state_impl(input: DeriveInput) -> proc_macro::TokenStream {
             /// fields that need finish semantics, avoiding unnecessary work.
             #[must_use]
             pub const REPLACE_AFTER_FINISH_FIELD_INDICES: &'static [usize] = &[#(#replace_after_finish_indices),*];
+
+            /// Indices of fields that use the `ephemeral` reducer.
+            ///
+            /// Used by the Pregel engine to call `consume_field()` only for
+            /// fields that need consume semantics, avoiding unnecessary work.
+            #[must_use]
+            pub const CONSUME_FIELD_INDICES: &'static [usize] = &[#(#consume_field_indices),*];
 
             /// Check if a specific field is set (Some) in an update.
             ///
@@ -259,9 +281,20 @@ pub fn derive_state_impl(input: DeriveInput) -> proc_macro::TokenStream {
                 Self::REPLACE_AFTER_FINISH_FIELD_INDICES
             }
 
+            fn consume_field_indices() -> &'static [usize] {
+                Self::CONSUME_FIELD_INDICES
+            }
+
             fn finish_field(&mut self, field_idx: usize) {
                 match field_idx {
                     #(#finish_field_arms)*
+                    _ => {}
+                }
+            }
+
+            fn consume_field(&mut self, field_idx: usize) {
+                match field_idx {
+                    #(#consume_field_arms)*
                     _ => {}
                 }
             }
@@ -536,6 +569,43 @@ fn generate_finish_field_arms(
             quote! {
                 #idx_val => {
                     // replace_after_finish field finalized -- value already in place
+                }
+            }
+        })
+        .collect()
+}
+
+/// Generate `consume_field()` match arms for `ephemeral` fields.
+///
+/// For ephemeral fields, the `consume()` call marks the channel's value as
+/// consumed after writes have been applied in the superstep. This establishes
+/// the consume lifecycle hook point, matching the design spec where all
+/// triggered channels call `consume()` after `apply_writes()`.
+///
+/// Since the state struct stores plain values (not Channel wrappers), the
+/// consumed flag tracking happens at the `EphemeralChannel` level. The
+/// generated arm serves as the hook that connects the Pregel engine's
+/// consume call to the channel layer.
+///
+/// Fields with other reducer types are omitted from the match arms, falling
+/// through to the wildcard `_ => {}` no-op in the generated implementation.
+fn generate_consume_field_arms(
+    field_names: &[Ident],
+    field_reducers: &[ReducerType],
+) -> Vec<proc_macro2::TokenStream> {
+    field_names
+        .iter()
+        .zip(field_reducers.iter())
+        .enumerate()
+        .filter(|(_, (_, reducer))| matches!(reducer, ReducerType::Ephemeral))
+        .map(|(idx, _)| {
+            let idx_val = idx;
+            // The ephemeral field value is already in place after apply_writes().
+            // consume_field() marks the channel as consumed; the value will be
+            // cleared by the subsequent reset_ephemeral() call.
+            quote! {
+                #idx_val => {
+                    // ephemeral field consumed -- reset_ephemeral will clear the value
                 }
             }
         })

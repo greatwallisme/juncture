@@ -324,8 +324,7 @@ mod tests {
 
     #[test]
     fn command_with_stream_data_works_with_goto() {
-        let cmd = Command::<TestState>::goto("next_node")
-            .with_stream_data(json!("data"));
+        let cmd = Command::<TestState>::goto("next_node").with_stream_data(json!("data"));
         assert!(matches!(cmd.goto, Goto::Next(ref target) if target == "next_node"));
         assert_eq!(cmd.stream_data.len(), 1);
     }
