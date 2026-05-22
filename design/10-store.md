@@ -712,6 +712,13 @@ let _sweep_handle = store.start_sweep_task();
 
 ---
 
+## 11. Implementation Enhancements (Category C)
+
+1. **[C-10-001]** FilterExpr::matches() evaluation engine with dot-notation path access and type-aware JSON comparison
+2. **[C-10-002]** Item::is_expired() helper method for clean TTL checking
+
+---
+
 ## 源码参考索引
 
 | Juncture 概念 | LangGraph 源码 |
