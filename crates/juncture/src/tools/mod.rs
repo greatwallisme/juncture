@@ -65,7 +65,7 @@ pub use error::ToolError;
 pub use interceptor::{CompositeInterceptor, NopToolInterceptor, ToolInterceptor};
 pub use node::{ToolExecutionTrace, ToolNode, ToolNodeConfig};
 pub use runtime::ToolRuntime;
-pub use trait_::{Tool, ToolDefinition};
+pub use trait_::{StatefulTool, Tool, ToolDefinition};
 pub use transformer::{CompositeTransformer, NopToolTransformer, ToolCallTransformer};
 pub use validation::ValidationNode;
 

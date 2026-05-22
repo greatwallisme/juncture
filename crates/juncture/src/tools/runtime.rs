@@ -126,7 +126,10 @@ impl<S: State> std::fmt::Debug for ToolRuntime<S> {
         f.debug_struct("ToolRuntime")
             .field("tool_call_id", &self.tool_call_id)
             .field("config", &self.config)
-            .field("store", &self.store.as_ref().map_or("None", |_| "Some(...)"))
+            .field(
+                "store",
+                &self.store.as_ref().map_or("None", |_| "Some(...)"),
+            )
             .field("state", &std::any::type_name::<S>())
             .finish()
     }
