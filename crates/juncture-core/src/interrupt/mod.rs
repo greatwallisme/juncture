@@ -78,7 +78,37 @@ impl From<Vec<serde_json::Value>> for ResumeValue {
 }
 
 /// Tag used to mark interrupt signals that should be hidden from external consumers
+///
+/// Nodes whose names start and end with `__` (e.g. `__route__`) are automatically
+/// considered hidden. Hidden nodes are filtered from interrupt checks and stream
+/// event emission so internal routing/infrastructure nodes never surface to
+/// external consumers.
 pub const HIDDEN_TAG: &str = "__hidden__";
+
+/// Check if a node name indicates a hidden (internal) node.
+///
+/// A node is considered hidden when its name both starts and ends with `__`,
+/// following the convention established by `LangGraph`'s `TAG_HIDDEN` mechanism.
+///
+/// Hidden nodes are filtered from:
+/// - `interrupt_before` / `interrupt_after` checks via [`should_interrupt`]
+/// - `StreamEvent::Interrupt` emission in the Pregel loop
+///
+/// # Examples
+///
+/// ```
+/// use juncture_core::interrupt::is_hidden_node;
+///
+/// assert!(is_hidden_node("__route__"));
+/// assert!(is_hidden_node("__internal_router__"));
+/// assert!(!is_hidden_node("my_node"));
+/// assert!(!is_hidden_node("__incomplete"));
+/// assert!(!is_hidden_node("normal__"));
+/// ```
+#[must_use]
+pub fn is_hidden_node(node_name: &str) -> bool {
+    node_name.starts_with("__") && node_name.ends_with("__") && node_name.len() > 4
+}
 
 /// Generate a deterministic interrupt ID from node name and index
 ///
@@ -162,11 +192,17 @@ pub fn should_interrupt<S: crate::State>(
         return None;
     }
 
-    // Step 2: Node name check
+    // Step 2: Node name check (skip hidden/internal nodes)
     let mut signals = Vec::new();
 
     for task in pending_tasks {
         let node_name = &task.node_name;
+
+        // Hidden nodes (names starting/ending with __) are internal
+        // infrastructure and must never surface as interrupts.
+        if is_hidden_node(node_name) {
+            continue;
+        }
 
         if interrupt_before.contains(node_name) {
             signals.push(InterruptSignal {
@@ -329,7 +365,8 @@ impl Scratchpad {
 
 #[cfg(test)]
 mod tests {
-    use super::Scratchpad;
+    use super::{HIDDEN_TAG, Scratchpad, is_hidden_node, should_interrupt};
+    use std::collections::{HashMap, HashSet};
 
     #[test]
     fn scratchpad_get_null_resume() {
@@ -338,6 +375,166 @@ mod tests {
         pad.mark_interrupt_processed("int-1");
         assert!(pad.get_null_resume("int-1"));
         assert!(!pad.get_null_resume("int-2"));
+    }
+
+    // --- is_hidden_node tests ---
+
+    #[test]
+    fn hidden_node_double_underscore_prefix_and_suffix() {
+        assert!(is_hidden_node("__route__"));
+        assert!(is_hidden_node("__internal__"));
+        assert!(is_hidden_node("__error_handler__"));
+    }
+
+    #[test]
+    fn normal_nodes_are_not_hidden() {
+        assert!(!is_hidden_node("my_node"));
+        assert!(!is_hidden_node("agent"));
+        assert!(!is_hidden_node("review"));
+    }
+
+    #[test]
+    fn partial_underscore_prefix_is_not_hidden() {
+        assert!(!is_hidden_node("__incomplete"));
+        assert!(!is_hidden_node("__only_start"));
+    }
+
+    #[test]
+    fn partial_underscore_suffix_is_not_hidden() {
+        assert!(!is_hidden_node("only_end__"));
+        assert!(!is_hidden_node("incomplete__"));
+    }
+
+    #[test]
+    fn bare_double_underscore_is_not_hidden() {
+        // "____" is only underscores and too short to be a meaningful hidden name
+        assert!(!is_hidden_node("____"));
+    }
+
+    #[test]
+    fn hidden_tag_constant_value() {
+        assert_eq!(HIDDEN_TAG, "__hidden__");
+    }
+
+    // --- should_interrupt filtering tests ---
+
+    /// Minimal `State` impl for testing `should_interrupt`.
+    #[derive(Clone, Debug, serde::Serialize)]
+    struct TestState;
+
+    impl crate::State for TestState {
+        type Update = TestUpdate;
+        fn apply(&mut self, _: Self::Update) -> crate::FieldsChanged {
+            crate::FieldsChanged(0)
+        }
+        fn reset_ephemeral(&mut self) {}
+    }
+
+    #[derive(Clone, Debug, Default, serde::Serialize)]
+    struct TestUpdate;
+
+    fn make_task(node_name: &str) -> crate::PendingTask<TestState> {
+        crate::PendingTask::pull(uuid::Uuid::new_v4().to_string(), node_name.to_string())
+    }
+
+    #[test]
+    fn hidden_nodes_filtered_from_interrupt_before() {
+        let tasks = vec![
+            make_task("agent"),
+            make_task("__route__"),
+            make_task("review"),
+        ];
+
+        let mut interrupt_before = HashSet::new();
+        interrupt_before.insert("agent".to_string());
+        interrupt_before.insert("__route__".to_string());
+        interrupt_before.insert("review".to_string());
+
+        let channel_versions: HashMap<String, u64> =
+            std::iter::once(("field_0".to_string(), 1u64)).collect();
+        let versions_seen = HashMap::new();
+
+        let result = should_interrupt(
+            &tasks,
+            &interrupt_before,
+            &HashSet::new(),
+            &channel_versions,
+            &versions_seen,
+        );
+
+        let signals = result.expect("should return signals");
+        // Only "agent" and "review" should produce signals, "__route__" filtered
+        assert_eq!(signals.len(), 2, "hidden node __route__ should be filtered");
+        let nodes: Vec<&str> = signals
+            .iter()
+            .filter_map(|s| s.payload.get("node").and_then(|v| v.as_str()))
+            .collect();
+        assert!(nodes.contains(&"agent"), "agent should be present");
+        assert!(nodes.contains(&"review"), "review should be present");
+        assert!(
+            !nodes.contains(&"__route__"),
+            "__route__ should be filtered"
+        );
+    }
+
+    #[test]
+    fn hidden_nodes_filtered_from_interrupt_after() {
+        let tasks = vec![make_task("agent"), make_task("__internal_router__")];
+
+        let mut interrupt_after = HashSet::new();
+        interrupt_after.insert("agent".to_string());
+        interrupt_after.insert("__internal_router__".to_string());
+
+        let channel_versions: HashMap<String, u64> =
+            std::iter::once(("field_0".to_string(), 1u64)).collect();
+        let versions_seen = HashMap::new();
+
+        let result = should_interrupt(
+            &tasks,
+            &HashSet::new(),
+            &interrupt_after,
+            &channel_versions,
+            &versions_seen,
+        );
+
+        let signals = result.expect("should return signals");
+        assert_eq!(
+            signals.len(),
+            1,
+            "only agent should produce a signal, __internal_router__ filtered"
+        );
+        let node = signals[0]
+            .payload
+            .get("node")
+            .and_then(|v| v.as_str())
+            .expect("should have node");
+        assert_eq!(node, "agent");
+    }
+
+    #[test]
+    fn all_hidden_nodes_produces_no_signals() {
+        let tasks = vec![make_task("__route__"), make_task("__handler__")];
+
+        let mut interrupt_before = HashSet::new();
+        interrupt_before.insert("__route__".to_string());
+        interrupt_before.insert("__handler__".to_string());
+
+        let channel_versions: HashMap<String, u64> =
+            std::iter::once(("field_0".to_string(), 1u64)).collect();
+        let versions_seen = HashMap::new();
+
+        let result = should_interrupt(
+            &tasks,
+            &interrupt_before,
+            &HashSet::new(),
+            &channel_versions,
+            &versions_seen,
+        );
+
+        assert!(
+            result.is_none(),
+            "all-hidden-node tasks should produce no interrupt signals"
+        );
     }
 }
 

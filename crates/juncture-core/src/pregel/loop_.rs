@@ -6,8 +6,7 @@
 use crate::{
     JunctureError, Node, State,
     checkpoint::{
-        Checkpoint, CheckpointMetadata, CheckpointSource, DeltaCounters,
-        generate_checkpoint_id,
+        Checkpoint, CheckpointMetadata, CheckpointSource, DeltaCounters, generate_checkpoint_id,
     },
     edge::TriggerTable,
     interrupt::should_interrupt,
@@ -849,24 +848,8 @@ impl<S: State> PregelLoop<S> {
             self.pending_interrupts.clone_from(&node_interrupts);
             self.status = LoopStatus::InterruptAfter(node_interrupts.clone());
 
-            // Emit interrupt events to stream
-            if let Some(ref tx) = self.stream_tx {
-                let ns = self.current_ns();
-                for signal in &node_interrupts {
-                    let event = StreamEvent::Interrupt {
-                        node: signal
-                            .payload
-                            .get("node")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("unknown")
-                            .to_string(),
-                        payload: signal.payload.clone(),
-                        resumable: true,
-                        ns: ns.clone(),
-                    };
-                    let _ = tx.send(event);
-                }
-            }
+            // Emit interrupt events to stream (hidden nodes filtered)
+            self.emit_interrupt_events(&node_interrupts);
 
             // Save checkpoint with Interrupt source for HITL recovery
             let node = self.interrupt_node_name().to_string();
@@ -911,24 +894,8 @@ impl<S: State> PregelLoop<S> {
                 self.pending_interrupts.clone_from(&signals);
                 self.status = LoopStatus::InterruptAfter(signals.clone());
 
-                // Emit interrupt events to stream
-                if let Some(ref tx) = self.stream_tx {
-                    let ns = self.current_ns();
-                    for signal in &signals {
-                        let event = StreamEvent::Interrupt {
-                            node: signal
-                                .payload
-                                .get("node")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("unknown")
-                                .to_string(),
-                            payload: signal.payload.clone(),
-                            resumable: true,
-                            ns: ns.clone(),
-                        };
-                        let _ = tx.send(event);
-                    }
-                }
+                // Emit interrupt events to stream (hidden nodes filtered)
+                self.emit_interrupt_events(&signals);
 
                 // Save checkpoint with Interrupt source for HITL recovery
                 let node = self.interrupt_node_name().to_string();
@@ -1001,23 +968,8 @@ impl<S: State> PregelLoop<S> {
             .clone_from(&graph_interrupt.interrupts);
         self.status = LoopStatus::InterruptAfter(graph_interrupt.interrupts.clone());
 
-        if let Some(ref tx) = self.stream_tx {
-            let ns = self.current_ns();
-            for signal in &graph_interrupt.interrupts {
-                let event = StreamEvent::Interrupt {
-                    node: signal
-                        .payload
-                        .get("node")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("subgraph")
-                        .to_string(),
-                    payload: signal.payload.clone(),
-                    resumable: true,
-                    ns: ns.clone(),
-                };
-                let _ = tx.send(event);
-            }
-        }
+        // Emit interrupt events to stream (hidden nodes filtered)
+        self.emit_interrupt_events(&graph_interrupt.interrupts);
     }
 
     /// Handle a subgraph drain bubbling up to the parent graph
@@ -1523,6 +1475,39 @@ impl<S: State> PregelLoop<S> {
             .unwrap_or_default()
     }
 
+    /// Emit interrupt stream events for the given signals, filtering out
+    /// hidden/internal nodes (names starting and ending with `__`).
+    ///
+    /// Hidden nodes represent internal infrastructure (routing, error handling)
+    /// that should never surface to external stream consumers.
+    fn emit_interrupt_events(&self, signals: &[crate::interrupt::InterruptSignal]) {
+        let Some(ref tx) = self.stream_tx else {
+            return;
+        };
+
+        let ns = self.current_ns();
+        for signal in signals {
+            let node = signal
+                .payload
+                .get("node")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+
+            // Skip hidden/internal nodes from stream emission
+            if crate::interrupt::is_hidden_node(node) {
+                continue;
+            }
+
+            let event = StreamEvent::Interrupt {
+                node: node.to_string(),
+                payload: signal.payload.clone(),
+                resumable: true,
+                ns: ns.clone(),
+            };
+            let _ = tx.send(event);
+        }
+    }
+
     /// Finish all channels in the state
     ///
     /// Called when graph execution completes (no more pending tasks).
@@ -1583,7 +1568,10 @@ impl<S: State> PregelLoop<S> {
     ///
     /// Returns a clone of the current delta counters so the checkpoint carries an
     /// accurate snapshot of write activity since the last full snapshot.
-    #[allow(dead_code, reason = "used by checkpoint delta snapshot logic (B-04-003)")]
+    #[allow(
+        dead_code,
+        reason = "used by checkpoint delta snapshot logic (B-04-003)"
+    )]
     fn build_checkpoint_delta_counters(&self) -> HashMap<String, DeltaCounters> {
         self.delta_counters.clone()
     }
@@ -1594,7 +1582,10 @@ impl<S: State> PregelLoop<S> {
     /// If any field's update count exceeds its frequency, returns `true` to
     /// indicate that a full snapshot is needed. Non-DeltaChannel fields are
     /// excluded from this decision since they always snapshot fully.
-    #[allow(dead_code, reason = "used by checkpoint delta snapshot logic (B-04-003)")]
+    #[allow(
+        dead_code,
+        reason = "used by checkpoint delta snapshot logic (B-04-003)"
+    )]
     fn should_take_full_snapshot(&self) -> bool {
         let specs = S::delta_channel_specs();
         if specs.is_empty() {
@@ -1616,7 +1607,10 @@ impl<S: State> PregelLoop<S> {
     }
 
     /// Reset delta counters after a full snapshot checkpoint has been saved.
-    #[allow(dead_code, reason = "used by checkpoint delta snapshot logic (B-04-003)")]
+    #[allow(
+        dead_code,
+        reason = "used by checkpoint delta snapshot logic (B-04-003)"
+    )]
     fn reset_delta_counters(&mut self) {
         self.delta_counters.clear();
     }
@@ -1902,6 +1896,442 @@ mod tests {
 
     #[derive(Clone, Debug, Default, serde::Serialize)]
     struct TestUpdate;
+
+    // --- B-04-001: delta counter tests ---
+
+    /// Test state with two fields to exercise delta counter tracking.
+    #[derive(Clone, Debug, serde::Serialize)]
+    struct DeltaTestState {
+        value: i32,
+        messages: Vec<String>,
+    }
+
+    #[derive(Clone, Debug, Default, serde::Serialize)]
+    struct DeltaTestUpdate {
+        value: Option<i32>,
+        messages: Option<Vec<String>>,
+    }
+
+    impl State for DeltaTestState {
+        type Update = DeltaTestUpdate;
+
+        fn apply(&mut self, update: Self::Update) -> crate::FieldsChanged {
+            let mut changed = crate::FieldsChanged(0);
+            if let Some(v) = update.value {
+                self.value = v;
+                changed.set_field(0);
+            }
+            if let Some(msgs) = update.messages {
+                self.messages.extend(msgs);
+                changed.set_field(1);
+            }
+            changed
+        }
+
+        fn reset_ephemeral(&mut self) {}
+
+        fn field_names() -> &'static [&'static str] {
+            &["value", "messages"]
+        }
+
+        fn field_count() -> usize {
+            2
+        }
+
+        /// Field 1 (messages) is a `DeltaChannel` with `snapshot_frequency` = 3
+        fn delta_channel_specs() -> &'static [(usize, usize)] {
+            &[(1, 3)]
+        }
+    }
+
+    /// Checkpointer that captures the last saved checkpoint for inspection.
+    struct CapturingCheckpointer {
+        captured: Arc<std::sync::Mutex<Option<crate::checkpoint::Checkpoint>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::checkpoint::CheckpointSaver for CapturingCheckpointer {
+        async fn get_tuple(
+            &self,
+            _: &crate::config::RunnableConfig,
+        ) -> Result<Option<crate::checkpoint::CheckpointTuple>, crate::checkpoint::CheckpointError>
+        {
+            Ok(None)
+        }
+
+        async fn list(
+            &self,
+            _: &crate::config::RunnableConfig,
+            _: Option<crate::checkpoint::CheckpointFilter>,
+        ) -> Result<Vec<crate::checkpoint::CheckpointTuple>, crate::checkpoint::CheckpointError>
+        {
+            Ok(Vec::new())
+        }
+
+        async fn put(
+            &self,
+            _: &crate::config::RunnableConfig,
+            checkpoint: crate::checkpoint::Checkpoint,
+            _metadata: crate::checkpoint::CheckpointMetadata,
+        ) -> Result<crate::config::RunnableConfig, crate::checkpoint::CheckpointError> {
+            *self
+                .captured
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(checkpoint);
+            let mut cfg = crate::config::RunnableConfig::new();
+            cfg.checkpoint_id = Some("cp-capture".to_string());
+            Ok(cfg)
+        }
+
+        async fn put_writes(
+            &self,
+            _: &crate::config::RunnableConfig,
+            _: Vec<crate::checkpoint::PendingWrite>,
+            _: &str,
+        ) -> Result<(), crate::checkpoint::CheckpointError> {
+            Ok(())
+        }
+    }
+
+    /// Verify delta counters are incremented when fields change in a superstep.
+    #[tokio::test]
+    async fn test_delta_counters_increment_on_field_change() {
+        let state = DeltaTestState {
+            value: 0,
+            messages: vec![],
+        };
+        let mut nodes = IndexMap::new();
+        nodes.insert(
+            "test_node".to_string(),
+            NodeFnCommand(|_s| async move { Ok(Command::end()) }).into_node("test_node"),
+        );
+        let trigger_table = TriggerTable::new();
+        let config = crate::config::RunnableConfig::new();
+
+        let mut loop_ = PregelLoop::new(state, nodes, trigger_table, config, 2).unwrap();
+
+        // Simulate a superstep where both fields changed
+        let changed = crate::FieldsChanged(0b11); // both field 0 and 1 changed
+        loop_.update_delta_counters(&changed);
+
+        assert_eq!(loop_.delta_counters.len(), 2, "should track both fields");
+
+        let field_0 = loop_
+            .delta_counters
+            .get("field_0")
+            .expect("field_0 should exist");
+        assert_eq!(field_0.updates, 1, "field_0 should have 1 update");
+        assert_eq!(field_0.supersteps, 1, "field_0 should have 1 superstep");
+
+        let field_1 = loop_
+            .delta_counters
+            .get("field_1")
+            .expect("field_1 should exist");
+        assert_eq!(field_1.updates, 1, "field_1 should have 1 update");
+        assert_eq!(field_1.supersteps, 1, "field_1 should have 1 superstep");
+    }
+
+    /// Verify delta counters only increment updates for fields that actually changed.
+    #[tokio::test]
+    async fn test_delta_counters_increment_unchanged_fields_get_superstep_only() {
+        let state = DeltaTestState {
+            value: 0,
+            messages: vec![],
+        };
+        let mut nodes = IndexMap::new();
+        nodes.insert(
+            "test_node".to_string(),
+            NodeFnCommand(|_s| async move { Ok(Command::end()) }).into_node("test_node"),
+        );
+        let trigger_table = TriggerTable::new();
+        let config = crate::config::RunnableConfig::new();
+
+        let mut loop_ = PregelLoop::new(state, nodes, trigger_table, config, 2).unwrap();
+
+        // Only field 0 changed, field 1 did not
+        let changed = crate::FieldsChanged(0b01);
+        loop_.update_delta_counters(&changed);
+
+        let field_0 = loop_
+            .delta_counters
+            .get("field_0")
+            .expect("field_0 should exist");
+        assert_eq!(field_0.updates, 1, "field_0 should have 1 update");
+
+        let field_1 = loop_
+            .delta_counters
+            .get("field_1")
+            .expect("field_1 should exist");
+        assert_eq!(
+            field_1.updates, 0,
+            "field_1 should have 0 updates (not changed)"
+        );
+        assert_eq!(
+            field_1.supersteps, 1,
+            "field_1 should still have 1 superstep"
+        );
+    }
+
+    /// Verify delta counters accumulate across multiple supersteps.
+    #[tokio::test]
+    async fn test_delta_counters_accumulate_across_supersteps() {
+        let state = DeltaTestState {
+            value: 0,
+            messages: vec![],
+        };
+        let mut nodes = IndexMap::new();
+        nodes.insert(
+            "test_node".to_string(),
+            NodeFnCommand(|_s| async move { Ok(Command::end()) }).into_node("test_node"),
+        );
+        let trigger_table = TriggerTable::new();
+        let config = crate::config::RunnableConfig::new();
+
+        let mut loop_ = PregelLoop::new(state, nodes, trigger_table, config, 2).unwrap();
+
+        // First superstep: field 0 changes
+        loop_.update_delta_counters(&crate::FieldsChanged(0b01));
+        // Second superstep: both fields change
+        loop_.update_delta_counters(&crate::FieldsChanged(0b11));
+
+        let field_0 = loop_
+            .delta_counters
+            .get("field_0")
+            .expect("field_0 should exist");
+        assert_eq!(field_0.updates, 2, "field_0 updated in both supersteps");
+        assert_eq!(field_0.supersteps, 2, "field_0 has 2 supersteps");
+
+        let field_1 = loop_
+            .delta_counters
+            .get("field_1")
+            .expect("field_1 should exist");
+        assert_eq!(
+            field_1.updates, 1,
+            "field_1 updated in only second superstep"
+        );
+        assert_eq!(field_1.supersteps, 2, "field_1 has 2 supersteps");
+    }
+
+    /// Verify delta counters are populated in checkpoints and reset after save.
+    #[tokio::test]
+    async fn test_delta_counters_populated_in_checkpoint_and_reset() {
+        let state = DeltaTestState {
+            value: 0,
+            messages: vec![],
+        };
+        let mut nodes = IndexMap::new();
+        nodes.insert(
+            "test_node".to_string(),
+            NodeFnCommand(|_s| async move { Ok(Command::end()) }).into_node("test_node"),
+        );
+        let trigger_table = TriggerTable::new();
+        let mut config = crate::config::RunnableConfig::new();
+        config.thread_id = Some("test-thread".to_string());
+
+        let mut loop_ = PregelLoop::new(state, nodes, trigger_table, config, 2).unwrap();
+
+        let captured: Arc<std::sync::Mutex<Option<crate::checkpoint::Checkpoint>>> =
+            Arc::new(std::sync::Mutex::new(None));
+        let checkpointer = CapturingCheckpointer {
+            captured: Arc::clone(&captured),
+        };
+        loop_.set_checkpointer(Arc::new(checkpointer));
+
+        // Manually populate delta counters to simulate a prior superstep.
+        // We do NOT call update_delta_counters here because after_tick will
+        // call it again, doubling the superstep count. Instead we set the
+        // counters directly to model a pre-existing counter state.
+        loop_.delta_counters.insert(
+            "field_0".to_string(),
+            DeltaCounters {
+                updates: 1,
+                supersteps: 1,
+            },
+        );
+        loop_.delta_counters.insert(
+            "field_1".to_string(),
+            DeltaCounters {
+                updates: 2,
+                supersteps: 1,
+            },
+        );
+
+        // Execute a superstep (empty result -- no writes, but after_tick will
+        // increment superstep counters for all tracked fields).
+        loop_.pending_tasks = vec![PendingTask::pull(
+            uuid::Uuid::new_v4().to_string(),
+            "test_node".to_string(),
+        )];
+        let _ = loop_.execute_superstep().await;
+        let _ = loop_.after_tick(SuperstepResult::empty()).await;
+
+        // Checkpoint should have populated delta counters
+        let checkpoint = captured
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+            .expect("checkpoint should have been saved");
+        assert!(
+            !checkpoint.counters_since_delta_snapshot.is_empty(),
+            "counters_since_delta_snapshot should be populated"
+        );
+        let field_0 = checkpoint
+            .counters_since_delta_snapshot
+            .get("field_0")
+            .expect("field_0 should be in delta counters");
+        // Pre-existing 1 update + 1 superstep, after_tick adds 0 updates (empty
+        // result) and 1 superstep via update_delta_counters.
+        assert_eq!(
+            field_0.updates, 1,
+            "field_0 should have 1 update in checkpoint"
+        );
+        assert_eq!(
+            field_0.supersteps, 2,
+            "field_0 should have 2 supersteps in checkpoint"
+        );
+
+        let field_1 = checkpoint
+            .counters_since_delta_snapshot
+            .get("field_1")
+            .expect("field_1 should be in delta counters");
+        assert_eq!(
+            field_1.updates, 2,
+            "field_1 should have 2 updates in checkpoint"
+        );
+
+        // After checkpoint save, delta counters should be reset
+        assert!(
+            loop_.delta_counters.is_empty(),
+            "delta counters should be reset after checkpoint save"
+        );
+    }
+
+    /// Verify `should_take_full_snapshot` returns true when no delta channels configured.
+    #[test]
+    fn test_should_take_full_snapshot_no_delta_channels() {
+        // TestState has no delta_channel_specs override (default empty)
+        let state = TestState;
+        let mut nodes = IndexMap::new();
+        nodes.insert(
+            "test_node".to_string(),
+            NodeFnCommand(|_s| async move { Ok(Command::end()) }).into_node("test_node"),
+        );
+        let trigger_table = TriggerTable::new();
+        let config = crate::config::RunnableConfig::new();
+
+        let mut loop_ = PregelLoop::new(state, nodes, trigger_table, config, 0).unwrap();
+
+        // With no delta channels, should always take full snapshot
+        assert!(
+            loop_.should_take_full_snapshot(),
+            "should always take full snapshot with no delta channels"
+        );
+
+        // Even with some counters accumulated
+        loop_.delta_counters.insert(
+            "field_0".to_string(),
+            DeltaCounters {
+                updates: 100,
+                supersteps: 50,
+            },
+        );
+        assert!(
+            loop_.should_take_full_snapshot(),
+            "still full snapshot when specs are empty (no delta optimization)"
+        );
+    }
+
+    /// Verify `should_take_full_snapshot` respects `snapshot_frequency` for delta channels.
+    #[test]
+    fn test_should_take_full_snapshot_respects_frequency() {
+        let state = DeltaTestState {
+            value: 0,
+            messages: vec![],
+        };
+        let mut nodes = IndexMap::new();
+        nodes.insert(
+            "test_node".to_string(),
+            NodeFnCommand(|_s| async move { Ok(Command::end()) }).into_node("test_node"),
+        );
+        let trigger_table = TriggerTable::new();
+        let config = crate::config::RunnableConfig::new();
+
+        let mut loop_ = PregelLoop::new(state, nodes, trigger_table, config, 2).unwrap();
+
+        // Below frequency threshold: field 1 has frequency 3, counters at 2
+        loop_.delta_counters.insert(
+            "field_1".to_string(),
+            DeltaCounters {
+                updates: 2,
+                supersteps: 2,
+            },
+        );
+        assert!(
+            !loop_.should_take_full_snapshot(),
+            "should not take full snapshot below frequency threshold"
+        );
+
+        // At frequency threshold
+        loop_.delta_counters.insert(
+            "field_1".to_string(),
+            DeltaCounters {
+                updates: 3,
+                supersteps: 3,
+            },
+        );
+        assert!(
+            loop_.should_take_full_snapshot(),
+            "should take full snapshot at frequency threshold"
+        );
+
+        // Above frequency threshold
+        loop_.delta_counters.insert(
+            "field_1".to_string(),
+            DeltaCounters {
+                updates: 10,
+                supersteps: 5,
+            },
+        );
+        assert!(
+            loop_.should_take_full_snapshot(),
+            "should take full snapshot above frequency threshold"
+        );
+    }
+
+    /// Verify `DeltaCounters::exceeds_frequency` edge cases.
+    #[test]
+    fn test_delta_counters_exceeds_frequency() {
+        let counters = DeltaCounters::new();
+        assert_eq!(counters.updates, 0);
+        assert_eq!(counters.supersteps, 0);
+
+        // Frequency 0 means always snapshot
+        assert!(
+            counters.exceeds_frequency(0),
+            "frequency 0 always snapshots"
+        );
+
+        // Below threshold
+        let counters = DeltaCounters {
+            updates: 2,
+            supersteps: 1,
+        };
+        assert!(!counters.exceeds_frequency(3), "2 < 3, not exceeded");
+
+        // At threshold
+        let counters = DeltaCounters {
+            updates: 3,
+            supersteps: 1,
+        };
+        assert!(counters.exceeds_frequency(3), "3 >= 3, exceeded");
+
+        // Above threshold
+        let counters = DeltaCounters {
+            updates: 10,
+            supersteps: 1,
+        };
+        assert!(counters.exceeds_frequency(3), "10 >= 3, exceeded");
+    }
 
     /// Verify that the scratchpad is populated with interrupt IDs after
     /// `execute_superstep` processes pending interrupts. This is the core
@@ -2357,6 +2787,113 @@ mod tests {
             }
             other => panic!("expected Interrupt event, got {other:?}"),
         }
+    }
+
+    // --- B-06-005: HIDDEN_TAG stream filtering tests ---
+
+    /// Verify that hidden nodes (names starting/ending with `__`) are filtered
+    /// from bubble-up interrupt stream events.
+    #[test]
+    fn test_hidden_node_filtered_from_bubble_up_interrupt_stream() {
+        let state = TestState;
+        let mut nodes = IndexMap::new();
+        nodes.insert(
+            "test_node".to_string(),
+            NodeFnCommand(|_s| async move { Ok(Command::end()) }).into_node("test_node"),
+        );
+
+        let trigger_table = TriggerTable::new();
+        let config = crate::config::RunnableConfig::new();
+
+        let mut loop_ = PregelLoop::new(state, nodes, trigger_table, config, 0).unwrap();
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        loop_.stream_tx = Some(tx);
+
+        // Mix of visible and hidden node signals
+        let signals = vec![
+            crate::interrupt::InterruptSignal {
+                index: 0,
+                id: Some("int-visible".to_string()),
+                payload: serde_json::json!({"node": "agent"}),
+            },
+            crate::interrupt::InterruptSignal {
+                index: 1,
+                id: Some("int-hidden".to_string()),
+                payload: serde_json::json!({"node": "__route__"}),
+            },
+            crate::interrupt::InterruptSignal {
+                index: 2,
+                id: Some("int-also-visible".to_string()),
+                payload: serde_json::json!({"node": "review"}),
+            },
+        ];
+        let bubble_ups = vec![BubbleUp::Interrupt(crate::pregel::types::GraphInterrupt {
+            interrupts: signals,
+            step: 1,
+        })];
+
+        let _ = loop_.handle_bubble_ups(&bubble_ups);
+
+        // Should receive exactly 2 events (agent and review), __route__ filtered
+        let mut received_nodes = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            match event {
+                StreamEvent::Interrupt { node, .. } => received_nodes.push(node),
+                other => panic!("unexpected event: {other:?}"),
+            }
+        }
+        assert_eq!(
+            received_nodes,
+            vec!["agent", "review"],
+            "hidden node __route__ should be filtered from stream"
+        );
+    }
+
+    /// Verify that all-hidden-node signals produce zero stream events.
+    #[test]
+    fn test_all_hidden_nodes_produce_no_stream_events() {
+        let state = TestState;
+        let mut nodes = IndexMap::new();
+        nodes.insert(
+            "test_node".to_string(),
+            NodeFnCommand(|_s| async move { Ok(Command::end()) }).into_node("test_node"),
+        );
+
+        let trigger_table = TriggerTable::new();
+        let config = crate::config::RunnableConfig::new();
+
+        let mut loop_ = PregelLoop::new(state, nodes, trigger_table, config, 0).unwrap();
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        loop_.stream_tx = Some(tx);
+
+        let signals = vec![
+            crate::interrupt::InterruptSignal {
+                index: 0,
+                id: Some("int-h1".to_string()),
+                payload: serde_json::json!({"node": "__route__"}),
+            },
+            crate::interrupt::InterruptSignal {
+                index: 1,
+                id: Some("int-h2".to_string()),
+                payload: serde_json::json!({"node": "__handler__"}),
+            },
+        ];
+        let bubble_ups = vec![BubbleUp::Interrupt(crate::pregel::types::GraphInterrupt {
+            interrupts: signals,
+            step: 1,
+        })];
+
+        let _ = loop_.handle_bubble_ups(&bubble_ups);
+
+        // No events should be emitted
+        assert!(
+            rx.try_recv().is_err(),
+            "all-hidden signals should produce no stream events"
+        );
+        // But pending_interrupts and status still reflect all signals (internal state)
+        assert_eq!(loop_.pending_interrupts.len(), 2);
     }
 }
 
