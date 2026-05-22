@@ -1367,6 +1367,19 @@ impl<S: State> PregelLoop<S> {
             return;
         }
 
+        // Evaluate whether delta-channel write counts have exceeded their
+        // snapshot_frequency thresholds. When no delta channel has crossed
+        // the threshold, the pending writes from put_writes() are sufficient
+        // for crash recovery and a full snapshot is unnecessary.
+        // TODO: use this decision to emit delta-only checkpoints when false.
+        let needs_full_snapshot = self.should_take_full_snapshot();
+        tracing::debug!(
+            name = "juncture.checkpoint.superstep.delta_decision",
+            step = self.step,
+            needs_full_snapshot = needs_full_snapshot,
+            "Delta-channel snapshot frequency evaluation"
+        );
+
         let channel_values = match serde_json::to_value(&self.state) {
             Ok(v) => v,
             Err(err) => {
@@ -1820,7 +1833,6 @@ impl<S: State> PregelLoop<S> {
     /// If any field's update count exceeds its frequency, returns `true` to
     /// indicate that a full snapshot is needed. Non-DeltaChannel fields are
     /// excluded from this decision since they always snapshot fully.
-    #[allow(dead_code, reason = "wired only in tests; needs integration into save_superstep_checkpoint")]
     fn should_take_full_snapshot(&self) -> bool {
         let specs = S::delta_channel_specs();
         if specs.is_empty() {

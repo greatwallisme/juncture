@@ -847,11 +847,7 @@ pub struct ChatOllama {
     base_url: String,
     /// Default call options
     default_options: CallOptions,
-    /// Registered tools (reserved for Ollama tool calling support)
-    #[expect(
-        dead_code,
-        reason = "Ollama tool calling not yet integrated into build_request_body"
-    )]
+    /// Registered tools for Ollama native tool calling (API v0.3.0+).
     tools: Vec<ToolDefinition>,
     /// HTTP client
     http_client: reqwest::Client,
@@ -937,6 +933,23 @@ impl ChatOllama {
                 body["options"] = serde_json::json!({});
             }
             body["options"]["num_predict"] = serde_json::json!(max_tokens);
+        }
+
+        if !self.tools.is_empty() {
+            body["tools"] = serde_json::json!(self
+                .tools
+                .iter()
+                .map(|t| {
+                    serde_json::json!({
+                        "type": "function",
+                        "function": {
+                            "name": t.name,
+                            "description": t.description,
+                            "parameters": t.parameters,
+                        }
+                    })
+                })
+                .collect::<Vec<_>>());
         }
 
         body

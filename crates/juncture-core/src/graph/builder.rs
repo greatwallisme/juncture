@@ -909,7 +909,7 @@ impl<S: State, I: IntoState<S>, O: FromState<S>> StateGraph<S, I, O> {
     /// Returns an error if a node with the same name already exists.
     #[allow(
         dead_code,
-        reason = "will be used when subgraph support is fully implemented"
+        reason = "fully implemented public API awaiting external consumers"
     )]
     pub fn add_subgraph_node<Sub>(
         &mut self,
