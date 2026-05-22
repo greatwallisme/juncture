@@ -108,6 +108,21 @@ impl<S: State> ToolRuntime<S> {
     pub const fn store(&self) -> Option<&Arc<dyn Store>> {
         self.store.as_ref()
     }
+
+    /// Emit an incremental output delta during tool execution.
+    ///
+    /// Sends a partial result chunk for streaming tool output observation.
+    /// Currently logs the delta at debug level; will be connected to the
+    /// graph's event stream via `StreamEvent::Tools(ToolsEvent::ToolOutputDelta)`
+    /// when tool streaming is fully integrated with the Pregel execution
+    /// pipeline.
+    pub fn emit_output_delta(&self, delta: &str) {
+        tracing::debug!(
+            tool_call_id = %self.tool_call_id,
+            delta_len = delta.len(),
+            "tool output delta emitted"
+        );
+    }
 }
 
 impl<S: State> Clone for ToolRuntime<S> {
@@ -195,6 +210,17 @@ mod tests {
         assert!(debug_str.contains("ToolRuntime"));
         assert!(debug_str.contains("call_123"));
     }
+
+    #[test]
+    fn test_emit_output_delta_does_not_panic() {
+        let state = TestState;
+        let config = RunnableConfig::default();
+        let runtime = ToolRuntime::new_without_store(state, "call_456".to_string(), config);
+
+        runtime.emit_output_delta("partial result chunk");
+        runtime.emit_output_delta("");
+        runtime.emit_output_delta("another delta");
+    }
 }
 
-// Rust guideline compliant 2026-05-19
+// Rust guideline compliant 2026-05-22
