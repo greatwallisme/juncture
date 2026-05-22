@@ -55,11 +55,55 @@ fn test_runtime_managed_values() {
 }
 
 #[test]
+fn test_runtime_managed_values_with_execution_info() {
+    let mut runtime = Runtime::<()>::new();
+    let info = juncture_core::ExecutionInfo {
+        checkpoint_id: "cp-1".to_string(),
+        checkpoint_ns: "default".to_string(),
+        task_id: "task-1".to_string(),
+        step: 24,
+        recursion_limit: 25,
+        thread_id: None,
+        run_id: None,
+        node_attempt: 1,
+        node_first_attempt_time: None,
+    };
+    runtime.set_execution_info(info);
+
+    let managed = runtime.managed_values();
+    assert!(managed.is_last_step);
+    assert_eq!(managed.remaining_steps, 1);
+}
+
+#[test]
+fn test_runtime_managed_values_early_step() {
+    let mut runtime = Runtime::<()>::new();
+    let info = juncture_core::ExecutionInfo {
+        checkpoint_id: "cp-1".to_string(),
+        checkpoint_ns: "default".to_string(),
+        task_id: "task-1".to_string(),
+        step: 3,
+        recursion_limit: 20,
+        thread_id: None,
+        run_id: None,
+        node_attempt: 1,
+        node_first_attempt_time: None,
+    };
+    runtime.set_execution_info(info);
+
+    let managed = runtime.managed_values();
+    assert!(!managed.is_last_step);
+    assert_eq!(managed.remaining_steps, 17);
+}
+
+#[test]
 fn test_execution_info() {
     let info = juncture_core::ExecutionInfo {
         checkpoint_id: "checkpoint_123".to_string(),
         checkpoint_ns: "default".to_string(),
         task_id: "task_456".to_string(),
+        step: 5,
+        recursion_limit: 25,
         thread_id: Some("thread_789".to_string()),
         run_id: Some("run_abc".to_string()),
         node_attempt: 2,
@@ -69,6 +113,8 @@ fn test_execution_info() {
     assert_eq!(info.checkpoint_id, "checkpoint_123");
     assert_eq!(info.checkpoint_ns, "default");
     assert_eq!(info.task_id, "task_456");
+    assert_eq!(info.step, 5);
+    assert_eq!(info.recursion_limit, 25);
     assert_eq!(info.thread_id, Some("thread_789".to_string()));
     assert_eq!(info.run_id, Some("run_abc".to_string()));
     assert_eq!(info.node_attempt, 2);
@@ -175,7 +221,9 @@ fn test_heartbeat_watcher_clone_heartbeat_works() {
     let heartbeat_clone = Heartbeat::clone(&heartbeat);
 
     // Send ping from clone, not from the original heartbeat
-    heartbeat_clone.ping().expect("ping from clone should succeed");
+    heartbeat_clone
+        .ping()
+        .expect("ping from clone should succeed");
 
     // Watcher should see the ping from the clone
     assert!(watcher.is_alive(std::time::Duration::from_secs(60)));

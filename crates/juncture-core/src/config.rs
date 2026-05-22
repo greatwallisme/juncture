@@ -155,10 +155,7 @@ impl std::fmt::Debug for RunnableConfig {
                 "llm_cache_policy",
                 &self.llm_cache_policy.as_ref().map(|_| "<CachePolicy>"),
             )
-            .field(
-                "heartbeat",
-                &self.heartbeat.as_ref().map(|_| "<Heartbeat>"),
-            )
+            .field("heartbeat", &self.heartbeat.as_ref().map(|_| "<Heartbeat>"))
             .finish()
     }
 }

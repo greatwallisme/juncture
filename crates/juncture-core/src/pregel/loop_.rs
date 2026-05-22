@@ -1583,7 +1583,10 @@ impl<S: State> PregelLoop<S> {
     /// Return the effective durability mode, defaulting to `Sync` when not configured.
     #[must_use]
     fn effective_durability(&self) -> Durability {
-        self.runnable_config.durability.clone().unwrap_or(Durability::Sync)
+        self.runnable_config
+            .durability
+            .clone()
+            .unwrap_or(Durability::Sync)
     }
 
     /// Build the channel versions, new versions, and versions seen maps from
@@ -1598,7 +1601,9 @@ impl<S: State> PregelLoop<S> {
         clippy::type_complexity,
         reason = "return type is a direct mapping of the three version maps required by Checkpoint struct; factoring into a named type adds indirection without benefit"
     )]
-    fn build_checkpoint_versions(&self) -> (
+    fn build_checkpoint_versions(
+        &self,
+    ) -> (
         HashMap<String, u64>,
         HashMap<String, u64>,
         HashMap<String, HashMap<String, u64>>,
@@ -3156,7 +3161,13 @@ mod tests {
             "Exit mode should save exactly one final checkpoint"
         );
         assert!(
-            matches!(&calls[0], ObservedCall::Put { source: crate::checkpoint::CheckpointSource::Loop, step: 0 }),
+            matches!(
+                &calls[0],
+                ObservedCall::Put {
+                    source: crate::checkpoint::CheckpointSource::Loop,
+                    step: 0
+                }
+            ),
             "Final exit checkpoint should have Loop source at step 0"
         );
     }

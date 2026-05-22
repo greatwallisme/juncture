@@ -95,18 +95,33 @@ impl<C: Clone + Send + Sync + 'static> Runtime<C> {
         }
     }
 
-    /// Get managed values (step limit information)
+    /// Set the execution info for this runtime
+    ///
+    /// Provides the runtime with execution metadata including step tracking
+    /// and recursion limit, enabling nodes to query managed values.
+    pub fn set_execution_info(&mut self, info: ExecutionInfo) {
+        self.execution_info = Some(info);
+    }
+
+    /// Get the managed values for this runtime
     ///
     /// Returns information about recursion limits and remaining steps.
+    /// Nodes can use this to adapt behavior based on remaining step budget,
+    /// e.g., generating summaries instead of continuing when steps are low.
     #[must_use]
     pub fn managed_values(&self) -> ManagedValues {
-        let limit: usize = self.execution_info.as_ref().map_or(25, |_| 25);
-        let current_step: usize = 0;
-        let remaining = limit.saturating_sub(current_step);
+        let Some(info) = self.execution_info.as_ref() else {
+            return ManagedValues {
+                is_last_step: false,
+                remaining_steps: 25,
+            };
+        };
+
+        let remaining = info.recursion_limit.saturating_sub(info.step);
 
         ManagedValues {
             is_last_step: remaining <= 1,
-            remaining_steps: remaining.try_into().unwrap_or(u32::MAX),
+            remaining_steps: u32::try_from(remaining).unwrap_or(u32::MAX),
         }
     }
 
@@ -215,10 +230,7 @@ impl Heartbeat {
 impl Default for Heartbeat {
     fn default() -> Self {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        Self {
-            tx,
-            _rx: Some(rx),
-        }
+        Self { tx, _rx: Some(rx) }
     }
 }
 
@@ -287,7 +299,7 @@ impl HeartbeatWatcher {
 /// Execution metadata for a graph run
 ///
 /// Contains information about the current execution including
-/// checkpoint IDs, task IDs, and retry counts.
+/// checkpoint IDs, task IDs, retry counts, and step tracking.
 #[derive(Clone, Debug)]
 pub struct ExecutionInfo {
     /// Current checkpoint ID
@@ -298,6 +310,12 @@ pub struct ExecutionInfo {
 
     /// Current task ID
     pub task_id: String,
+
+    /// Current superstep number (0-indexed)
+    pub step: usize,
+
+    /// Maximum allowed superstep count
+    pub recursion_limit: usize,
 
     /// Thread ID (None if no checkpointer)
     pub thread_id: Option<String>,
@@ -387,6 +405,129 @@ impl RunControl {
 impl Default for RunControl {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_default_managed_values_no_execution_info() {
+        // When no execution_info is set, returns default values
+        let runtime = Runtime::<()>::new();
+        let values = runtime.managed_values();
+        assert!(!values.is_last_step, "default should not be last step");
+        assert_eq!(
+            values.remaining_steps, 25,
+            "default remaining steps should be 25"
+        );
+    }
+
+    #[test]
+    fn test_managed_values_early_step() {
+        // Step 3 of 25: not last step, 22 remaining
+        let mut runtime = Runtime::<()>::new();
+        runtime.set_execution_info(ExecutionInfo {
+            checkpoint_id: "cp-1".to_string(),
+            checkpoint_ns: "default".to_string(),
+            task_id: "task-1".to_string(),
+            step: 3,
+            recursion_limit: 25,
+            thread_id: None,
+            run_id: None,
+            node_attempt: 1,
+            node_first_attempt_time: None,
+        });
+        let values = runtime.managed_values();
+        assert!(!values.is_last_step, "early step should not be last step");
+        assert_eq!(values.remaining_steps, 22, "remaining: 25 - 3 = 22");
+    }
+
+    #[test]
+    fn test_managed_values_last_step() {
+        // Step 24 of 25: this is the last step, 1 remaining
+        let mut runtime = Runtime::<()>::new();
+        runtime.set_execution_info(ExecutionInfo {
+            checkpoint_id: "cp-1".to_string(),
+            checkpoint_ns: "default".to_string(),
+            task_id: "task-1".to_string(),
+            step: 24,
+            recursion_limit: 25,
+            thread_id: None,
+            run_id: None,
+            node_attempt: 1,
+            node_first_attempt_time: None,
+        });
+        let values = runtime.managed_values();
+        assert!(values.is_last_step, "step 24 of 25 should be last step");
+        assert_eq!(values.remaining_steps, 1, "remaining: 25 - 24 = 1");
+    }
+
+    #[test]
+    fn test_managed_values_past_recursion_limit() {
+        // Step >= recursion_limit: remaining should be 0, is_last_step = true
+        let mut runtime = Runtime::<()>::new();
+        runtime.set_execution_info(ExecutionInfo {
+            checkpoint_id: "cp-1".to_string(),
+            checkpoint_ns: "default".to_string(),
+            task_id: "task-1".to_string(),
+            step: 25,
+            recursion_limit: 25,
+            thread_id: None,
+            run_id: None,
+            node_attempt: 1,
+            node_first_attempt_time: None,
+        });
+        let values = runtime.managed_values();
+        assert!(
+            values.is_last_step,
+            "step >= recursion_limit should be last step"
+        );
+        assert_eq!(
+            values.remaining_steps, 0,
+            "no remaining steps when at limit"
+        );
+    }
+
+    #[test]
+    fn test_managed_values_custom_recursion_limit() {
+        // Custom recursion limit of 10, step 8: 2 remaining, not last step
+        let mut runtime = Runtime::<()>::new();
+        runtime.set_execution_info(ExecutionInfo {
+            checkpoint_id: "cp-1".to_string(),
+            checkpoint_ns: "default".to_string(),
+            task_id: "task-1".to_string(),
+            step: 8,
+            recursion_limit: 10,
+            thread_id: None,
+            run_id: None,
+            node_attempt: 1,
+            node_first_attempt_time: None,
+        });
+        let values = runtime.managed_values();
+        assert!(!values.is_last_step, "step 8 of 10 should not be last step");
+        assert_eq!(values.remaining_steps, 2, "remaining: 10 - 8 = 2");
+    }
+
+    #[test]
+    fn test_managed_values_exact_countdown() {
+        // Step 9 of 10: last step, 1 remaining
+        let mut runtime = Runtime::<()>::new();
+        runtime.set_execution_info(ExecutionInfo {
+            checkpoint_id: "cp-1".to_string(),
+            checkpoint_ns: "default".to_string(),
+            task_id: "task-1".to_string(),
+            step: 9,
+            recursion_limit: 10,
+            thread_id: None,
+            run_id: None,
+            node_attempt: 1,
+            node_first_attempt_time: None,
+        });
+        let values = runtime.managed_values();
+        assert!(values.is_last_step, "step 9 of 10 should be last step");
+        assert_eq!(values.remaining_steps, 1, "remaining: 10 - 9 = 1");
     }
 }
 
