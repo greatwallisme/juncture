@@ -198,8 +198,8 @@ macro_rules! parent_command {
 
 pub use chat::{ChatAnthropic, ChatOllama, ChatOpenAI};
 pub use checkpoint::{
-    CHECKPOINT_NS_SEPARATOR, CheckpointNamespace, CheckpointSaver, NamespaceSegment,
-    generate_checkpoint_id,
+    CHECKPOINT_NS_SEPARATOR, CheckpointNamespace, CheckpointSaver, DeltaCounters,
+    NamespaceSegment, generate_checkpoint_id,
 };
 pub use client::{
     AuthConfig, ClientError, GraphClient, InvokeConfig, JunctureClient, StateSnapshot, Thread,
