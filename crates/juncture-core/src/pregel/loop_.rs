@@ -715,7 +715,8 @@ impl<S: State> PregelLoop<S> {
     /// ```
     #[expect(
         clippy::too_many_lines,
-        reason = "after_tick requires multiple steps: apply writes, bump versions, consume channels, emit events, compute tasks, drain interrupts, check interrupts, finish channels, increment step"
+        clippy::cognitive_complexity,
+        reason = "after_tick has 30/25 cognitive complexity because it orchestrates multiple sequential phases (apply writes, bump versions, consume channels, emit events including stream_data, compute tasks, drain interrupts, check interrupts, finish channels, increment step); each phase is independently simple but the combination exceeds the limit"
     )]
     pub async fn after_tick(&mut self, result: SuperstepResult<S>) -> Result<(), JunctureError>
     where
@@ -774,6 +775,18 @@ impl<S: State> PregelLoop<S> {
                         .expect("duration should fit in u64"),
                 };
                 let _ = tx.send(end_event);
+
+                // Emit custom stream events from the command's stream_data.
+                // Each entry in stream_data produces one StreamEvent::Custom
+                // tagged with the emitting node name and empty namespace.
+                for data in &task_output.command.stream_data {
+                    let custom_event = StreamEvent::Custom {
+                        node: task_output.node_name.clone(),
+                        data: data.clone(),
+                        ns: Vec::new(),
+                    };
+                    let _ = tx.send(custom_event);
+                }
 
                 // Emit Updates event if the task produced an update
                 if let Some(ref update) = task_output.command.update {
@@ -1910,7 +1923,12 @@ impl<S: State> PregelLoop<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Command, node::IntoNode, node::NodeFnCommand};
+    use crate::{
+        Command,
+        node::IntoNode,
+        node::NodeFnCommand,
+        pregel::types::{TaskOutput, TaskTrigger},
+    };
 
     #[test]
     fn test_pregel_loop_creation() {
@@ -3354,7 +3372,12 @@ mod tests {
         // Budget should now be exceeded
         assert!(loop_.budget_tracker.as_ref().unwrap().check().is_some());
         assert_eq!(
-            loop_.budget_tracker.as_ref().unwrap().current_usage().tokens_used,
+            loop_
+                .budget_tracker
+                .as_ref()
+                .unwrap()
+                .current_usage()
+                .tokens_used,
             120
         );
 
@@ -3462,6 +3485,143 @@ mod tests {
             has_checkpoint,
             "Async mode should eventually persist the checkpoint via spawned task"
         );
+    }
+
+    // --- B-05-002: Command stream_data tests ---
+
+    /// Verify that a task output with `stream_data` produces `StreamEvent::Custom`
+    /// events during `after_tick`.
+    #[tokio::test]
+    async fn test_stream_data_emits_custom_events() {
+        let state = TestState;
+        let nodes = IndexMap::new();
+        let trigger_table = TriggerTable::new();
+        let config = crate::config::RunnableConfig::new();
+
+        let mut loop_ = PregelLoop::new(state, nodes, trigger_table, config, 0).unwrap();
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        loop_.stream_tx = Some(tx);
+
+        // Build a SuperstepResult with a task output that has stream_data
+        let result = SuperstepResult {
+            task_outputs: vec![TaskOutput {
+                task_id: "task-1".to_string(),
+                node_name: "test_node".to_string(),
+                command: Command::end()
+                    .with_stream_data(serde_json::json!({"event": "first"}))
+                    .with_stream_data(serde_json::json!({"event": "second"})),
+                duration: std::time::Duration::from_millis(1),
+                trigger: TaskTrigger::Pull,
+                error: None,
+            }],
+            bubble_ups: Vec::new(),
+        };
+
+        let () = loop_.after_tick(result).await.unwrap();
+
+        // Collect Custom events from the stream
+        let mut custom_data = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            if let StreamEvent::Custom { node, data, ns } = event {
+                assert_eq!(node, "test_node");
+                assert!(ns.is_empty());
+                custom_data.push(data);
+            }
+        }
+
+        assert_eq!(custom_data.len(), 2, "should emit two custom events");
+        assert_eq!(custom_data[0], serde_json::json!({"event": "first"}));
+        assert_eq!(custom_data[1], serde_json::json!({"event": "second"}));
+    }
+
+    /// Verify that a task output without `stream_data` produces no Custom events.
+    #[tokio::test]
+    async fn test_stream_data_empty_produces_no_custom_events() {
+        let state = TestState;
+        let nodes = IndexMap::new();
+        let trigger_table = TriggerTable::new();
+        let config = crate::config::RunnableConfig::new();
+
+        let mut loop_ = PregelLoop::new(state, nodes, trigger_table, config, 0).unwrap();
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        loop_.stream_tx = Some(tx);
+
+        // Build a SuperstepResult with a task output that has NO stream_data
+        let result = SuperstepResult {
+            task_outputs: vec![TaskOutput {
+                task_id: "task-1".to_string(),
+                node_name: "test_node".to_string(),
+                command: Command::end(),
+                duration: std::time::Duration::from_millis(1),
+                trigger: TaskTrigger::Pull,
+                error: None,
+            }],
+            bubble_ups: Vec::new(),
+        };
+
+        let () = loop_.after_tick(result).await.unwrap();
+
+        // No Custom events should be emitted
+        while let Ok(event) = rx.try_recv() {
+            assert!(
+                !matches!(event, StreamEvent::Custom { .. }),
+                "no Custom events expected for empty stream_data"
+            );
+        }
+    }
+
+    /// Verify that `stream_data` from multiple task outputs are all emitted.
+    #[tokio::test]
+    async fn test_stream_data_multiple_tasks() {
+        let state = TestState;
+        let nodes = IndexMap::new();
+        let trigger_table = TriggerTable::new();
+        let config = crate::config::RunnableConfig::new();
+
+        let mut loop_ = PregelLoop::new(state, nodes, trigger_table, config, 0).unwrap();
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        loop_.stream_tx = Some(tx);
+
+        // Build a SuperstepResult with two task outputs, one with stream_data
+        let result = SuperstepResult {
+            task_outputs: vec![
+                TaskOutput {
+                    task_id: "task-1".to_string(),
+                    node_name: "node_a".to_string(),
+                    command: Command::end()
+                        .with_stream_data(serde_json::json!("from_a")),
+                    duration: std::time::Duration::from_millis(1),
+                    trigger: TaskTrigger::Pull,
+                    error: None,
+                },
+                TaskOutput {
+                    task_id: "task-2".to_string(),
+                    node_name: "node_b".to_string(),
+                    command: Command::end(),
+                    duration: std::time::Duration::from_millis(2),
+                    trigger: TaskTrigger::Pull,
+                    error: None,
+                },
+            ],
+            bubble_ups: Vec::new(),
+        };
+
+        let () = loop_.after_tick(result).await.unwrap();
+
+        // Collect Custom events from the stream
+        let mut custom_events = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            if let StreamEvent::Custom { node, data, .. } = event {
+                custom_events.push((node, data));
+            }
+        }
+
+        assert_eq!(custom_events.len(), 1, "only node_a should emit a custom event");
+        assert_eq!(custom_events[0].0, "node_a");
+        assert_eq!(custom_events[0].1, serde_json::json!("from_a"));
     }
 }
 

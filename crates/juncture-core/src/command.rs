@@ -21,6 +21,14 @@ pub struct Command<S: State> {
     /// interrupt. Supports single values, ID-based mapping, and namespace-based
     /// mapping via [`ResumeValue`].
     pub resume: Option<ResumeValue>,
+
+    /// Custom streaming data to emit during execution
+    ///
+    /// Nodes can attach arbitrary JSON values here that will be emitted as
+    /// [`StreamEvent::Custom`] events during graph execution. Each entry in
+    /// the vector produces one custom stream event tagged with the emitting
+    /// node name. Use [`Command::with_stream_data`] to append items.
+    pub stream_data: Vec<serde_json::Value>,
 }
 
 /// Routing instruction from node
@@ -123,6 +131,7 @@ impl<S: State> Command<S> {
             goto: Goto::None,
             graph: GraphTarget::Current,
             resume: None,
+            stream_data: Vec::new(),
         }
     }
 
@@ -134,6 +143,7 @@ impl<S: State> Command<S> {
             goto: Goto::Next(target.into()),
             graph: GraphTarget::Current,
             resume: None,
+            stream_data: Vec::new(),
         }
     }
 
@@ -145,6 +155,7 @@ impl<S: State> Command<S> {
             goto: Goto::Next(target.into()),
             graph: GraphTarget::Current,
             resume: None,
+            stream_data: Vec::new(),
         }
     }
 
@@ -156,6 +167,7 @@ impl<S: State> Command<S> {
             goto: Goto::Send(targets),
             graph: GraphTarget::Current,
             resume: None,
+            stream_data: Vec::new(),
         }
     }
 
@@ -167,6 +179,7 @@ impl<S: State> Command<S> {
             goto: Goto::Send(targets),
             graph: GraphTarget::Current,
             resume: None,
+            stream_data: Vec::new(),
         }
     }
 
@@ -178,6 +191,7 @@ impl<S: State> Command<S> {
             goto: Goto::End,
             graph: GraphTarget::Current,
             resume: None,
+            stream_data: Vec::new(),
         }
     }
 
@@ -188,6 +202,7 @@ impl<S: State> Command<S> {
             goto: Goto::Next(target.into()),
             graph: GraphTarget::Parent,
             resume: None,
+            stream_data: Vec::new(),
         }
     }
 
@@ -195,6 +210,28 @@ impl<S: State> Command<S> {
     #[must_use]
     pub fn with_resume(mut self, value: ResumeValue) -> Self {
         self.resume = Some(value);
+        self
+    }
+
+    /// Attach custom streaming data to this command
+    ///
+    /// The given value is appended to the command's streaming data list.
+    /// During graph execution, each entry is emitted as a
+    /// [`StreamEvent::Custom`] event, allowing nodes to push custom JSON
+    /// payloads to the stream consumer alongside state updates and routing.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// use juncture_core::Command;
+    /// use serde_json::json;
+    ///
+    /// // In a node returning Command:
+    /// Command::end().with_stream_data(json!({"progress": 0.75}));
+    /// ```
+    #[must_use]
+    pub fn with_stream_data(mut self, data: serde_json::Value) -> Self {
+        self.stream_data.push(data);
         self
     }
 }
@@ -206,8 +243,102 @@ impl<S: State> Default for Command<S> {
             goto: Goto::None,
             graph: GraphTarget::Current,
             resume: None,
+            stream_data: Vec::new(),
         }
     }
 }
 
-// Rust guideline compliant 2026-05-20
+// Rust guideline compliant 2026-05-22
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[derive(Clone, Debug)]
+    struct TestState;
+
+    impl State for TestState {
+        type Update = TestUpdate;
+        fn apply(&mut self, _: Self::Update) -> crate::FieldsChanged {
+            crate::FieldsChanged(0)
+        }
+        fn reset_ephemeral(&mut self) {}
+    }
+
+    #[derive(Clone, Debug, Default, serde::Serialize)]
+    struct TestUpdate;
+
+    #[test]
+    fn command_default_has_empty_stream_data() {
+        let cmd = Command::<TestState>::default();
+        assert!(cmd.stream_data.is_empty());
+    }
+
+    #[test]
+    fn command_update_has_empty_stream_data() {
+        let cmd = Command::<TestState>::update(TestUpdate);
+        assert!(cmd.stream_data.is_empty());
+    }
+
+    #[test]
+    fn command_goto_has_empty_stream_data() {
+        let cmd = Command::<TestState>::goto("target");
+        assert!(cmd.stream_data.is_empty());
+    }
+
+    #[test]
+    fn command_end_has_empty_stream_data() {
+        let cmd = Command::<TestState>::end();
+        assert!(cmd.stream_data.is_empty());
+    }
+
+    #[test]
+    fn command_with_stream_data_appends_single_item() {
+        let cmd = Command::<TestState>::end().with_stream_data(json!({"key": "value"}));
+        assert_eq!(cmd.stream_data.len(), 1);
+        assert_eq!(cmd.stream_data[0], json!({"key": "value"}));
+    }
+
+    #[test]
+    fn command_with_stream_data_appends_multiple_items() {
+        let cmd = Command::<TestState>::end()
+            .with_stream_data(json!({"step": 1}))
+            .with_stream_data(json!({"step": 2}))
+            .with_stream_data(json!({"step": 3}));
+        assert_eq!(cmd.stream_data.len(), 3);
+        assert_eq!(cmd.stream_data[0], json!({"step": 1}));
+        assert_eq!(cmd.stream_data[1], json!({"step": 2}));
+        assert_eq!(cmd.stream_data[2], json!({"step": 3}));
+    }
+
+    #[test]
+    fn command_with_stream_data_preserves_other_fields() {
+        let cmd = Command::<TestState>::update(TestUpdate)
+            .with_stream_data(json!("progress"))
+            .with_resume(ResumeValue::Single(json!("resumed")));
+        assert!(cmd.update.is_some());
+        assert_eq!(cmd.stream_data.len(), 1);
+        assert!(cmd.resume.is_some());
+    }
+
+    #[test]
+    fn command_with_stream_data_works_with_goto() {
+        let cmd = Command::<TestState>::goto("next_node")
+            .with_stream_data(json!("data"));
+        assert!(matches!(cmd.goto, Goto::Next(ref target) if target == "next_node"));
+        assert_eq!(cmd.stream_data.len(), 1);
+    }
+
+    #[test]
+    fn command_send_has_empty_stream_data() {
+        let cmd = Command::<TestState>::send(vec![]);
+        assert!(cmd.stream_data.is_empty());
+    }
+
+    #[test]
+    fn command_goto_parent_has_empty_stream_data() {
+        let cmd = Command::<TestState>::goto_parent("parent");
+        assert!(cmd.stream_data.is_empty());
+    }
+}
