@@ -270,4 +270,99 @@ impl<const N: usize> From<&[(&str, &str); N]> for PathMap {
     }
 }
 
-// Rust guideline compliant 2025-01-18
+/// Construct a [`PathMap`] from key-value pairs.
+///
+/// This macro provides ergonomic syntax for creating [`PathMap`] values
+/// for conditional edge routing. Each entry maps a router return value
+/// to a target node name.
+///
+/// Both string literals and owned `String` values are supported.
+///
+/// # Syntax
+///
+/// ```ignore
+/// use juncture_core::path_map;
+///
+/// let pm = path_map! {
+///     "approve" => "publish",
+///     "reject"  => "archive",
+/// };
+/// ```
+///
+/// A trailing comma is optional but recommended for consistency.
+///
+/// # Examples
+///
+/// ```ignore
+/// use juncture_core::path_map;
+///
+/// // With string literals
+/// let pm = path_map! {
+///     "a" => "x",
+///     "b" => "y",
+///     "c" => "z",
+/// };
+/// assert_eq!(pm.len(), 3);
+///
+/// // With owned String values
+/// let key = String::from("route");
+/// let val = String::from("target");
+/// let pm = path_map! {
+///     key => val,
+/// };
+/// assert_eq!(pm.get("route"), Some(&"target".to_string()));
+/// ```
+#[macro_export]
+macro_rules! path_map {
+    ($($key:expr => $value:expr),+ $(,)?) => {{
+        let mut __pm = $crate::PathMap::new();
+        $( __pm.insert($key, $value); )+
+        __pm
+    }};
+}
+
+#[cfg(test)]
+mod path_map_macro_tests {
+
+    #[test]
+    fn test_path_map_macro_str_literals() {
+        let pm = path_map! {
+            "approve" => "publish",
+            "reject" => "archive",
+        };
+        assert_eq!(pm.get("approve"), Some(&"publish".to_string()));
+        assert_eq!(pm.get("reject"), Some(&"archive".to_string()));
+        assert_eq!(pm.len(), 2);
+    }
+
+    #[test]
+    fn test_path_map_macro_trailing_comma() {
+        let pm = path_map! {
+            "start" => "middle",
+            "middle" => "end",
+        };
+        assert_eq!(pm.get("start"), Some(&"middle".to_string()));
+        assert_eq!(pm.get("middle"), Some(&"end".to_string()));
+    }
+
+    #[test]
+    fn test_path_map_macro_owned_strings() {
+        let key = "hello".to_string();
+        let val = "world".to_string();
+        let pm = path_map! {
+            key => val,
+        };
+        assert_eq!(pm.get("hello"), Some(&"world".to_string()));
+    }
+
+    #[test]
+    fn test_path_map_macro_single_entry() {
+        let pm = path_map! {
+            "only" => "entry",
+        };
+        assert_eq!(pm.len(), 1);
+        assert_eq!(pm.get("only"), Some(&"entry".to_string()));
+    }
+}
+
+// Rust guideline compliant 2026-05-22
