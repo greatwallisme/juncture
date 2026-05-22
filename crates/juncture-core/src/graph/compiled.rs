@@ -195,7 +195,9 @@ impl<S: State, I: IntoState<S>, O: FromState<S>> CompiledGraph<S, I, O> {
     /// time and do NOT appear here -- this map captures engine-level retry policies
     /// from [`NodeMetadata::retry_policies`] that are applied by the Pregel runner
     /// during superstep execution.
-    fn build_retry_policy_map(&self) -> std::collections::HashMap<String, super::builder::RetryPolicy> {
+    fn build_retry_policy_map(
+        &self,
+    ) -> std::collections::HashMap<String, super::builder::RetryPolicy> {
         self.inner
             .builder_metadata
             .iter()
@@ -203,6 +205,26 @@ impl<S: State, I: IntoState<S>, O: FromState<S>> CompiledGraph<S, I, O> {
                 meta.retry_policies
                     .first()
                     .map(|policy| (node_name.clone(), policy.clone()))
+            })
+            .collect()
+    }
+
+    /// Builds a `HashMap<String, TimeoutPolicy>` mapping node names to their
+    /// first configured timeout policy by scanning builder metadata.
+    ///
+    /// This map captures engine-level timeout policies from
+    /// [`NodeMetadata::timeout_policies`] that are applied by the Pregel runner
+    /// during superstep execution. The timeout wraps the entire node execution
+    /// (including retry attempts when a retry policy is also configured).
+    fn build_timeout_policy_map(&self) -> std::collections::HashMap<String, crate::TimeoutPolicy> {
+        self.inner
+            .builder_metadata
+            .iter()
+            .filter_map(|(node_name, meta)| {
+                meta.timeout_policies
+                    .first()
+                    .cloned()
+                    .map(|policy| (node_name.clone(), policy))
             })
             .collect()
     }
@@ -257,7 +279,11 @@ impl<S: State, I: IntoState<S>, O: FromState<S>> CompiledGraph<S, I, O> {
     /// let output = compiled.invoke(initial_state, &config)?;
     /// let final_state = output.value;
     /// ```
-    pub fn invoke(&self, input: I, config: &RunnableConfig) -> Result<GraphOutput<S, O>, JunctureError>
+    pub fn invoke(
+        &self,
+        input: I,
+        config: &RunnableConfig,
+    ) -> Result<GraphOutput<S, O>, JunctureError>
     where
         S: serde::Serialize,
         S::Update: serde::Serialize,
@@ -320,6 +346,9 @@ impl<S: State, I: IntoState<S>, O: FromState<S>> CompiledGraph<S, I, O> {
         // Extract per-node retry policies from builder metadata
         let retry_policy_map = self.build_retry_policy_map();
 
+        // Extract per-node timeout policies from builder metadata
+        let timeout_policy_map = self.build_timeout_policy_map();
+
         // Convert input type I into state type S
         let state_input = input.into_state();
 
@@ -334,6 +363,7 @@ impl<S: State, I: IntoState<S>, O: FromState<S>> CompiledGraph<S, I, O> {
         )?;
 
         pregel.set_retry_policies(retry_policy_map);
+        pregel.set_timeout_policies(timeout_policy_map);
 
         // Execute the loop
         while pregel.tick()? {
@@ -518,6 +548,9 @@ impl<S: State, I: IntoState<S>, O: FromState<S>> CompiledGraph<S, I, O> {
         // Extract per-node retry policies from builder metadata
         let retry_policy_map = self.build_retry_policy_map();
 
+        // Extract per-node timeout policies from builder metadata
+        let timeout_policy_map = self.build_timeout_policy_map();
+
         // Create Pregel loop
         let state_input = input.into_state();
         let mut pregel = PregelLoop::with_error_handlers(
@@ -530,6 +563,7 @@ impl<S: State, I: IntoState<S>, O: FromState<S>> CompiledGraph<S, I, O> {
         )?;
 
         pregel.set_retry_policies(retry_policy_map);
+        pregel.set_timeout_policies(timeout_policy_map);
 
         // Extract run_id before moving pregel into the spawned task
         let run_id = pregel.run_id().to_string();
@@ -750,6 +784,7 @@ impl<S: State, I: IntoState<S>, O: FromState<S>> CompiledGraph<S, I, O> {
 
         let error_handler_map = self.build_error_handler_map();
         let retry_policy_map = self.build_retry_policy_map();
+        let timeout_policy_map = self.build_timeout_policy_map();
 
         let mut pregel = PregelLoop::with_error_handlers(
             input,
@@ -761,6 +796,7 @@ impl<S: State, I: IntoState<S>, O: FromState<S>> CompiledGraph<S, I, O> {
         )?;
 
         pregel.set_retry_policies(retry_policy_map);
+        pregel.set_timeout_policies(timeout_policy_map);
 
         if let Some(cp) = self.inner.checkpointer.clone() {
             pregel.set_checkpointer(cp);
@@ -903,6 +939,7 @@ impl<S: State, I: IntoState<S>, O: FromState<S>> CompiledGraph<S, I, O> {
         let num_fields = 64; // Maximum number of fields
         let error_handler_map = self.build_error_handler_map();
         let retry_policy_map = self.build_retry_policy_map();
+        let timeout_policy_map = self.build_timeout_policy_map();
         let mut pregel = crate::pregel::PregelLoop::with_error_handlers(
             state,
             self.inner.nodes.clone(),
@@ -913,6 +950,7 @@ impl<S: State, I: IntoState<S>, O: FromState<S>> CompiledGraph<S, I, O> {
         )?;
 
         pregel.set_retry_policies(retry_policy_map);
+        pregel.set_timeout_policies(timeout_policy_map);
 
         // Set checkpointer
         if let Some(cp) = self.inner.checkpointer.clone() {
@@ -1089,6 +1127,7 @@ impl<S: State, I: IntoState<S>, O: FromState<S>> CompiledGraph<S, I, O> {
         let num_fields = 64;
         let error_handler_map = self.build_error_handler_map();
         let retry_policy_map = self.build_retry_policy_map();
+        let timeout_policy_map = self.build_timeout_policy_map();
         let mut pregel = PregelLoop::with_error_handlers(
             state,
             self.inner.nodes.clone(),
@@ -1099,6 +1138,7 @@ impl<S: State, I: IntoState<S>, O: FromState<S>> CompiledGraph<S, I, O> {
         )?;
 
         pregel.set_retry_policies(retry_policy_map);
+        pregel.set_timeout_policies(timeout_policy_map);
 
         // Set checkpointer on the Pregel loop
         if let Some(cp) = self.inner.checkpointer.clone() {

@@ -8,6 +8,7 @@ use crate::{
     config::RunnableConfig,
     graph::{RetryPolicy, execute_with_retry},
     interrupt::{InterruptContext, InterruptSignal, ResumeValue, Scratchpad},
+    pregel::context::TimeoutPolicy,
     pregel::types::{PendingTask, SuperstepResult, TaskOutput},
 };
 use std::collections::HashMap;
@@ -39,6 +40,9 @@ use tracing::{Level, event};
 /// * `error_handler_map` - Maps node names to their error handler node names
 /// * `retry_policies` - Per-node retry policies; nodes with entries are wrapped
 ///   with [`execute_with_retry`] using exponential backoff and jitter
+/// * `timeout_policies` - Per-node timeout policies; nodes with entries are wrapped
+///   with `tokio::time::timeout` using the configured `run_timeout`. The timeout
+///   wraps the entire execution including retry attempts.
 /// * `step` - Current superstep number (for observability span attribute `juncture.step`)
 ///
 /// # Returns
@@ -74,6 +78,7 @@ use tracing::{Level, event};
 /// # let pending_interrupts = vec![];
 /// # let scratchpad = Scratchpad::new();
 /// let retry_policies = std::collections::HashMap::new();
+/// let timeout_policies = std::collections::HashMap::new();
 /// let (result, _interrupt_rx) = execute_superstep(
 ///     &pending_tasks,
 ///     &state,
@@ -85,20 +90,21 @@ use tracing::{Level, event};
 ///     &scratchpad,
 ///     &std::collections::HashMap::new(),
 ///     &retry_policies,
+///     &timeout_policies,
 ///     0, // step
 /// ).await?;
 /// ```
 #[expect(
     clippy::too_many_lines,
-    reason = "execute_superstep requires: early return, semaphore creation, interrupt context setup, task spawning with span creation, and result collection. The length is justified by the complexity of parallel execution with proper error handling and observability."
+    reason = "execute_superstep requires: early return, semaphore creation, interrupt context setup, task spawning with span creation, timeout/retry wrapping, and result collection. The length is justified by the complexity of parallel execution with proper error handling and observability."
 )]
 #[expect(
     clippy::too_many_arguments,
-    reason = "execute_superstep requires: tasks, state, nodes, config, cancellation token, checkpointer, pending interrupts, scratchpad, error handler map, retry policies, and step. All are necessary for the multi-interrupt matching algorithm, error recovery, and retry execution."
+    reason = "execute_superstep requires: tasks, state, nodes, config, cancellation token, checkpointer, pending interrupts, scratchpad, error handler map, retry policies, timeout policies, and step. All are necessary for the multi-interrupt matching algorithm, error recovery, retry execution, and timeout enforcement."
 )]
 #[expect(
     clippy::implicit_hasher,
-    reason = "error_handler_map and retry_policies use std::collections::HashMap as the canonical type matching the builder metadata extraction; no alternative hasher is needed."
+    reason = "error_handler_map, retry_policies, and timeout_policies use std::collections::HashMap as the canonical type matching the builder metadata extraction; no alternative hasher is needed."
 )]
 pub async fn execute_superstep<S: State>(
     pending_tasks: &[PendingTask<S>],
@@ -111,6 +117,7 @@ pub async fn execute_superstep<S: State>(
     scratchpad: &Scratchpad,
     error_handler_map: &HashMap<String, String>,
     retry_policies: &HashMap<String, RetryPolicy>,
+    timeout_policies: &HashMap<String, TimeoutPolicy>,
     step: usize,
 ) -> Result<
     (
@@ -160,6 +167,9 @@ where
         // Extract per-node retry policy (if any) before moving into the async block
         let retry_policy = retry_policies.get(&task.node_name).cloned();
 
+        // Extract per-node timeout policy (if any) before moving into the async block
+        let timeout_policy = timeout_policies.get(&task.node_name).cloned();
+
         // Extract callback handler separately so it can be used after task_config
         // is moved into the async block for node.call()
         let callback_handler = task_config.callback_handler.clone();
@@ -198,14 +208,20 @@ where
                 // and the final TaskOutput construction below.
                 let exec_node_name = node_name.clone();
 
-                // Execute task with cancellation support, interrupt context, and
-                // optional retry wrapping.
+                // Execute task with cancellation support, interrupt context,
+                // optional retry wrapping, and optional timeout enforcement.
                 // The INTERRUPT_CONTEXT.scope() makes the context available to
                 // the interrupt!() macro within node execution.
                 //
-                // When a retry policy is configured for this node, each attempt
-                // is executed inside the interrupt context so that interrupt!
-                // macros work correctly across retries.
+                // Layering order (outermost to innermost):
+                //   1. cancellation (tokio::select!)
+                //   2. timeout (tokio::time::timeout, when configured)
+                //   3. retry (execute_with_retry, when configured)
+                //   4. interrupt context (INTERRUPT_CONTEXT.scope)
+                //   5. node.call()
+                //
+                // The timeout wraps the entire retry sequence so that cumulative
+                // retry time is bounded by the run_timeout.
                 let result = tokio::select! {
                     biased;
                     () = token.cancelled() => {
@@ -218,26 +234,53 @@ where
                         return Err((node_name.clone(), err));
                     }
                     result = async {
-                        if let Some(ref policy) = retry_policy {
-                            // Retry-enabled execution: each attempt runs inside
-                            // the interrupt context so interrupt!() works across
-                            // retries. State is cloned per-attempt by execute_with_retry.
-                            let ctx_ref = Arc::clone(&ctx);
-                            crate::interrupt::INTERRUPT_CONTEXT.scope(ctx_ref, async move {
-                                execute_with_retry(
-                                    &exec_node_name,
-                                    policy,
-                                    |s, cfg| node.call(s, cfg),
-                                    task_state,
-                                    &task_config,
-                                )
+                        // Clone node name for the timeout error path before
+                        // exec_node_name is moved into the inner_future closure.
+                        let timeout_node_name = exec_node_name.clone();
+
+                        let inner_future = async {
+                            if let Some(ref policy) = retry_policy {
+                                // Retry-enabled execution: each attempt runs inside
+                                // the interrupt context so interrupt!() works across
+                                // retries. State is cloned per-attempt by execute_with_retry.
+                                let ctx_ref = Arc::clone(&ctx);
+                                crate::interrupt::INTERRUPT_CONTEXT.scope(ctx_ref, async move {
+                                    execute_with_retry(
+                                        &exec_node_name,
+                                        policy,
+                                        |s, cfg| node.call(s, cfg),
+                                        task_state,
+                                        &task_config,
+                                    )
+                                    .await
+                                }).await
+                            } else {
+                                // Standard execution (no retry)
+                                crate::interrupt::INTERRUPT_CONTEXT.scope(ctx, async move {
+                                    node.call(task_state, &task_config).await
+                                }).await
+                            }
+                        };
+
+                        // Wrap with timeout when a timeout policy is configured.
+                        // The timeout bounds the entire execution (including retries).
+                        if let Some(ref tp) = timeout_policy {
+                            tokio::time::timeout(tp.run_timeout, inner_future)
                                 .await
-                            }).await
+                                .map_or_else(
+                                    |_| {
+                                        Err(crate::JunctureError::node_timeout(
+                                            crate::error::NodeTimeoutError::RunTimeout {
+                                                node: timeout_node_name,
+                                                timeout: u64::try_from(tp.run_timeout.as_millis())
+                                                    .unwrap_or(u64::MAX),
+                                            },
+                                        ))
+                                    },
+                                    std::convert::identity,
+                                )
                         } else {
-                            // Standard execution (no retry)
-                            crate::interrupt::INTERRUPT_CONTEXT.scope(ctx, async move {
-                                node.call(task_state, &task_config).await
-                            }).await
+                            inner_future.await
                         }
                     } => result,
                 };
@@ -548,6 +591,7 @@ mod tests {
             &scratchpad,
             &HashMap::new(),
             &HashMap::new(),
+            &HashMap::new(),
             0,
         )
         .await
@@ -584,6 +628,7 @@ mod tests {
             None,
             &pending_interrupts,
             &scratchpad,
+            &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
             0,
@@ -626,6 +671,7 @@ mod tests {
             None,
             &pending_interrupts,
             &scratchpad,
+            &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
             0,
@@ -674,6 +720,7 @@ mod tests {
             &scratchpad,
             &HashMap::new(),
             &HashMap::new(),
+            &HashMap::new(),
             0,
         )
         .await;
@@ -705,6 +752,7 @@ mod tests {
             None,
             &pending_interrupts,
             &scratchpad,
+            &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
             0,
@@ -1087,6 +1135,7 @@ mod tests {
             &scratchpad,
             &HashMap::new(),
             &retry_policies,
+            &HashMap::new(),
             0,
         )
         .await
@@ -1159,6 +1208,7 @@ mod tests {
             &scratchpad,
             &HashMap::new(),
             &retry_policies,
+            &HashMap::new(),
             0,
         )
         .await;
@@ -1230,6 +1280,7 @@ mod tests {
             &scratchpad,
             &HashMap::new(),
             &retry_policies,
+            &HashMap::new(),
             0,
         )
         .await;
@@ -1327,6 +1378,7 @@ mod tests {
             &scratchpad,
             &error_handlers,
             &retry_policies,
+            &HashMap::new(),
             0,
         )
         .await;
@@ -1379,6 +1431,344 @@ mod tests {
             &scratchpad,
             &HashMap::new(),
             &HashMap::new(),
+            &HashMap::new(),
+            0,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.len(), 1);
+        assert!(result.task_outputs[0].error.is_none());
+    }
+
+    // --- Timeout integration tests in execute_superstep ---
+
+    #[tokio::test]
+    async fn test_execute_superstep_with_timeout_succeeds_within_limit() {
+        let state = TestState;
+
+        let mut nodes = indexmap::IndexMap::new();
+        nodes.insert(
+            "fast_node".to_string(),
+            NodeFnCommand(|_s| async move {
+                // Completes quickly
+                Ok(crate::Command::end())
+            })
+            .into_node("fast_node"),
+        );
+
+        let config = RunnableConfig::new();
+        let token = CancellationToken::new();
+        let pending_interrupts = vec![];
+        let scratchpad = Scratchpad::new();
+
+        let timeout_policies = {
+            let mut map = HashMap::new();
+            map.insert(
+                "fast_node".to_string(),
+                crate::pregel::context::TimeoutPolicy::new()
+                    .with_run_timeout(std::time::Duration::from_secs(10)),
+            );
+            map
+        };
+
+        let tasks = vec![PendingTask::pull(
+            uuid::Uuid::new_v4().to_string(),
+            "fast_node".to_string(),
+        )];
+
+        let (result, _rx) = execute_superstep(
+            &tasks,
+            &state,
+            &nodes,
+            &config,
+            &token,
+            None,
+            &pending_interrupts,
+            &scratchpad,
+            &HashMap::new(),
+            &HashMap::new(),
+            &timeout_policies,
+            0,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.len(), 1);
+        assert!(result.task_outputs[0].error.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_execute_superstep_with_timeout_exceeds_limit() {
+        let state = TestState;
+
+        let mut nodes = indexmap::IndexMap::new();
+        nodes.insert(
+            "slow_node".to_string(),
+            NodeFnCommand(|_s| async move {
+                // Sleep longer than the timeout
+                tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+                Ok(crate::Command::end())
+            })
+            .into_node("slow_node"),
+        );
+
+        let config = RunnableConfig::new();
+        let token = CancellationToken::new();
+        let pending_interrupts = vec![];
+        let scratchpad = Scratchpad::new();
+
+        let timeout_policies = {
+            let mut map = HashMap::new();
+            map.insert(
+                "slow_node".to_string(),
+                crate::pregel::context::TimeoutPolicy::new()
+                    .with_run_timeout(std::time::Duration::from_millis(50)),
+            );
+            map
+        };
+
+        let tasks = vec![PendingTask::pull(
+            uuid::Uuid::new_v4().to_string(),
+            "slow_node".to_string(),
+        )];
+
+        let result = execute_superstep(
+            &tasks,
+            &state,
+            &nodes,
+            &config,
+            &token,
+            None,
+            &pending_interrupts,
+            &scratchpad,
+            &HashMap::new(),
+            &HashMap::new(),
+            &timeout_policies,
+            0,
+        )
+        .await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.is_node_timeout(),
+            "expected node timeout error, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_execute_superstep_timeout_wraps_retry_entire_sequence() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        let state = TestState;
+        let attempt_count = Arc::new(AtomicU32::new(0));
+        let attempt_clone = Arc::clone(&attempt_count);
+
+        let mut nodes = indexmap::IndexMap::new();
+        nodes.insert(
+            "slow_retry_node".to_string(),
+            NodeFnCommand(move |_s: TestState| {
+                let counter = Arc::clone(&attempt_clone);
+                async move {
+                    let _n = counter.fetch_add(1, Ordering::Relaxed);
+                    // Each attempt sleeps long enough that cumulative retries
+                    // will exceed the timeout
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    Err(crate::JunctureError::execution("transient failure"))
+                }
+            })
+            .into_node("slow_retry_node"),
+        );
+
+        let config = RunnableConfig::new();
+        let token = CancellationToken::new();
+        let pending_interrupts = vec![];
+        let scratchpad = Scratchpad::new();
+
+        let retry_policies = {
+            let mut map = HashMap::new();
+            map.insert(
+                "slow_retry_node".to_string(),
+                RetryPolicy {
+                    max_attempts: 10,
+                    initial_interval: std::time::Duration::from_millis(1),
+                    backoff_factor: 1.0,
+                    max_interval: std::time::Duration::from_millis(1),
+                    jitter: false,
+                    retry_on: None,
+                },
+            );
+            map
+        };
+
+        let timeout_policies = {
+            let mut map = HashMap::new();
+            map.insert(
+                "slow_retry_node".to_string(),
+                crate::pregel::context::TimeoutPolicy::new()
+                    .with_run_timeout(std::time::Duration::from_millis(200)),
+            );
+            map
+        };
+
+        let tasks = vec![PendingTask::pull(
+            uuid::Uuid::new_v4().to_string(),
+            "slow_retry_node".to_string(),
+        )];
+
+        let result = execute_superstep(
+            &tasks,
+            &state,
+            &nodes,
+            &config,
+            &token,
+            None,
+            &pending_interrupts,
+            &scratchpad,
+            &HashMap::new(),
+            &retry_policies,
+            &timeout_policies,
+            0,
+        )
+        .await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.is_node_timeout(),
+            "timeout should fire before retries exhaust, got: {err}"
+        );
+        // Verify that retries were attempted (at least one attempt completed)
+        let attempts = attempt_count.load(Ordering::Relaxed);
+        assert!(
+            attempts >= 1,
+            "should have attempted at least once before timeout, got {attempts}"
+        );
+        // Verify retries did NOT exhaust (timeout should interrupt)
+        assert!(
+            attempts < 10,
+            "timeout should have prevented all 10 retry attempts, got {attempts}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_execute_superstep_timeout_only_applies_to_configured_node() {
+        let state = TestState;
+
+        let mut nodes = indexmap::IndexMap::new();
+        // fast_node has no timeout -- should succeed even though slow_node times out
+        nodes.insert(
+            "fast_node".to_string(),
+            NodeFnCommand(|_s| async move { Ok(crate::Command::end()) }).into_node("fast_node"),
+        );
+        nodes.insert(
+            "slow_node".to_string(),
+            NodeFnCommand(|_s| async move {
+                tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+                Ok(crate::Command::end())
+            })
+            .into_node("slow_node"),
+        );
+
+        let config = RunnableConfig::new();
+        let token = CancellationToken::new();
+        let pending_interrupts = vec![];
+        let scratchpad = Scratchpad::new();
+
+        // Only slow_node has a timeout; fast_node runs without timeout
+        let timeout_policies = {
+            let mut map = HashMap::new();
+            map.insert(
+                "slow_node".to_string(),
+                crate::pregel::context::TimeoutPolicy::new()
+                    .with_run_timeout(std::time::Duration::from_millis(50)),
+            );
+            map
+        };
+
+        // Give slow_node an error handler so the superstep doesn't abort
+        let error_handlers = {
+            let mut map = HashMap::new();
+            map.insert("slow_node".to_string(), "handler".to_string());
+            map
+        };
+
+        let tasks = vec![
+            PendingTask::pull(uuid::Uuid::new_v4().to_string(), "fast_node".to_string()),
+            PendingTask::pull(uuid::Uuid::new_v4().to_string(), "slow_node".to_string()),
+        ];
+
+        let (result, _rx) = execute_superstep(
+            &tasks,
+            &state,
+            &nodes,
+            &config,
+            &token,
+            None,
+            &pending_interrupts,
+            &scratchpad,
+            &error_handlers,
+            &HashMap::new(),
+            &timeout_policies,
+            0,
+        )
+        .await
+        .unwrap();
+
+        // fast_node should succeed, slow_node should have an error recorded
+        assert_eq!(result.len(), 2);
+        let fast_output = result
+            .task_outputs
+            .iter()
+            .find(|o| o.node_name == "fast_node")
+            .expect("fast_node output should exist");
+        assert!(fast_output.error.is_none());
+
+        let slow_output = result
+            .task_outputs
+            .iter()
+            .find(|o| o.node_name == "slow_node")
+            .expect("slow_node output should exist");
+        assert!(
+            slow_output.error.is_some(),
+            "slow_node should have timed out with error handler"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_execute_superstep_no_timeout_policy_same_behavior() {
+        // Verify that without timeout policies, behavior is identical to before
+        let state = TestState;
+
+        let mut nodes = indexmap::IndexMap::new();
+        nodes.insert(
+            "simple_node".to_string(),
+            NodeFnCommand(|_s| async move { Ok(crate::Command::end()) }).into_node("simple_node"),
+        );
+
+        let config = RunnableConfig::new();
+        let token = CancellationToken::new();
+        let pending_interrupts = vec![];
+        let scratchpad = Scratchpad::new();
+
+        let tasks = vec![PendingTask::pull(
+            uuid::Uuid::new_v4().to_string(),
+            "simple_node".to_string(),
+        )];
+
+        let (result, _rx) = execute_superstep(
+            &tasks,
+            &state,
+            &nodes,
+            &config,
+            &token,
+            None,
+            &pending_interrupts,
+            &scratchpad,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
             0,
         )
         .await
@@ -1389,4 +1779,4 @@ mod tests {
     }
 }
 
-// Rust guideline compliant 2026-05-21
+// Rust guideline compliant 2026-05-22

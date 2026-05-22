@@ -197,6 +197,14 @@ pub struct PregelLoop<S: State> {
     /// wrapped with [`crate::graph::builder::execute_with_retry`] for automatic
     /// retries with exponential backoff and jitter.
     retry_policies: HashMap<String, crate::graph::RetryPolicy>,
+
+    /// Per-node timeout policies extracted from builder metadata.
+    ///
+    /// When a node has an entry here, its execution in `execute_superstep` is
+    /// wrapped with `tokio::time::timeout` using the configured `run_timeout`.
+    /// The timeout wraps the entire execution (including retry attempts when a
+    /// retry policy is also configured).
+    timeout_policies: HashMap<String, crate::pregel::context::TimeoutPolicy>,
 }
 
 impl<S: State> std::fmt::Debug for PregelLoop<S> {
@@ -223,7 +231,14 @@ impl<S: State> std::fmt::Debug for PregelLoop<S> {
             .field("interrupt_versions_seen", &self.interrupt_versions_seen)
             .field("superstep_start", &self.superstep_start.is_some())
             .field("error_handler_map", &self.error_handler_map.len())
-            .field("retry_policies", &self.retry_policies.keys().collect::<Vec<_>>())
+            .field(
+                "retry_policies",
+                &self.retry_policies.keys().collect::<Vec<_>>(),
+            )
+            .field(
+                "timeout_policies",
+                &self.timeout_policies.keys().collect::<Vec<_>>(),
+            )
             .finish()
     }
 }
@@ -335,6 +350,7 @@ impl<S: State> PregelLoop<S> {
             superstep_start: None,
             error_handler_map,
             retry_policies: HashMap::new(),
+            timeout_policies: HashMap::new(),
         })
     }
 
@@ -377,11 +393,21 @@ impl<S: State> PregelLoop<S> {
     /// execution, nodes with a configured policy are wrapped with
     /// [`crate::graph::builder::execute_with_retry`] for automatic retries
     /// with exponential backoff and jitter.
-    pub fn set_retry_policies(
-        &mut self,
-        policies: HashMap<String, crate::graph::RetryPolicy>,
-    ) {
+    pub fn set_retry_policies(&mut self, policies: HashMap<String, crate::graph::RetryPolicy>) {
         self.retry_policies = policies;
+    }
+
+    /// Set per-node timeout policies
+    ///
+    /// Each entry maps a node name to its [`TimeoutPolicy`](crate::pregel::context::TimeoutPolicy).
+    /// During superstep execution, nodes with a configured policy are wrapped with
+    /// `tokio::time::timeout` using the configured `run_timeout`. The timeout wraps
+    /// the entire execution including any retry attempts.
+    pub fn set_timeout_policies(
+        &mut self,
+        policies: HashMap<String, crate::pregel::context::TimeoutPolicy>,
+    ) {
+        self.timeout_policies = policies;
     }
 
     /// Compute initial tasks from entry point
@@ -607,6 +633,7 @@ impl<S: State> PregelLoop<S> {
             &self.scratchpad,
             &self.error_handler_map,
             &self.retry_policies,
+            &self.timeout_policies,
             self.step,
         )
         .await?;

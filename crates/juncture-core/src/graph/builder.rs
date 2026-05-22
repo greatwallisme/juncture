@@ -74,6 +74,11 @@ pub struct NodeMetadata {
     /// handler node receives a [`NodeError`] and returns a [`Command`] whose
     /// update is applied normally.
     pub error_handler: Option<String>,
+
+    /// Timeout policies for this node, applied by the Pregel engine during
+    /// superstep execution. The timeout wraps the entire execution (including
+    /// retry attempts when a retry policy is also configured).
+    pub timeout_policies: Vec<crate::TimeoutPolicy>,
 }
 
 /// Retry policy for node execution
@@ -702,6 +707,10 @@ impl<S: State, I: IntoState<S>, O: FromState<S>> StateGraph<S, I, O> {
     /// # Panics
     ///
     /// Panics if the node name contains invalid characters for graph identifiers.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "add_node requires name, node, defer, metadata, destinations, retry_policies, and timeout_policies. All are necessary for the builder pattern."
+    )]
     pub fn add_node(
         &mut self,
         name: impl Into<String>,
@@ -710,6 +719,7 @@ impl<S: State, I: IntoState<S>, O: FromState<S>> StateGraph<S, I, O> {
         metadata: Option<HashMap<String, serde_json::Value>>,
         destinations: Option<Vec<String>>,
         retry_policies: Vec<RetryPolicy>,
+        timeout_policies: Vec<crate::TimeoutPolicy>,
     ) -> Result<&mut Self, TopologyError> {
         let name = name.into();
         if self.nodes.contains_key(&name) {
@@ -727,6 +737,7 @@ impl<S: State, I: IntoState<S>, O: FromState<S>> StateGraph<S, I, O> {
                 destinations,
                 retry_policies,
                 error_handler: None,
+                timeout_policies,
             },
         );
 
@@ -740,6 +751,7 @@ impl<S: State, I: IntoState<S>, O: FromState<S>> StateGraph<S, I, O> {
     /// - `metadata`: `None`
     /// - `destinations`: `None`
     /// - `retry_policies`: empty
+    /// - `timeout_policies`: empty
     ///
     /// Returns `&mut Self` on success for fluent builder chaining.
     ///
@@ -751,7 +763,7 @@ impl<S: State, I: IntoState<S>, O: FromState<S>> StateGraph<S, I, O> {
         name: impl Into<String>,
         node: impl IntoNode<S>,
     ) -> Result<&mut Self, TopologyError> {
-        self.add_node(name, node, false, None, None, Vec::new())
+        self.add_node(name, node, false, None, None, Vec::new(), Vec::new())
     }
 
     /// Add a node with an error recovery handler
