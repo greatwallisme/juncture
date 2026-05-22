@@ -34,6 +34,14 @@ pub enum StoreError {
     #[error("io error: {0}")]
     Io(String),
 
+    /// Invalid namespace format
+    #[error("invalid namespace: {0}")]
+    InvalidNamespace(String),
+
+    /// Vector search error
+    #[error("vector search error: {0}")]
+    VectorSearch(String),
+
     /// Database error
     #[error("database error: {0}")]
     Database(String),
@@ -330,6 +338,7 @@ pub enum StoreResult {
 /// let store = MemoryStore::new().with_ttl_config(TTLConfig {
 ///     default_ttl: Some(Duration::from_secs(300)),
 ///     refresh_on_read: true,
+///     sweep_max_items: None,
 /// });
 /// ```
 #[derive(Clone, Debug, Default)]
@@ -345,6 +354,12 @@ pub struct TTLConfig {
     /// the item's `expires_at` to `now + default_ttl`, effectively resetting
     /// its TTL timer.
     pub refresh_on_read: bool,
+    /// Maximum number of items to sweep per background cleanup cycle.
+    ///
+    /// Limits the work done by a single sweep pass. When `None`, no limit
+    /// is applied (all expired items are swept in a single pass).
+    /// Used by the standalone `juncture-store` background sweep task.
+    pub sweep_max_items: Option<usize>,
 }
 
 /// In-memory store implementation
@@ -1874,6 +1889,7 @@ mod tests {
         let store = MemoryStore::new().with_ttl_config(TTLConfig {
             default_ttl: Some(std::time::Duration::from_millis(50)),
             refresh_on_read: false,
+            sweep_max_items: None,
         });
 
         store
@@ -1902,6 +1918,7 @@ mod tests {
         let store = MemoryStore::new().with_ttl_config(TTLConfig {
             default_ttl: Some(std::time::Duration::from_millis(100)),
             refresh_on_read: true,
+            sweep_max_items: None,
         });
 
         store
@@ -1939,6 +1956,7 @@ mod tests {
         let store = MemoryStore::new().with_ttl_config(TTLConfig {
             default_ttl: Some(std::time::Duration::from_millis(50)),
             refresh_on_read: false,
+            sweep_max_items: None,
         });
 
         store
@@ -2008,6 +2026,7 @@ mod tests {
         let store = MemoryStore::new().with_ttl_config(TTLConfig {
             default_ttl: Some(std::time::Duration::from_millis(30)),
             refresh_on_read: false,
+            sweep_max_items: None,
         });
 
         store
@@ -2041,6 +2060,7 @@ mod tests {
         let store = MemoryStore::new().with_ttl_config(TTLConfig {
             default_ttl: Some(std::time::Duration::from_millis(200)),
             refresh_on_read: true,
+            sweep_max_items: None,
         });
 
         store
