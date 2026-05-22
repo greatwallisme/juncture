@@ -715,8 +715,7 @@ impl<S: State> PregelLoop<S> {
     /// ```
     #[expect(
         clippy::too_many_lines,
-        clippy::cognitive_complexity,
-        reason = "after_tick has 30/25 cognitive complexity because it orchestrates multiple sequential phases (apply writes, bump versions, consume channels, emit events including stream_data, compute tasks, drain interrupts, check interrupts, finish channels, increment step); each phase is independently simple but the combination exceeds the limit"
+        reason = "after_tick orchestrates multiple sequential phases: apply writes, bump versions, consume channels, emit events including stream_data, compute tasks, drain interrupts, check interrupts, finish channels, increment step"
     )]
     pub async fn after_tick(&mut self, result: SuperstepResult<S>) -> Result<(), JunctureError>
     where
