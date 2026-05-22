@@ -442,9 +442,10 @@ where
 ///
 /// The matching follows three strategies depending on the `ResumeValue` variant:
 ///
-/// 1. **Single (global matching)**: A single value is applied to all pending interrupts.
-///    When no pending interrupts exist, returns a single-element vector for the
-///    first interrupt position.
+/// 1. **Single (global matching)**: A single value is applied to all pending interrupts
+///    that are not already processed in the scratchpad. Processed interrupts receive
+///    a `Null` resume value instead. When no pending interrupts exist, returns a
+///    single-element vector for the first interrupt position.
 ///
 /// 2. **`ById` (ID-based matching)**: Maps values by interrupt ID. If an interrupt has
 ///    been processed (tracked in the scratchpad), it receives a `Null` resume value
@@ -479,11 +480,24 @@ fn match_resume_to_interrupts(
 
     match rv {
         ResumeValue::Single(value) => {
-            // Global matching: single value for all pending interrupts
+            // Global matching: single value for all pending interrupts,
+            // but processed interrupts (tracked in scratchpad) receive
+            // null-resume so they are silently acknowledged without
+            // re-triggering.
             if pending_interrupts.is_empty() {
                 vec![Some(value.clone())]
             } else {
-                vec![Some(value.clone()); pending_interrupts.len()]
+                pending_interrupts
+                    .iter()
+                    .map(|signal| {
+                        if let Some(ref id) = signal.id
+                            && scratchpad.get_null_resume(id)
+                        {
+                            return Some(serde_json::Value::Null);
+                        }
+                        Some(value.clone())
+                    })
+                    .collect()
             }
         }
         ResumeValue::ById(map) => {
@@ -803,6 +817,65 @@ mod tests {
                 Some(serde_json::json!("approve")),
                 Some(serde_json::json!("approve")),
             ]
+        );
+    }
+
+    #[test]
+    fn test_match_single_value_with_scratchpad_null_resume() {
+        // When an interrupt is already processed in the scratchpad, it should
+        // receive Null even under Single (global) matching. This enables the
+        // "click to continue" pattern where the user acknowledges all remaining
+        // interrupts without re-triggering already-handled ones.
+        let mut scratchpad = Scratchpad::new();
+        scratchpad.mark_interrupt_processed("id-0");
+
+        let resume = Some(ResumeValue::Single(serde_json::json!("approve")));
+        let interrupts = vec![
+            InterruptSignal {
+                index: 0,
+                id: Some("id-0".to_string()),
+                payload: serde_json::Value::Null,
+            },
+            InterruptSignal {
+                index: 1,
+                id: Some("id-1".to_string()),
+                payload: serde_json::Value::Null,
+            },
+        ];
+        let result = match_resume_to_interrupts(&resume, &interrupts, &scratchpad);
+        assert_eq!(
+            result,
+            vec![
+                Some(serde_json::Value::Null),      // processed -> null-resume
+                Some(serde_json::json!("approve")), // unprocessed -> single value
+            ]
+        );
+    }
+
+    #[test]
+    fn test_match_single_null_value_with_scratchpad() {
+        // Single(Value::Null) with processed interrupts: all get Null,
+        // but the scratchpad-processed ones are still recognized as null-resume.
+        let mut scratchpad = Scratchpad::new();
+        scratchpad.mark_interrupt_processed("id-1");
+
+        let resume = Some(ResumeValue::Single(serde_json::Value::Null));
+        let interrupts = vec![
+            InterruptSignal {
+                index: 0,
+                id: Some("id-0".to_string()),
+                payload: serde_json::Value::Null,
+            },
+            InterruptSignal {
+                index: 1,
+                id: Some("id-1".to_string()),
+                payload: serde_json::Value::Null,
+            },
+        ];
+        let result = match_resume_to_interrupts(&resume, &interrupts, &scratchpad);
+        assert_eq!(
+            result,
+            vec![Some(serde_json::Value::Null), Some(serde_json::Value::Null),]
         );
     }
 

@@ -1934,10 +1934,8 @@ mod tests {
         async fn get_tuple(
             &self,
             _: &crate::config::RunnableConfig,
-        ) -> Result<
-            Option<crate::checkpoint::CheckpointTuple>,
-            crate::checkpoint::CheckpointError,
-        > {
+        ) -> Result<Option<crate::checkpoint::CheckpointTuple>, crate::checkpoint::CheckpointError>
+        {
             Ok(None)
         }
 
@@ -2016,18 +2014,17 @@ mod tests {
             let calls = observed
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            calls.iter().any(|c| matches!(
-                c,
-                ObservedCall::Put {
-                    source: crate::checkpoint::CheckpointSource::Loop,
-                    step: 0,
-                }
-            ))
+            calls.iter().any(|c| {
+                matches!(
+                    c,
+                    ObservedCall::Put {
+                        source: crate::checkpoint::CheckpointSource::Loop,
+                        step: 0,
+                    }
+                )
+            })
         };
-        assert!(
-            has_loop_checkpoint,
-            "expected a Loop checkpoint at step 0"
-        );
+        assert!(has_loop_checkpoint, "expected a Loop checkpoint at step 0");
     }
 
     /// Verify that superstep checkpoint is saved at the correct step number
@@ -2159,8 +2156,8 @@ mod tests {
             NodeFnCommand(|_s| async move { Ok(Command::end()) }).into_node("test_node"),
         );
         let trigger_table = TriggerTable::new();
-        let config = crate::config::RunnableConfig::new()
-            .with_checkpoint_ns(crate::checkpoint::CheckpointNamespace::new(vec![
+        let config = crate::config::RunnableConfig::new().with_checkpoint_ns(
+            crate::checkpoint::CheckpointNamespace::new(vec![
                 crate::checkpoint::NamespaceSegment::new(
                     "review".to_string(),
                     "uuid-1".to_string(),
@@ -2169,7 +2166,8 @@ mod tests {
                     "detail".to_string(),
                     "uuid-2".to_string(),
                 ),
-            ]));
+            ]),
+        );
 
         let loop_ = PregelLoop::new(state, nodes, trigger_table, config, 0).unwrap();
         let ns = loop_.current_ns();
@@ -2185,13 +2183,14 @@ mod tests {
             NodeFnCommand(|_s| async move { Ok(Command::end()) }).into_node("test_node"),
         );
         let trigger_table = TriggerTable::new();
-        let config = crate::config::RunnableConfig::new()
-            .with_checkpoint_ns(crate::checkpoint::CheckpointNamespace::new(vec![
+        let config = crate::config::RunnableConfig::new().with_checkpoint_ns(
+            crate::checkpoint::CheckpointNamespace::new(vec![
                 crate::checkpoint::NamespaceSegment::new(
                     "agent".to_string(),
                     "uuid-single".to_string(),
                 ),
-            ]));
+            ]),
+        );
 
         let loop_ = PregelLoop::new(state, nodes, trigger_table, config, 0).unwrap();
         let ns = loop_.current_ns();
@@ -2216,8 +2215,7 @@ mod tests {
                 "uuid-parent".to_string(),
             ),
         ]);
-        let config =
-            crate::config::RunnableConfig::new().with_checkpoint_ns(checkpoint_ns);
+        let config = crate::config::RunnableConfig::new().with_checkpoint_ns(checkpoint_ns);
 
         let mut loop_ = PregelLoop::new(state, nodes, trigger_table, config, 0).unwrap();
 
@@ -2238,7 +2236,9 @@ mod tests {
         let _ = loop_.handle_bubble_ups(&bubble_ups);
 
         // The emitted event should carry the checkpoint namespace
-        let event = rx.try_recv().expect("should have received an interrupt event");
+        let event = rx
+            .try_recv()
+            .expect("should have received an interrupt event");
         match event {
             StreamEvent::Interrupt { ns, .. } => {
                 assert_eq!(ns, vec!["review"]);
