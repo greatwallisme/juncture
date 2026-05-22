@@ -291,6 +291,8 @@ pub enum StoreOp {
         max_depth: Option<usize>,
         /// Result limit
         limit: Option<usize>,
+        /// Offset for pagination
+        offset: Option<usize>,
     },
 }
 
@@ -592,7 +594,7 @@ impl Store for MemoryStore {
         suffix: Option<&str>,
         _max_depth: Option<usize>,
         limit: Option<usize>,
-        _offset: Option<usize>,
+        offset: Option<usize>,
     ) -> Result<Vec<String>, StoreError> {
         let mut namespaces: Vec<String> = {
             let data = self.data.read().await;
@@ -605,6 +607,12 @@ impl Store for MemoryStore {
         }
         if let Some(suffix_filter) = suffix {
             namespaces.retain(|ns| ns.ends_with(suffix_filter));
+        }
+
+        // Apply offset-based pagination (skip first N results)
+        if let Some(offset_value) = offset {
+            let skip = offset_value.min(namespaces.len());
+            namespaces.drain(..skip);
         }
 
         // Apply limit
@@ -646,6 +654,7 @@ impl Store for MemoryStore {
                     suffix,
                     max_depth,
                     limit,
+                    offset,
                 } => {
                     let namespaces = self
                         .list_namespaces(
@@ -653,7 +662,7 @@ impl Store for MemoryStore {
                             suffix.as_deref(),
                             max_depth,
                             limit,
-                            None,
+                            offset,
                         )
                         .await?;
                     StoreResult::Namespaces(namespaces)
@@ -924,7 +933,7 @@ impl Store for SqliteStore {
         suffix: Option<&str>,
         _max_depth: Option<usize>,
         limit: Option<usize>,
-        _offset: Option<usize>,
+        offset: Option<usize>,
     ) -> Result<Vec<String>, StoreError> {
         let pool = self
             .pool
@@ -944,6 +953,9 @@ impl Store for SqliteStore {
         }
         if let Some(limit_value) = limit {
             let _ = write!(query_str, " LIMIT {limit_value}");
+        }
+        if let Some(offset_value) = offset {
+            let _ = write!(query_str, " OFFSET {offset_value}");
         }
 
         let mut query = sqlx::query(&query_str);
@@ -998,6 +1010,7 @@ impl Store for SqliteStore {
                     suffix,
                     max_depth,
                     limit,
+                    offset,
                 } => {
                     let namespaces = self
                         .list_namespaces(
@@ -1005,7 +1018,7 @@ impl Store for SqliteStore {
                             suffix.as_deref(),
                             max_depth,
                             limit,
-                            None,
+                            offset,
                         )
                         .await?;
                     StoreResult::Namespaces(namespaces)
@@ -1198,7 +1211,7 @@ impl Store for PostgresStore {
         suffix: Option<&str>,
         _max_depth: Option<usize>,
         limit: Option<usize>,
-        _offset: Option<usize>,
+        offset: Option<usize>,
     ) -> Result<Vec<String>, StoreError> {
         let pool = self
             .pool
@@ -1221,6 +1234,9 @@ impl Store for PostgresStore {
         }
         if let Some(limit_value) = limit {
             let _ = write!(query_str, " LIMIT {limit_value}");
+        }
+        if let Some(offset_value) = offset {
+            let _ = write!(query_str, " OFFSET {offset_value}");
         }
 
         let mut query = sqlx::query(&query_str);
@@ -1275,6 +1291,7 @@ impl Store for PostgresStore {
                     suffix,
                     max_depth,
                     limit,
+                    offset,
                 } => {
                     let namespaces = self
                         .list_namespaces(
@@ -1282,7 +1299,7 @@ impl Store for PostgresStore {
                             suffix.as_deref(),
                             max_depth,
                             limit,
-                            None,
+                            offset,
                         )
                         .await?;
                     StoreResult::Namespaces(namespaces)
@@ -1295,7 +1312,7 @@ impl Store for PostgresStore {
     }
 }
 
-// Rust guideline compliant 2026-05-21
+// Rust guideline compliant 2026-05-22
 
 #[cfg(test)]
 mod tests {
@@ -1612,6 +1629,110 @@ mod tests {
         assert!(
             refreshed_expires > original_expires,
             "refresh_on_read should advance the expiration time: {refreshed_expires} should be > {original_expires}"
+        );
+    }
+
+    // --- Offset pagination tests ---
+
+    #[tokio::test]
+    async fn test_list_namespaces_offset_skips_first_n() {
+        let store = MemoryStore::new();
+
+        // Insert items across multiple namespaces
+        for i in 0..5 {
+            store
+                .put(&format!("ns-{i}"), "key", json!({"v": i}), None)
+                .await
+                .expect("put failed");
+        }
+
+        // Without offset, all 5 namespaces are returned
+        let all_ns = store
+            .list_namespaces(None, None, None, None, None)
+            .await
+            .expect("list_namespaces failed");
+        assert_eq!(all_ns.len(), 5, "expected all 5 namespaces");
+
+        // With offset=2, skip first 2 => 3 remaining
+        let offset_ns = store
+            .list_namespaces(None, None, None, None, Some(2))
+            .await
+            .expect("list_namespaces with offset failed");
+        assert_eq!(
+            offset_ns.len(),
+            3,
+            "offset=2 should skip 2 namespaces, leaving 3"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_list_namespaces_offset_and_limit_together() {
+        let store = MemoryStore::new();
+
+        for i in 0..10 {
+            store
+                .put(&format!("ns-{i:02}"), "key", json!({"v": i}), None)
+                .await
+                .expect("put failed");
+        }
+
+        // Offset=3, limit=4 => skip first 3, take next 4 => 4 results
+        let page = store
+            .list_namespaces(None, None, None, Some(4), Some(3))
+            .await
+            .expect("list_namespaces failed");
+        assert_eq!(page.len(), 4, "offset=3 + limit=4 should yield 4 results");
+    }
+
+    #[tokio::test]
+    async fn test_list_namespaces_offset_larger_than_results() {
+        let store = MemoryStore::new();
+
+        store
+            .put("only-ns", "key", json!({"v": 1}), None)
+            .await
+            .expect("put failed");
+
+        // offset=100 but only 1 namespace exists => empty result
+        let result = store
+            .list_namespaces(None, None, None, None, Some(100))
+            .await
+            .expect("list_namespaces failed");
+        assert!(
+            result.is_empty(),
+            "offset larger than result set should return empty"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_list_namespaces_offset_with_prefix_filter() {
+        let store = MemoryStore::new();
+
+        for i in 0..6 {
+            let ns = if i < 3 {
+                format!("alpha-{i}")
+            } else {
+                format!("beta-{i}")
+            };
+            store
+                .put(&ns, "key", json!({"v": i}), None)
+                .await
+                .expect("put failed");
+        }
+
+        // Filter to "alpha-" namespaces only, then offset=1 => skip 1 of 3 => 2 remaining
+        let result = store
+            .list_namespaces(Some("alpha-"), None, None, None, Some(1))
+            .await
+            .expect("list_namespaces failed");
+        assert_eq!(
+            result.len(),
+            2,
+            "prefix filter + offset=1 should leave 2 namespaces"
+        );
+        assert!(
+            result.iter().all(|ns| ns.starts_with("alpha-")),
+            "all results must match prefix filter"
         );
     }
 }
