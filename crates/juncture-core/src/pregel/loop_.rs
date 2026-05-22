@@ -13,6 +13,7 @@ use crate::{
     pregel::{
         budget::BudgetTracker,
         context::ExecutionContext,
+        durability::Durability,
         runner::execute_superstep,
         scheduler::{
             FieldVersionTracker, VersionsSeen, apply_writes, compute_next_tasks,
@@ -706,6 +707,7 @@ impl<S: State> PregelLoop<S> {
     /// loop.after_tick(result).await?;
     /// ```
     #[expect(
+        clippy::cognitive_complexity,
         clippy::too_many_lines,
         reason = "after_tick requires multiple steps: apply writes, bump versions, emit events, compute tasks, drain interrupts, check interrupts, finish channels, increment step"
     )]
@@ -910,6 +912,11 @@ impl<S: State> PregelLoop<S> {
         // its value available after finish() is called.
         if self.pending_tasks.is_empty() {
             self.finish_all_channels();
+            // In Exit durability mode, save a checkpoint on graph completion
+            // so the final state is preserved in durable storage.
+            if self.effective_durability() == Durability::Exit {
+                self.save_exit_checkpoint().await;
+            }
         }
 
         // Increment step
@@ -1182,6 +1189,11 @@ impl<S: State> PregelLoop<S> {
     ///
     /// Requires `S: serde::Serialize` to serialize the current state into
     /// `channel_values` for the checkpoint.
+    #[allow(
+        clippy::cognitive_complexity,
+        clippy::too_many_lines,
+        reason = "durability match arms and checkpoint construction logic are necessarily complex for handling Sync/Async/Exit modes"
+    )]
     async fn save_interrupt_checkpoint(&mut self, node: &str)
     where
         S: serde::Serialize,
@@ -1203,29 +1215,7 @@ impl<S: State> PregelLoop<S> {
             }
         };
 
-        let channel_versions: HashMap<String, u64> = self
-            .field_versions
-            .versions()
-            .iter()
-            .enumerate()
-            .map(|(idx, ver)| (format!("field_{idx}"), *ver))
-            .collect();
-
-        let new_versions = channel_versions.clone();
-
-        let versions_seen: HashMap<String, HashMap<String, u64>> = self
-            .nodes
-            .keys()
-            .map(|node_name| {
-                let versions = self.versions_seen.get_versions(node_name);
-                let map: HashMap<String, u64> = versions
-                    .iter()
-                    .enumerate()
-                    .map(|(idx, ver)| (format!("field_{idx}"), *ver))
-                    .collect();
-                (node_name.clone(), map)
-            })
-            .collect();
+        let (channel_versions, new_versions, versions_seen) = self.build_checkpoint_versions();
 
         let checkpoint_id = generate_checkpoint_id();
         let created_at = chrono::Utc::now().to_rfc3339();
@@ -1255,34 +1245,62 @@ impl<S: State> PregelLoop<S> {
             run_id: self.run_id.clone(),
         };
 
-        match checkpointer
-            .put(&self.runnable_config, checkpoint, metadata)
-            .await
-        {
-            Ok(updated_config) => {
-                self.runnable_config.checkpoint_id = updated_config.checkpoint_id;
-                // Reset delta counters after a successful interrupt checkpoint
-                // save, same as superstep checkpoint logic.
+        let cp_config = self.runnable_config.clone();
+        match self.effective_durability() {
+            Durability::Async => {
+                let step = self.step;
+                let node_label = node.to_string();
+                let checkpointer_arc = Arc::clone(checkpointer);
+                tokio::spawn(async move {
+                    match checkpointer_arc.put(&cp_config, checkpoint, metadata).await {
+                        Ok(_updated_config) => {
+                            tracing::info!(
+                                name: "juncture.checkpoint.put",
+                                checkpoint_step = step,
+                                checkpoint_source = "Interrupt",
+                                "Interrupt checkpoint persisted (async)"
+                            );
+                        }
+                        Err(err) => {
+                            tracing::warn!(
+                                name: "juncture.checkpoint.interrupt.save_failed",
+                                node = node_label,
+                                error = %err,
+                                "Failed to save interrupt checkpoint (async)"
+                            );
+                        }
+                    }
+                });
                 self.reset_delta_counters();
-                tracing::info!(
-                    name: "juncture.checkpoint.put",
-                    checkpoint_id = %self.runnable_config.checkpoint_id.as_deref().unwrap_or("unknown"),
-                    checkpoint_step = self.step,
-                    checkpoint_source = "Interrupt",
-                    "Interrupt checkpoint persisted"
-                );
-                // Notify callback handler about checkpoint save
-                if let Some(ref cp_id) = self.runnable_config.checkpoint_id {
-                    self.on_checkpoint_saved(cp_id, self.step);
-                }
             }
-            Err(err) => {
-                tracing::warn!(
-                    name: "juncture.checkpoint.interrupt.save_failed",
-                    node = node,
-                    error = %err,
-                    "Failed to save interrupt checkpoint"
-                );
+            Durability::Sync | Durability::Exit => {
+                match checkpointer
+                    .put(&self.runnable_config, checkpoint, metadata)
+                    .await
+                {
+                    Ok(updated_config) => {
+                        self.runnable_config.checkpoint_id = updated_config.checkpoint_id;
+                        self.reset_delta_counters();
+                        tracing::info!(
+                            name: "juncture.checkpoint.put",
+                            checkpoint_id = %self.runnable_config.checkpoint_id.as_deref().unwrap_or("unknown"),
+                            checkpoint_step = self.step,
+                            checkpoint_source = "Interrupt",
+                            "Interrupt checkpoint persisted"
+                        );
+                        if let Some(ref cp_id) = self.runnable_config.checkpoint_id {
+                            self.on_checkpoint_saved(cp_id, self.step);
+                        }
+                    }
+                    Err(err) => {
+                        tracing::warn!(
+                            name: "juncture.checkpoint.interrupt.save_failed",
+                            node = node,
+                            error = %err,
+                            "Failed to save interrupt checkpoint"
+                        );
+                    }
+                }
             }
         }
     }
@@ -1301,6 +1319,11 @@ impl<S: State> PregelLoop<S> {
     /// No-op if no checkpointer is configured. Errors are logged but do not
     /// propagate -- superstep checkpointing is best-effort and must not prevent
     /// the graph from continuing execution.
+    #[allow(
+        clippy::cognitive_complexity,
+        clippy::too_many_lines,
+        reason = "durability match arms and checkpoint construction logic are necessarily complex for handling Sync/Async/Exit modes"
+    )]
     async fn save_superstep_checkpoint(&mut self)
     where
         S: serde::Serialize,
@@ -1308,6 +1331,13 @@ impl<S: State> PregelLoop<S> {
         let Some(ref checkpointer) = self.checkpointer else {
             return;
         };
+
+        // In Exit mode, skip normal superstep checkpoints. Only save on
+        // graph completion or interrupt, where checkpoints are treated as
+        // the final durable snapshot.
+        if self.effective_durability() == Durability::Exit {
+            return;
+        }
 
         let channel_values = match serde_json::to_value(&self.state) {
             Ok(v) => v,
@@ -1322,29 +1352,7 @@ impl<S: State> PregelLoop<S> {
             }
         };
 
-        let channel_versions: HashMap<String, u64> = self
-            .field_versions
-            .versions()
-            .iter()
-            .enumerate()
-            .map(|(idx, ver)| (format!("field_{idx}"), *ver))
-            .collect();
-
-        let new_versions = channel_versions.clone();
-
-        let versions_seen: HashMap<String, HashMap<String, u64>> = self
-            .nodes
-            .keys()
-            .map(|node_name| {
-                let versions = self.versions_seen.get_versions(node_name);
-                let map: HashMap<String, u64> = versions
-                    .iter()
-                    .enumerate()
-                    .map(|(idx, ver)| (format!("field_{idx}"), *ver))
-                    .collect();
-                (node_name.clone(), map)
-            })
-            .collect();
+        let (channel_versions, new_versions, versions_seen) = self.build_checkpoint_versions();
 
         // Serialize pending tasks for crash recovery so the engine knows
         // which nodes to execute next after resuming from this checkpoint.
@@ -1385,34 +1393,64 @@ impl<S: State> PregelLoop<S> {
             run_id: self.run_id.clone(),
         };
 
-        match checkpointer
-            .put(&self.runnable_config, checkpoint, metadata)
-            .await
-        {
-            Ok(updated_config) => {
-                self.runnable_config.checkpoint_id = updated_config.checkpoint_id;
-                // Reset delta counters after a successful checkpoint save.
-                // The checkpoint now carries the cumulative counters, and a
-                // fresh counting window starts for the next checkpoint cycle.
+        let cp_config = self.runnable_config.clone();
+        match self.effective_durability() {
+            Durability::Async => {
+                let step = self.step;
+                let checkpointer_arc = Arc::clone(checkpointer);
+                tokio::spawn(async move {
+                    match checkpointer_arc.put(&cp_config, checkpoint, metadata).await {
+                        Ok(_updated_config) => {
+                            tracing::info!(
+                                name: "juncture.checkpoint.put",
+                                checkpoint_step = step,
+                                checkpoint_source = "Loop",
+                                "Superstep checkpoint persisted (async)"
+                            );
+                        }
+                        Err(err) => {
+                            tracing::warn!(
+                                name: "juncture.checkpoint.superstep.save_failed",
+                                step = step,
+                                error = %err,
+                                "Failed to save superstep checkpoint (async)"
+                            );
+                        }
+                    }
+                });
                 self.reset_delta_counters();
-                tracing::info!(
-                    name: "juncture.checkpoint.put",
-                    checkpoint_id = %self.runnable_config.checkpoint_id.as_deref().unwrap_or("unknown"),
-                    checkpoint_step = self.step,
-                    checkpoint_source = "Loop",
-                    "Superstep checkpoint persisted"
-                );
-                if let Some(ref cp_id) = self.runnable_config.checkpoint_id {
-                    self.on_checkpoint_saved(cp_id, self.step);
-                }
             }
-            Err(err) => {
-                tracing::warn!(
-                    name: "juncture.checkpoint.superstep.save_failed",
-                    step = self.step,
-                    error = %err,
-                    "Failed to save superstep checkpoint"
-                );
+            Durability::Sync | Durability::Exit => {
+                match checkpointer
+                    .put(&self.runnable_config, checkpoint, metadata)
+                    .await
+                {
+                    Ok(updated_config) => {
+                        self.runnable_config.checkpoint_id = updated_config.checkpoint_id;
+                        // Reset delta counters after a successful checkpoint save.
+                        // The checkpoint now carries the cumulative counters, and a
+                        // fresh counting window starts for the next checkpoint cycle.
+                        self.reset_delta_counters();
+                        tracing::info!(
+                            name: "juncture.checkpoint.put",
+                            checkpoint_id = %self.runnable_config.checkpoint_id.as_deref().unwrap_or("unknown"),
+                            checkpoint_step = self.step,
+                            checkpoint_source = "Loop",
+                            "Superstep checkpoint persisted"
+                        );
+                        if let Some(ref cp_id) = self.runnable_config.checkpoint_id {
+                            self.on_checkpoint_saved(cp_id, self.step);
+                        }
+                    }
+                    Err(err) => {
+                        tracing::warn!(
+                            name: "juncture.checkpoint.superstep.save_failed",
+                            step = self.step,
+                            error = %err,
+                            "Failed to save superstep checkpoint"
+                        );
+                    }
+                }
             }
         }
     }
@@ -1536,6 +1574,156 @@ impl<S: State> PregelLoop<S> {
     fn finish_all_channels(&mut self) {
         for &field_idx in S::replace_after_finish_field_indices() {
             self.state.finish_field(field_idx);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Durability mode helpers (B-03-003)
+    // -----------------------------------------------------------------------
+
+    /// Return the effective durability mode, defaulting to `Sync` when not configured.
+    #[must_use]
+    fn effective_durability(&self) -> Durability {
+        self.runnable_config.durability.clone().unwrap_or(Durability::Sync)
+    }
+
+    /// Build the channel versions, new versions, and versions seen maps from
+    /// the current execution state.
+    ///
+    /// Returns a tuple of `(channel_versions, new_versions, versions_seen)` for
+    /// use in checkpoint construction. This refactors duplicate version-building
+    /// code that appears in both `save_interrupt_checkpoint` and
+    /// `save_superstep_checkpoint`.
+    #[must_use]
+    #[allow(
+        clippy::type_complexity,
+        reason = "return type is a direct mapping of the three version maps required by Checkpoint struct; factoring into a named type adds indirection without benefit"
+    )]
+    fn build_checkpoint_versions(&self) -> (
+        HashMap<String, u64>,
+        HashMap<String, u64>,
+        HashMap<String, HashMap<String, u64>>,
+    ) {
+        let channel_versions: HashMap<String, u64> = self
+            .field_versions
+            .versions()
+            .iter()
+            .enumerate()
+            .map(|(idx, ver)| (format!("field_{idx}"), *ver))
+            .collect();
+
+        let new_versions = channel_versions.clone();
+
+        let versions_seen: HashMap<String, HashMap<String, u64>> = self
+            .nodes
+            .keys()
+            .map(|node_name| {
+                let versions = self.versions_seen.get_versions(node_name);
+                let map: HashMap<String, u64> = versions
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, ver)| (format!("field_{idx}"), *ver))
+                    .collect();
+                (node_name.clone(), map)
+            })
+            .collect();
+
+        (channel_versions, new_versions, versions_seen)
+    }
+
+    /// Save a final exit checkpoint when running in [`Durability::Exit`] mode.
+    ///
+    /// This checkpoint captures the final state after all channels are finished
+    /// and no more tasks remain. It uses [`CheckpointSource::Loop`] since it
+    /// represents a normal completion checkpoint, not an interrupt.
+    ///
+    /// No-op if no checkpointer is configured. Errors are logged but do not
+    /// propagate -- exit checkpointing is best-effort.
+    async fn save_exit_checkpoint(&mut self)
+    where
+        S: serde::Serialize,
+    {
+        let Some(ref checkpointer) = self.checkpointer else {
+            return;
+        };
+
+        let channel_values = match serde_json::to_value(&self.state) {
+            Ok(v) => v,
+            Err(err) => {
+                tracing::warn!(
+                    name: "juncture.checkpoint.exit.serialize_failed",
+                    step = self.step,
+                    error = %err,
+                    "Failed to serialize state for exit checkpoint"
+                );
+                return;
+            }
+        };
+
+        let (channel_versions, new_versions, versions_seen) = self.build_checkpoint_versions();
+
+        let pending_tasks: Vec<crate::checkpoint::CheckpointPendingTask> = self
+            .pending_tasks
+            .iter()
+            .map(|task| crate::checkpoint::CheckpointPendingTask {
+                id: task.id.clone(),
+                node: task.node_name.clone(),
+                triggers: Vec::new(),
+                state_override: None,
+            })
+            .collect();
+
+        let checkpoint_id = generate_checkpoint_id();
+        let created_at = chrono::Utc::now().to_rfc3339();
+
+        let checkpoint = Checkpoint {
+            id: checkpoint_id,
+            channel_values,
+            channel_versions,
+            versions_seen,
+            pending_tasks,
+            pending_sends: Vec::new(),
+            pending_interrupts: Vec::new(),
+            schema_version: S::schema_version(),
+            created_at,
+            v: 1,
+            new_versions,
+            counters_since_delta_snapshot: HashMap::new(),
+        };
+
+        let metadata = CheckpointMetadata {
+            source: CheckpointSource::Loop,
+            step: i64::try_from(self.step).unwrap_or(i64::MAX),
+            writes: HashMap::new(),
+            parents: HashMap::new(),
+            run_id: self.run_id.clone(),
+        };
+
+        match checkpointer
+            .put(&self.runnable_config, checkpoint, metadata)
+            .await
+        {
+            Ok(updated_config) => {
+                self.runnable_config.checkpoint_id = updated_config.checkpoint_id;
+                tracing::info!(
+                    name: "juncture.checkpoint.put",
+                    checkpoint_id = %self.runnable_config.checkpoint_id.as_deref().unwrap_or("unknown"),
+                    checkpoint_step = self.step,
+                    checkpoint_source = "Loop",
+                    "Exit checkpoint persisted"
+                );
+                if let Some(ref cp_id) = self.runnable_config.checkpoint_id {
+                    self.on_checkpoint_saved(cp_id, self.step);
+                }
+            }
+            Err(err) => {
+                tracing::warn!(
+                    name: "juncture.checkpoint.exit.save_failed",
+                    step = self.step,
+                    error = %err,
+                    "Failed to save exit checkpoint"
+                );
+            }
         }
     }
 
@@ -2897,6 +3085,242 @@ mod tests {
         );
         // But pending_interrupts and status still reflect all signals (internal state)
         assert_eq!(loop_.pending_interrupts.len(), 2);
+    }
+
+    // --- B-03-003: Durability mode tests ---
+
+    /// Verify that `effective_durability` defaults to `Sync` when no durability
+    /// is configured in `RunnableConfig`.
+    #[test]
+    fn test_effective_durability_defaults_to_sync() {
+        let state = TestState;
+        let mut nodes = IndexMap::new();
+        nodes.insert(
+            "test_node".to_string(),
+            NodeFnCommand(|_s| async move { Ok(Command::end()) }).into_node("test_node"),
+        );
+        let trigger_table = TriggerTable::new();
+        let config = crate::config::RunnableConfig::new();
+
+        let loop_ = PregelLoop::new(state, nodes, trigger_table, config, 0).unwrap();
+        assert_eq!(
+            loop_.effective_durability(),
+            Durability::Sync,
+            "default durability should be Sync"
+        );
+    }
+
+    /// Verify that `Durability::Exit` skips superstep checkpoints but saves
+    /// a final checkpoint on clean completion.
+    #[tokio::test]
+    async fn test_durability_exit_skips_superstep_saves_final() {
+        let state = TestState;
+
+        let mut nodes = IndexMap::new();
+        nodes.insert(
+            "test_node".to_string(),
+            NodeFnCommand(|_s| async move { Ok(Command::end()) }).into_node("test_node"),
+        );
+
+        let trigger_table = TriggerTable::new();
+        let mut config = crate::config::RunnableConfig::new();
+        config.thread_id = Some("test-thread".to_string());
+        config.durability = Some(Durability::Exit);
+
+        let mut loop_ = PregelLoop::new(state, nodes, trigger_table, config, 0).unwrap();
+
+        let observed = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let checkpointer = TrackingCheckpointer {
+            observed: Arc::clone(&observed),
+        };
+        loop_.set_checkpointer(Arc::new(checkpointer));
+
+        // Execute one superstep -- no superstep checkpoint should be saved
+        // in Exit mode; only the final exit checkpoint (when pending_tasks
+        // is empty) should be persisted.
+        loop_.pending_tasks = vec![PendingTask::pull(
+            uuid::Uuid::new_v4().to_string(),
+            "test_node".to_string(),
+        )];
+        let _ = loop_.execute_superstep().await;
+        let _ = loop_.after_tick(SuperstepResult::empty()).await;
+
+        // Exactly one checkpoint should be saved (the final exit checkpoint,
+        // since compute_next_tasks returns empty for an end() command).
+        let calls = observed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        assert_eq!(
+            calls.len(),
+            1,
+            "Exit mode should save exactly one final checkpoint"
+        );
+        assert!(
+            matches!(&calls[0], ObservedCall::Put { source: crate::checkpoint::CheckpointSource::Loop, step: 0 }),
+            "Final exit checkpoint should have Loop source at step 0"
+        );
+    }
+
+    /// Verify that `Durability::Sync` saves a superstep checkpoint (default behavior).
+    #[tokio::test]
+    async fn test_durability_sync_saves_superstep_checkpoint() {
+        let state = TestState;
+
+        let mut nodes = IndexMap::new();
+        nodes.insert(
+            "test_node".to_string(),
+            NodeFnCommand(|_s| async move { Ok(Command::end()) }).into_node("test_node"),
+        );
+
+        let trigger_table = TriggerTable::new();
+        let mut config = crate::config::RunnableConfig::new();
+        config.thread_id = Some("test-thread".to_string());
+        config.durability = Some(Durability::Sync);
+
+        let mut loop_ = PregelLoop::new(state, nodes, trigger_table, config, 0).unwrap();
+
+        let observed = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let checkpointer = TrackingCheckpointer {
+            observed: Arc::clone(&observed),
+        };
+        loop_.set_checkpointer(Arc::new(checkpointer));
+
+        // Execute one superstep -- a Loop checkpoint should be saved
+        loop_.pending_tasks = vec![PendingTask::pull(
+            uuid::Uuid::new_v4().to_string(),
+            "test_node".to_string(),
+        )];
+        let _ = loop_.execute_superstep().await;
+        let _ = loop_.after_tick(SuperstepResult::empty()).await;
+
+        let has_loop_checkpoint = {
+            let calls = observed
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            calls.iter().any(|c| {
+                matches!(
+                    c,
+                    ObservedCall::Put {
+                        source: crate::checkpoint::CheckpointSource::Loop,
+                        step: 0,
+                    }
+                )
+            })
+        };
+        assert!(
+            has_loop_checkpoint,
+            "Sync mode should save a Loop checkpoint at step 0"
+        );
+    }
+
+    /// Verify that `Durability::Exit` still saves interrupt checkpoints.
+    #[tokio::test]
+    async fn test_durability_exit_saves_interrupt_checkpoint() {
+        let state = TestState;
+
+        let mut nodes = IndexMap::new();
+        nodes.insert(
+            "test_node".to_string(),
+            NodeFnCommand(|_s| async move { Ok(Command::end()) }).into_node("test_node"),
+        );
+
+        let trigger_table = TriggerTable::new();
+        let mut config = crate::config::RunnableConfig::new();
+        config.thread_id = Some("test-thread".to_string());
+        config.durability = Some(Durability::Exit);
+
+        let mut loop_ = PregelLoop::new(state, nodes, trigger_table, config, 0).unwrap();
+
+        let observed = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let checkpointer = TrackingCheckpointer {
+            observed: Arc::clone(&observed),
+        };
+        loop_.set_checkpointer(Arc::new(checkpointer));
+
+        // Simulate an interrupt scenario
+        loop_.pending_interrupts = vec![crate::interrupt::InterruptSignal {
+            index: 0,
+            id: Some("int-exit-test".to_string()),
+            payload: serde_json::json!({"node": "test_node"}),
+        }];
+        loop_.save_interrupt_checkpoint("test_node").await;
+
+        let has_interrupt_checkpoint = {
+            let calls = observed
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            calls.iter().any(|c| {
+                matches!(
+                    c,
+                    ObservedCall::Put {
+                        source: crate::checkpoint::CheckpointSource::Interrupt { .. },
+                        step: 0,
+                    }
+                )
+            })
+        };
+        assert!(
+            has_interrupt_checkpoint,
+            "Exit mode should still save interrupt checkpoints"
+        );
+    }
+
+    /// Verify that `Durability::Async` does not block on checkpoint persistence.
+    #[tokio::test]
+    async fn test_durability_async_does_not_block() {
+        let state = TestState;
+
+        let mut nodes = IndexMap::new();
+        nodes.insert(
+            "test_node".to_string(),
+            NodeFnCommand(|_s| async move { Ok(Command::end()) }).into_node("test_node"),
+        );
+
+        let trigger_table = TriggerTable::new();
+        let mut config = crate::config::RunnableConfig::new();
+        config.thread_id = Some("test-thread".to_string());
+        config.durability = Some(Durability::Async);
+
+        let mut loop_ = PregelLoop::new(state, nodes, trigger_table, config, 0).unwrap();
+
+        let observed = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let checkpointer = TrackingCheckpointer {
+            observed: Arc::clone(&observed),
+        };
+        loop_.set_checkpointer(Arc::new(checkpointer));
+
+        // Execute one superstep
+        loop_.pending_tasks = vec![PendingTask::pull(
+            uuid::Uuid::new_v4().to_string(),
+            "test_node".to_string(),
+        )];
+        let _ = loop_.execute_superstep().await;
+        let _ = loop_.after_tick(SuperstepResult::empty()).await;
+
+        // In Async mode, the put() is spawned as a background task. Give it
+        // a brief moment to execute before checking.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // The checkpoint should eventually be persisted by the spawned task.
+        let has_checkpoint = {
+            let calls = observed
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            calls.iter().any(|c| {
+                matches!(
+                    c,
+                    ObservedCall::Put {
+                        source: crate::checkpoint::CheckpointSource::Loop,
+                        step: 0,
+                    }
+                )
+            })
+        };
+        assert!(
+            has_checkpoint,
+            "Async mode should eventually persist the checkpoint via spawned task"
+        );
     }
 }
 
