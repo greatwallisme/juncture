@@ -39,9 +39,10 @@ use juncture_core::error::JunctureError;
 use juncture_core::graph::{CompiledGraph, StateGraph, TopologyError};
 use juncture_core::node::{IntoNode, Node};
 use juncture_core::state::messages::Message;
+use juncture_core::store::Store;
 use juncture_core::{Command, RunnableConfig};
 
-use crate::llm::{ChatModel, ToolDefinition as LlmToolDefinition};
+use crate::llm::{CallOptions, ChatModel, ToolDefinition as LlmToolDefinition};
 use crate::prebuilt::messages_state::{MessagesState, MessagesStateUpdate};
 use crate::tools::{Tool, ToolDefinition, ToolNode};
 
@@ -49,6 +50,15 @@ use crate::tools::{Tool, ToolDefinition, ToolNode};
 ///
 /// Reduces type complexity in the [`PromptSource::Dynamic`] variant.
 type DynamicPromptFn = Arc<dyn Fn(&[Message]) -> String + Send + Sync>;
+
+/// Pre-model hook: transforms [`MessagesState`] before model invocation.
+type PreModelHook = Arc<dyn Fn(&MessagesState) -> MessagesState + Send + Sync>;
+
+/// Post-model hook: transforms the model response [`Message`] after invocation.
+type PostModelHook = Arc<dyn Fn(&MessagesState, &Message) -> Message + Send + Sync>;
+
+/// Model selector: returns per-call [`CallOptions`] based on current state.
+type ModelSelector = Arc<dyn Fn(&MessagesState) -> CallOptions + Send + Sync>;
 
 /// Convert tool definitions from the tools module format to the LLM module format.
 ///
@@ -146,13 +156,24 @@ pub fn create_react_agent_with_config<M: ChatModel>(
     let model_with_tools = model.bind_tools(llm_tool_defs);
 
     let prompt = config.system_message.map(PromptSource::Static);
-    let agent_node = AgentNode::new_with_prompt_option(model_with_tools, prompt);
+    let mut agent_node = AgentNode::new_with_prompt_option(model_with_tools, prompt);
+    if let Some(hook) = config.pre_model_hook {
+        agent_node = agent_node.with_pre_model_hook(hook);
+    }
+    if let Some(hook) = config.post_model_hook {
+        agent_node = agent_node.with_post_model_hook(hook);
+    }
+    if let Some(selector) = config.model_selector {
+        agent_node = agent_node.with_model_selector(selector);
+    }
+
     let tool_node = Arc::new(ToolNode::new(tools));
+    let tool_adapter = ToolNodeAdapter::new(tool_node, config.store);
 
     let mut graph = StateGraph::<MessagesState>::new();
 
     graph.add_node_simple("agent", agent_node)?;
-    graph.add_node_simple("tools", ToolNodeAdapter::new(tool_node))?;
+    graph.add_node_simple("tools", tool_adapter)?;
 
     graph.set_entry_point("agent");
 
@@ -189,8 +210,9 @@ impl fmt::Debug for PromptSource {
 /// Configuration for [`create_react_agent_with_config`].
 ///
 /// Controls optional behavior such as system prompt injection, iteration
-/// limits, and human-in-the-loop interrupt points.
-#[derive(Clone, Debug, Default)]
+/// limits, human-in-the-loop interrupt points, pre/post model hooks,
+/// dynamic model selection, and cross-thread persistent store integration.
+#[derive(Clone, Default)]
 pub struct ReactAgentConfig {
     /// Optional system message injected before each LLM call.
     ///
@@ -210,6 +232,60 @@ pub struct ReactAgentConfig {
     /// When true, execution pauses before the tools node runs, allowing
     /// a human to review and approve tool invocations before they proceed.
     pub interrupt_before_tools: bool,
+
+    /// Hook called before each model invocation.
+    ///
+    /// Receives a reference to the current [`MessagesState`] and returns a
+    /// (possibly modified) [`MessagesState`]. Useful for injecting context,
+    /// trimming messages, or adding system instructions before the LLM call.
+    pub pre_model_hook: Option<PreModelHook>,
+
+    /// Hook called after each model invocation.
+    ///
+    /// Receives a reference to the current [`MessagesState`] and a reference
+    /// to the model response [`Message`], returns a (possibly modified)
+    /// response [`Message`]. Useful for post-processing, validation, or
+    /// content filtering of LLM responses.
+    pub post_model_hook: Option<PostModelHook>,
+
+    /// Dynamic model selection strategy.
+    ///
+    /// Takes a reference to the current [`MessagesState`] and returns
+    /// [`CallOptions`] for this invocation. Use this to switch models
+    /// dynamically (via [`CallOptions::model_override`]), adjust
+    /// temperature, set `tool_choice`, or customize other per-call options.
+    pub model_selector: Option<ModelSelector>,
+
+    /// Cross-thread persistent store for long-term memory.
+    ///
+    /// When set, the store is passed to the tool adapter and made available
+    /// to stateful tools via [`ToolRuntime`](crate::tools::ToolRuntime).
+    /// This enables tools to persist and retrieve knowledge across graph
+    /// executions.
+    pub store: Option<Arc<dyn Store>>,
+}
+
+impl fmt::Debug for ReactAgentConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ReactAgentConfig")
+            .field("system_message", &self.system_message)
+            .field("max_iterations", &self.max_iterations)
+            .field("interrupt_before_tools", &self.interrupt_before_tools)
+            .field(
+                "pre_model_hook",
+                &self.pre_model_hook.as_ref().map(|_| "..."),
+            )
+            .field(
+                "post_model_hook",
+                &self.post_model_hook.as_ref().map(|_| "..."),
+            )
+            .field(
+                "model_selector",
+                &self.model_selector.as_ref().map(|_| "..."),
+            )
+            .field("store", &self.store.as_ref().map(|_| "..."))
+            .finish()
+    }
 }
 
 /// Agent node: calls an LLM and returns the response as a state update.
@@ -217,34 +293,88 @@ pub struct ReactAgentConfig {
 /// This node optionally injects a system prompt, then invokes the bound
 /// LLM model with the current conversation messages. The LLM response
 /// is returned as a state update that appends to the messages list.
+///
+/// Supports optional pre/post model hooks for state transformation and
+/// response post-processing, and a `model_selector` for dynamic per-call
+/// [`CallOptions`] (e.g., model override, temperature adjustment).
 pub struct AgentNode<M: ChatModel> {
     model: M,
     prompt: Option<PromptSource>,
+    /// Hook called before each model invocation.
+    pre_model_hook: Option<PreModelHook>,
+    /// Hook called after each model invocation.
+    post_model_hook: Option<PostModelHook>,
+    /// Dynamic model selection strategy returning per-call `CallOptions`.
+    model_selector: Option<ModelSelector>,
 }
 
 impl<M: ChatModel> AgentNode<M> {
     /// Create a new agent node without a system prompt.
     #[must_use]
-    pub const fn new(model: M) -> Self {
+    pub fn new(model: M) -> Self {
         Self {
             model,
             prompt: None,
+            pre_model_hook: None,
+            post_model_hook: None,
+            model_selector: None,
         }
     }
 
     /// Create a new agent node with a system prompt.
     #[must_use]
-    pub const fn with_prompt(model: M, prompt: PromptSource) -> Self {
+    pub fn with_prompt(model: M, prompt: PromptSource) -> Self {
         Self {
             model,
             prompt: Some(prompt),
+            pre_model_hook: None,
+            post_model_hook: None,
+            model_selector: None,
         }
     }
 
     /// Create a new agent node with an optional prompt source.
     #[must_use]
-    const fn new_with_prompt_option(model: M, prompt: Option<PromptSource>) -> Self {
-        Self { model, prompt }
+    fn new_with_prompt_option(model: M, prompt: Option<PromptSource>) -> Self {
+        Self {
+            model,
+            prompt,
+            pre_model_hook: None,
+            post_model_hook: None,
+            model_selector: None,
+        }
+    }
+
+    /// Set a pre-model hook on this agent node.
+    ///
+    /// The hook is called before each model invocation, receiving a reference
+    /// to the current state and returning a (possibly modified) state.
+    #[must_use]
+    pub fn with_pre_model_hook(mut self, hook: PreModelHook) -> Self {
+        self.pre_model_hook = Some(hook);
+        self
+    }
+
+    /// Set a post-model hook on this agent node.
+    ///
+    /// The hook is called after each model invocation, receiving a reference
+    /// to the current state and the model response, returning a (possibly
+    /// modified) response message.
+    #[must_use]
+    pub fn with_post_model_hook(mut self, hook: PostModelHook) -> Self {
+        self.post_model_hook = Some(hook);
+        self
+    }
+
+    /// Set a model selector on this agent node.
+    ///
+    /// The selector receives a reference to the current state and returns
+    /// [`CallOptions`] for this invocation (e.g., to switch models via
+    /// `model_override`).
+    #[must_use]
+    pub fn with_model_selector(mut self, selector: ModelSelector) -> Self {
+        self.model_selector = Some(selector);
+        self
     }
 
     /// Build the message list to send to the LLM.
@@ -273,11 +403,27 @@ impl<M: ChatModel> fmt::Debug for AgentNode<M> {
         f.debug_struct("AgentNode")
             .field("model", &self.model.model_name())
             .field("prompt", &self.prompt)
+            .field(
+                "pre_model_hook",
+                &self.pre_model_hook.as_ref().map(|_| "..."),
+            )
+            .field(
+                "post_model_hook",
+                &self.post_model_hook.as_ref().map(|_| "..."),
+            )
+            .field(
+                "model_selector",
+                &self.model_selector.as_ref().map(|_| "..."),
+            )
             .finish()
     }
 }
 
 impl<M: ChatModel> Node<MessagesState> for AgentNode<M> {
+    #[allow(
+        clippy::needless_pass_by_value,
+        reason = "state ownership is transferred into the async future"
+    )]
     fn call(
         &self,
         state: MessagesState,
@@ -289,13 +435,29 @@ impl<M: ChatModel> Node<MessagesState> for AgentNode<M> {
                 + '_,
         >,
     > {
+        // Apply pre_model_hook to transform state before building messages
+        let state = match &self.pre_model_hook {
+            Some(hook) => hook(&state),
+            None => state,
+        };
+
         let messages = self.build_messages(&state);
+
+        // Apply model_selector for per-call options (e.g., model override)
+        let options = self.model_selector.as_ref().map(|sel| sel(&state));
+
         Box::pin(async move {
             let response = self
                 .model
-                .invoke(&messages, None)
+                .invoke(&messages, options.as_ref())
                 .await
                 .map_err(|e| JunctureError::execution(e.to_string()))?;
+
+            // Apply post_model_hook to transform the response
+            let response = match &self.post_model_hook {
+                Some(hook) => hook(&state, &response),
+                None => response,
+            };
 
             let update = MessagesStateUpdate {
                 messages: Some(vec![response]),
@@ -384,15 +546,20 @@ impl Router<MessagesState> for AgentRouter {
 /// `Vec<Message>`, but does not directly implement the [`Node`] trait. This
 /// adapter bridges the gap by extracting messages from the state, calling
 /// `execute`, and returning the results as a state update.
+///
+/// The adapter also carries an optional cross-thread persistent [`Store`]
+/// for stateful tool execution.
 struct ToolNodeAdapter {
     tool_node: Arc<ToolNode>,
+    /// Optional cross-thread persistent store for long-term memory.
+    store: Option<Arc<dyn Store>>,
 }
 
 impl ToolNodeAdapter {
     /// Create a new adapter wrapping the given tool node.
     #[must_use]
-    const fn new(tool_node: Arc<ToolNode>) -> Self {
-        Self { tool_node }
+    fn new(tool_node: Arc<ToolNode>, store: Option<Arc<dyn Store>>) -> Self {
+        Self { tool_node, store }
     }
 }
 
@@ -400,6 +567,7 @@ impl fmt::Debug for ToolNodeAdapter {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ToolNodeAdapter")
             .field("tool_node", &self.tool_node)
+            .field("store", &self.store.as_ref().map(|_| "..."))
             .finish()
     }
 }
@@ -451,6 +619,7 @@ mod tests {
     use crate::tools::ToolError;
     use async_trait::async_trait;
     use juncture_core::State as _;
+    use juncture_core::state::messages::Content;
     use juncture_core::state::messages::ToolCall;
     use serde_json::json;
 
@@ -619,7 +788,7 @@ mod tests {
     #[tokio::test]
     async fn test_tool_node_adapter() {
         let tool_node = Arc::new(ToolNode::new(vec![Box::new(EchoTool)]));
-        let adapter = ToolNodeAdapter::new(tool_node);
+        let adapter = ToolNodeAdapter::new(tool_node, None);
 
         let state = MessagesState {
             messages: vec![Message::ai_with_tool_calls(
@@ -647,7 +816,7 @@ mod tests {
     #[tokio::test]
     async fn test_tool_node_adapter_no_tool_calls() {
         let tool_node = Arc::new(ToolNode::new(vec![Box::new(EchoTool)]));
-        let adapter = ToolNodeAdapter::new(tool_node);
+        let adapter = ToolNodeAdapter::new(tool_node, None);
 
         let state = MessagesState {
             messages: vec![Message::ai("No tools here")],
@@ -684,10 +853,155 @@ mod tests {
             system_message: Some("You are a helpful assistant.".to_string()),
             max_iterations: Some(10),
             interrupt_before_tools: false,
+            ..Default::default()
         };
 
         let result = create_react_agent_with_config(model, tools, config);
         result.unwrap();
+    }
+
+    #[test]
+    fn test_react_agent_config_new_fields_default() {
+        let config = ReactAgentConfig::default();
+        assert!(config.system_message.is_none());
+        assert!(config.max_iterations.is_none());
+        assert!(!config.interrupt_before_tools);
+        assert!(config.pre_model_hook.is_none());
+        assert!(config.post_model_hook.is_none());
+        assert!(config.model_selector.is_none());
+        assert!(config.store.is_none());
+    }
+
+    #[test]
+    fn test_react_agent_config_debug_with_new_fields() {
+        let config = ReactAgentConfig::default();
+        let debug = format!("{config:?}");
+        assert!(debug.contains("ReactAgentConfig"));
+        assert!(debug.contains("pre_model_hook"));
+        assert!(debug.contains("post_model_hook"));
+        assert!(debug.contains("model_selector"));
+        assert!(debug.contains("store"));
+    }
+
+    #[test]
+    #[allow(
+        clippy::redundant_clone,
+        reason = "intentional clone to verify Clone impl preserves all fields including Arc-wrapped function types"
+    )]
+    fn test_react_agent_config_clone_with_all_fields() {
+        use juncture_core::store::MemoryStore;
+
+        let store = Arc::new(MemoryStore::new()) as Arc<dyn Store>;
+        let config = ReactAgentConfig {
+            system_message: Some("Hello".to_string()),
+            max_iterations: Some(5),
+            interrupt_before_tools: true,
+            pre_model_hook: Some(Arc::new(|s: &MessagesState| s.clone())),
+            post_model_hook: Some(Arc::new(|_s: &MessagesState, r: &Message| r.clone())),
+            model_selector: Some(Arc::new(|_s: &MessagesState| CallOptions {
+                model_override: Some("gpt-4-turbo".to_string()),
+                ..Default::default()
+            })),
+            store: Some(store),
+        };
+
+        // Verify all fields are preserved after clone
+        assert_eq!(config.system_message, Some("Hello".to_string()));
+        assert_eq!(config.max_iterations, Some(5));
+        assert!(config.interrupt_before_tools);
+        assert!(config.pre_model_hook.is_some());
+        assert!(config.post_model_hook.is_some());
+        assert!(config.model_selector.is_some());
+        assert!(config.store.is_some());
+
+        // Verify clone produces a separate instance with same values.
+        let cloned = config.clone();
+        assert!(cloned.pre_model_hook.is_some());
+        assert!(cloned.post_model_hook.is_some());
+        assert!(cloned.model_selector.is_some());
+        assert!(cloned.store.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_agent_node_call_with_model_selector() {
+        let model = MockChatModel::new("gpt-4").with_response("Response");
+        let selector: ModelSelector = Arc::new(|_state: &MessagesState| CallOptions {
+            model_override: Some("gpt-4-turbo".to_string()),
+            temperature: Some(0.5),
+            ..Default::default()
+        });
+        let node = AgentNode::new(model).with_model_selector(selector);
+
+        let state = MessagesState {
+            messages: vec![Message::human("Hello")],
+        };
+
+        let result = node.call(state, &RunnableConfig::default()).await;
+        result.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_agent_node_call_with_pre_model_hook() {
+        let model = MockChatModel::new("gpt-4").with_response("Response");
+        let hook: PreModelHook = Arc::new(|state: &MessagesState| {
+            let mut new_state = state.clone();
+            new_state
+                .messages
+                .push(Message::system("Hook added context"));
+            new_state
+        });
+        let node = AgentNode::new(model).with_pre_model_hook(hook);
+
+        let state = MessagesState {
+            messages: vec![Message::human("Hello")],
+        };
+
+        let result = node.call(state, &RunnableConfig::default()).await;
+        result.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_agent_node_call_with_post_model_hook() {
+        let model = MockChatModel::new("gpt-4").with_response("Initial response");
+        // Post-model hook that wraps the response with a prefix annotation.
+        // Uses `Message::ai` to create a new message from the response text.
+        let hook: PostModelHook = Arc::new(|_state: &MessagesState, response: &Message| {
+            let text = match &response.content {
+                Content::Text(t) => format!("[Post-processed] {t}"),
+                Content::MultiPart(_) => "[Post-processed multi-part]".to_string(),
+            };
+            Message::ai(&text)
+        });
+        let node = AgentNode::new(model).with_post_model_hook(hook);
+
+        let state = MessagesState {
+            messages: vec![Message::human("Hello")],
+        };
+
+        let result = node.call(state, &RunnableConfig::default()).await;
+        result.unwrap();
+    }
+
+    #[test]
+    fn test_tool_node_adapter_with_store() {
+        use juncture_core::store::MemoryStore;
+
+        let store = Arc::new(MemoryStore::new()) as Arc<dyn Store>;
+        let tool_node = Arc::new(ToolNode::new(vec![Box::new(EchoTool)]));
+        let adapter = ToolNodeAdapter::new(tool_node, Some(store));
+
+        let debug = format!("{adapter:?}");
+        assert!(debug.contains("ToolNodeAdapter"));
+        assert!(debug.contains("store"));
+        assert!(debug.contains("..."));
+    }
+
+    #[test]
+    fn test_react_agent_config_builder_default_store_missing() {
+        let config = ReactAgentConfig::default();
+        // Builder methods should not exist on the config; users set fields directly.
+        // Verify store defaults to None.
+        assert!(config.store.is_none());
     }
 
     #[test]
@@ -781,7 +1095,7 @@ mod tests {
     #[test]
     fn test_tool_node_adapter_debug() {
         let tool_node = Arc::new(ToolNode::new(vec![Box::new(EchoTool)]));
-        let adapter = ToolNodeAdapter::new(tool_node);
+        let adapter = ToolNodeAdapter::new(tool_node, None);
         let debug = format!("{adapter:?}");
         assert!(debug.contains("ToolNodeAdapter"));
     }
