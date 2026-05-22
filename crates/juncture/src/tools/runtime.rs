@@ -1,11 +1,14 @@
 //! Tool runtime context for stateful tool execution
 
-use juncture_core::{config::RunnableConfig, state::State};
+use std::sync::Arc;
 
-/// Runtime context for tool execution
+use juncture_core::{config::RunnableConfig, state::State, store::Store};
+
+/// Runtime context for stateful tool execution
 ///
 /// Provides tools with access to execution context including
-/// the current state, tool call metadata, and configuration.
+/// the current state, tool call metadata, configuration, and
+/// optional cross-thread persistent store.
 ///
 /// # Type Parameters
 ///
@@ -14,24 +17,28 @@ use juncture_core::{config::RunnableConfig, state::State};
 /// # Example
 ///
 /// ```ignore
-/// use juncture::tools::ToolRuntime;
+/// use juncture::tools::{StatefulTool, ToolRuntime};
 /// use juncture_core::{State, RunnableConfig};
 /// use async_trait::async_trait;
 ///
-/// struct MyTool;
+/// struct MyStatefulTool;
 ///
 /// #[async_trait]
-/// impl Tool for MyTool {
-///     async fn invoke(
+/// impl<S: State + 'static> StatefulTool<S> for MyStatefulTool {
+///     async fn invoke_with_runtime(
 ///         &self,
 ///         input: serde_json::Value,
-///         runtime: &ToolRuntime<MyState>,
+///         runtime: &ToolRuntime<S>,
 ///     ) -> Result<String, ToolError> {
 ///         // Access state
-///         let config = &runtime.config;
-///         let tool_call_id = &runtime.tool_call_id;
+///         let state = &runtime.state;
+///         let config = runtime.config();
 ///
-///         // Execute tool logic...
+///         // Access store if available
+///         if let Some(store) = runtime.store() {
+///             let item = store.get("namespace", "key").await?;
+///         }
+///
 ///         Ok("Result".to_string())
 ///     }
 /// }
@@ -45,16 +52,36 @@ pub struct ToolRuntime<S: State> {
 
     /// Execution configuration
     pub config: RunnableConfig,
+
+    /// Optional cross-thread persistent store for long-term memory
+    pub store: Option<Arc<dyn Store>>,
 }
 
 impl<S: State> ToolRuntime<S> {
-    /// Create a new tool runtime
+    /// Create a new tool runtime with all fields
     #[must_use]
-    pub const fn new(state: S, tool_call_id: String, config: RunnableConfig) -> Self {
+    pub fn new(
+        state: S,
+        tool_call_id: String,
+        config: RunnableConfig,
+        store: Option<Arc<dyn Store>>,
+    ) -> Self {
         Self {
             state,
             tool_call_id,
             config,
+            store,
+        }
+    }
+
+    /// Create a new tool runtime without a store
+    #[must_use]
+    pub fn new_without_store(state: S, tool_call_id: String, config: RunnableConfig) -> Self {
+        Self {
+            state,
+            tool_call_id,
+            config,
+            store: None,
         }
     }
 
@@ -75,6 +102,12 @@ impl<S: State> ToolRuntime<S> {
     pub const fn config(&self) -> &RunnableConfig {
         &self.config
     }
+
+    /// Get the optional store
+    #[must_use]
+    pub const fn store(&self) -> Option<&Arc<dyn Store>> {
+        self.store.as_ref()
+    }
 }
 
 impl<S: State> Clone for ToolRuntime<S> {
@@ -83,6 +116,7 @@ impl<S: State> Clone for ToolRuntime<S> {
             state: self.state.clone(),
             tool_call_id: self.tool_call_id.clone(),
             config: self.config.clone(),
+            store: self.store.clone(),
         }
     }
 }
@@ -92,6 +126,7 @@ impl<S: State> std::fmt::Debug for ToolRuntime<S> {
         f.debug_struct("ToolRuntime")
             .field("tool_call_id", &self.tool_call_id)
             .field("config", &self.config)
+            .field("store", &self.store.as_ref().map_or("None", |_| "Some(...)"))
             .field("state", &std::any::type_name::<S>())
             .finish()
     }
@@ -123,7 +158,7 @@ mod tests {
     fn test_tool_runtime_new() {
         let state = TestState;
         let config = RunnableConfig::default();
-        let runtime = ToolRuntime::new(state, "call_123".to_string(), config);
+        let runtime = ToolRuntime::new_without_store(state, "call_123".to_string(), config);
 
         assert_eq!(runtime.tool_call_id, "call_123");
     }
@@ -132,7 +167,7 @@ mod tests {
     fn test_tool_runtime_accessors() {
         let state = TestState;
         let config = RunnableConfig::default();
-        let runtime = ToolRuntime::new(state, "call_123".to_string(), config);
+        let runtime = ToolRuntime::new_without_store(state, "call_123".to_string(), config);
 
         assert_eq!(runtime.tool_call_id(), "call_123");
     }
@@ -141,7 +176,7 @@ mod tests {
     fn test_tool_runtime_clone() {
         let state = TestState;
         let config = RunnableConfig::default();
-        let runtime = ToolRuntime::new(state, "call_123".to_string(), config);
+        let runtime = ToolRuntime::new_without_store(state, "call_123".to_string(), config);
 
         let cloned = runtime.clone();
         assert_eq!(cloned.tool_call_id, runtime.tool_call_id);
@@ -151,7 +186,7 @@ mod tests {
     fn test_tool_runtime_debug() {
         let state = TestState;
         let config = RunnableConfig::default();
-        let runtime = ToolRuntime::new(state, "call_123".to_string(), config);
+        let runtime = ToolRuntime::new_without_store(state, "call_123".to_string(), config);
 
         let debug_str = format!("{runtime:?}");
         assert!(debug_str.contains("ToolRuntime"));
