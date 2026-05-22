@@ -1,47 +1,25 @@
-# Task Plan: Fix B-08-006 -- ToolCallTransformer and ToolExecutionTrace
+# Task Plan: Fix Conformance Review Findings
 
-## Goal
-Wire up `ToolCallTransformer` and `ToolExecutionTrace` in the tool execution path. Both are currently defined but unused in `ToolNode.execute()` / `execute_single_tool()`.
+## Status: COMPLETE
 
-## Files modified
-- `crates/juncture/src/tools/node.rs` -- ToolNode, execute(), execute_single_tool(), ToolExecutionTrace
+All 103 findings from the design-to-code conformance audit have been addressed.
 
-## Phases
+| Phase | Description | Count | Status |
+|-------|-------------|-------|--------|
+| Phase 1 | A-level critical code fixes | 16 | Done (prior session) |
+| Phase 2 | B-level major code fixes | 26 | Done |
+| Phase 3a | B-level design doc deviations | 3 | Done |
+| Phase 3b | Category C implementation docs | 58 | Done |
 
-### Phase 1: Research [complete]
-- Read node.rs, transformer.rs, interceptor.rs, runtime.rs, trait_.rs, error.rs, mod.rs
-- Understanding: transformer is stored but never applied; trace struct exists but never instantiated
+## Verification
 
-### Phase 2: Extend ToolExecutionTrace struct [complete]
-- Added `input: serde_json::Value`, `output: Option<String>`, `error: Option<String>` fields
-- Updated `new()` to accept `input` parameter
-- Updated `complete()` to accept `output` and `error`
+- **Build**: cargo build --workspace --all-features -- zero errors
+- **Tests**: 730+ tests across all crates -- zero failures  
+- **Clippy**: cargo clippy --workspace --all-targets -- -D warnings -- zero warnings
+- **Design coverage**: 212/214 = 99.1% (2 intentional deviations: A-01-003 field_versions removal, Runtime stream_writer via PregelLoop channel)
 
-### Phase 3: Wire up ToolCallTransformer in execute() [complete]
-- Transformer applied to cloned tool_call before spawning task in the loop
-- Transformer errors handled consistently: returned as tool result when handle_errors=true, propagated when false
+## Remaining
 
-### Phase 4: Wire up ToolExecutionTrace in execute_single_tool() [complete]
-- Trace created at start of execution with input
-- Trace completed after execution with duration, output/error
-- Trace logged via tracing::debug! in both success and error paths
-
-### Phase 5: Add tests [complete]
-- test_tool_node_with_transformer: verifies transformer modifies arguments before execution
-- test_tool_node_with_transformer_error_handling: verifies transformer errors become tool results
-- test_tool_node_with_transformer_no_error_handling: verifies transformer errors propagate
-- test_tool_execution_trace_with_fields: verifies trace captures input, output, error
-
-### Phase 6: Verify [complete]
-- cargo build -p juncture: OK
-- cargo clippy -p juncture --all-targets -- -D warnings: OK (zero warnings)
-- cargo test -p juncture -- tools --nocapture: OK (69/69 passed)
-- Commit: 4843806, 1 file changed, 255 insertions, 10 deletions
-
-## Status
-- [x] Phase 1: Research
-- [x] Phase 2: Extend ToolExecutionTrace
-- [x] Phase 3: Wire up transformer
-- [x] Phase 4: Wire up trace
-- [x] Phase 5: Add tests
-- [x] Phase 6: Verify
+2 intentional design deviations in checklist:
+- 01-001 State.field_versions -- removed per A-01-003 fix, version tracking lives in PregelLoop
+- 02-020 Runtime.stream_writer -- streaming handled via PregelLoop::stream_tx mpsc channel

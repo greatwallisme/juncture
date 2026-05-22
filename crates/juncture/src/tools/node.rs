@@ -394,13 +394,8 @@ impl ToolNode {
             let tools_event_tx = self.tools_event_tx.clone();
 
             results.spawn(async move {
-                Self::execute_single_tool(
-                    &tool_call,
-                    tool.as_ref(),
-                    &interceptor,
-                    tools_event_tx,
-                )
-                .await
+                Self::execute_single_tool(&tool_call, tool.as_ref(), &interceptor, tools_event_tx)
+                    .await
             });
         }
 
@@ -1364,8 +1359,7 @@ mod tests {
     async fn test_tool_node_emits_started_and_finished_events() {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         #[allow(clippy::redundant_clone, reason = "clarity in test setup")]
-        let node = ToolNode::new(vec![Box::new(EchoTool) as Box<dyn Tool>])
-            .with_tools_event_tx(tx);
+        let node = ToolNode::new(vec![Box::new(EchoTool) as Box<dyn Tool>]).with_tools_event_tx(tx);
 
         let messages = vec![Message::ai_with_tool_calls(
             "test",
@@ -1411,8 +1405,7 @@ mod tests {
     async fn test_tool_node_emits_events_in_order() {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         #[allow(clippy::redundant_clone, reason = "clarity in test setup")]
-        let node = ToolNode::new(vec![Box::new(EchoTool) as Box<dyn Tool>])
-            .with_tools_event_tx(tx);
+        let node = ToolNode::new(vec![Box::new(EchoTool) as Box<dyn Tool>]).with_tools_event_tx(tx);
 
         let messages = vec![Message::ai_with_tool_calls(
             "test",
@@ -1434,7 +1427,10 @@ mod tests {
         // First event should be ToolStarted, last should be ToolFinished
         if !events.is_empty() {
             assert!(
-                matches!(events[0], juncture_core::stream::ToolsEvent::ToolStarted { .. }),
+                matches!(
+                    events[0],
+                    juncture_core::stream::ToolsEvent::ToolStarted { .. }
+                ),
                 "first event should be ToolStarted"
             );
             assert!(
@@ -1451,8 +1447,7 @@ mod tests {
     async fn test_tool_node_multiple_tools_emit_multiple_events() {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         #[allow(clippy::redundant_clone, reason = "clarity in test setup")]
-        let node = ToolNode::new(vec![Box::new(EchoTool) as Box<dyn Tool>])
-            .with_tools_event_tx(tx);
+        let node = ToolNode::new(vec![Box::new(EchoTool) as Box<dyn Tool>]).with_tools_event_tx(tx);
 
         let messages = vec![Message::ai_with_tool_calls(
             "test",

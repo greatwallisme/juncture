@@ -893,7 +893,10 @@ struct AnthropicStreamError {
 /// Convert Anthropic SSE event to `MessageChunk`.
 fn convert_sse_event(event: AnthropicSSEEvent) -> Result<crate::llm::MessageChunk, LlmError> {
     match event {
-        AnthropicSSEEvent::ContentBlockStart { index, content_block } => {
+        AnthropicSSEEvent::ContentBlockStart {
+            index,
+            content_block,
+        } => {
             let mut tool_call_chunks = Vec::new();
             // content_block_start for tool_use carries the tool id and name
             if let Some(ref block) = content_block
@@ -1002,7 +1005,10 @@ mod tests {
         let chunk = convert_sse_event(event).unwrap();
         assert_eq!(chunk.content, ""); // tool_use content is NOT text
         assert_eq!(chunk.tool_call_chunks.len(), 1);
-        assert_eq!(chunk.tool_call_chunks[0].args_delta, "{\"location\": \"San \"}");
+        assert_eq!(
+            chunk.tool_call_chunks[0].args_delta,
+            "{\"location\": \"San \"}"
+        );
         assert_eq!(chunk.tool_call_chunks[0].index, 0);
         assert!(chunk.tool_call_chunks[0].id.is_none());
         assert!(chunk.tool_call_chunks[0].name.is_none());
@@ -1023,7 +1029,10 @@ mod tests {
         assert_eq!(chunk.content, "");
         assert_eq!(chunk.tool_call_chunks.len(), 1);
         assert_eq!(chunk.tool_call_chunks[0].index, 1);
-        assert_eq!(chunk.tool_call_chunks[0].args_delta, "{\"query\": \"weather\"}");
+        assert_eq!(
+            chunk.tool_call_chunks[0].args_delta,
+            "{\"query\": \"weather\"}"
+        );
     }
 
     #[test]
