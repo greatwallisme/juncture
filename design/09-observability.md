@@ -581,6 +581,16 @@ juncture::tracing::init()
 
 ---
 
+## 13. Implementation Enhancements (Category C)
+
+1. **[C-09-001]** Dual-mode MetricsRegistry (in-memory HashMap + optional OTel Meter) with handle abstraction
+2. **[C-09-002]** Blanket Arc\<T\> and Box\<T\> GraphCallbackHandler implementations for thread-safe sharing
+3. **[C-09-003]** Comprehensive TestMetricsCollector with labeled metrics, utilities, thread-safety
+4. **[C-09-004]** ServerInfo builder pattern with From\<HashMap\> for environment-derived config
+5. **[C-09-005]** LlmCachePolicy with custom key_func and CacheKeyInput struct
+
+---
+
 ## 源码参考索引
 
 | 概念 | LangGraph 源码位置 | 说明 |
