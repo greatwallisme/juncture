@@ -49,6 +49,16 @@ pub enum TopologyError {
 
     #[error("potential infinite loop detected, path: {cycle:?}")]
     PotentialInfiniteLoop { cycle: Vec<String> },
+
+    #[error(
+        "field index {index} in {context} is out of range (state has {field_count} fields: {field_names:?})"
+    )]
+    InvalidFieldReference {
+        index: usize,
+        field_count: usize,
+        field_names: &'static [&'static str],
+        context: String,
+    },
 }
 
 /// Strongly connected components finder using `Tarjan`'s algorithm
@@ -424,7 +434,6 @@ mod tests {
 
     impl crate::State for StateDummy {
         type Update = StateDummyUpdate;
-        type FieldVersions = ();
 
         fn apply(&mut self, _update: Self::Update) -> crate::FieldsChanged {
             crate::FieldsChanged(0)

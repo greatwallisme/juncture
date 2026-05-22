@@ -7,9 +7,8 @@ Proc-macro crate providing `#[derive(State)]`. Has no runtime dependencies beyon
 For a struct `Foo` with fields `a: T1, b: T2, ...`:
 
 1. **`FooUpdate`** -- all fields become `Option<T>`, derived with `Default`, `Clone`, `Debug`, `Serialize`, `Deserialize`
-2. **`FooFieldVersions`** -- all fields become `u64`, for per-field version tracking
-3. **Field index constants** -- `Foo::FIELD_A: usize = 0`, `Foo::FIELD_B: usize = 1`, etc.
-4. **`State` trait impl** -- `apply()` dispatches per-field by reducer type, `reset_ephemeral()` clears ephemeral fields, `schema_version()` and `migrate()` for schema evolution
+2. **Field index constants** -- `Foo::FIELD_A: usize = 0`, `Foo::FIELD_B: usize = 1`, etc.
+3. **`State` trait impl** -- `apply()` dispatches per-field by reducer type, `reset_ephemeral()` clears ephemeral fields, `schema_version()` and `migrate()` for schema evolution
 
 ## Container attributes
 

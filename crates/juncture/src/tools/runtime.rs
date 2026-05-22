@@ -108,7 +108,6 @@ mod tests {
 
     impl juncture_core::State for TestState {
         type Update = TestStateUpdate;
-        type FieldVersions = ();
 
         fn apply(&mut self, _update: Self::Update) -> FieldsChanged {
             FieldsChanged(0)

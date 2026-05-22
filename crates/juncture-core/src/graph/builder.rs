@@ -1151,11 +1151,7 @@ impl<S: State> StateGraph<S> {
     /// - Node names are non-empty and contain no reserved characters
     /// - Entry point references an existing node
     /// - Finish points reference existing nodes
-    ///
-    /// Note: Full field-level validation of state keys requires integration
-    /// with the `#[derive(State)]` proc-macro from juncture-derive. The
-    /// proc-macro can validate that node updates only reference State-defined
-    /// fields at compile time. This method provides runtime topology validation.
+    /// - Reducer field indices are within bounds of the State type's field count
     ///
     /// # Errors
     ///
@@ -1163,6 +1159,7 @@ impl<S: State> StateGraph<S> {
     /// - A node name is empty or contains reserved characters (`:`, `/`, `\`)
     /// - Entry point references a non-existent node
     /// - A finish point references a non-existent node
+    /// - A reducer field index exceeds the number of fields in the State type
     pub fn validate_keys(&self) -> Result<(), TopologyError> {
         // Validate all node names
         for name in self.nodes.keys() {
@@ -1196,6 +1193,32 @@ impl<S: State> StateGraph<S> {
             if !self.nodes.contains_key(finish) {
                 return Err(TopologyError::NodeNotFound {
                     name: finish.clone(),
+                });
+            }
+        }
+
+        // Validate that all reducer field indices are within bounds
+        let field_count = S::field_count();
+        let field_names = S::field_names();
+
+        for &idx in S::replace_field_indices() {
+            if idx >= field_count {
+                return Err(TopologyError::InvalidFieldReference {
+                    index: idx,
+                    field_count,
+                    field_names,
+                    context: "replace_field_indices".to_string(),
+                });
+            }
+        }
+
+        for &idx in S::replace_after_finish_field_indices() {
+            if idx >= field_count {
+                return Err(TopologyError::InvalidFieldReference {
+                    index: idx,
+                    field_count,
+                    field_names,
+                    context: "replace_after_finish_field_indices".to_string(),
                 });
             }
         }
@@ -1559,7 +1582,6 @@ mod tests {
 
     impl crate::State for ChildState {
         type Update = ChildStateUpdate;
-        type FieldVersions = ();
 
         fn apply(&mut self, update: Self::Update) -> crate::FieldsChanged {
             if let Some(v) = update.value {
@@ -1786,12 +1808,161 @@ mod tests {
         graph.validate_keys().unwrap();
     }
 
+    #[test]
+    fn test_validate_keys_catches_invalid_replace_field_index() {
+        let mut graph: StateGraph<StateWithBadReplaceIndex> = StateGraph::new();
+        graph
+            .add_node_simple(
+                "node_a",
+                NodeFnUpdate(|_s| async move { Ok(StateWithBadReplaceIndexUpdate::default()) }),
+            )
+            .unwrap();
+        graph.set_entry_point("node_a");
+        graph.set_finish_point("node_a");
+
+        let result = graph.validate_keys();
+        assert!(matches!(
+            result,
+            Err(TopologyError::InvalidFieldReference { .. })
+        ));
+        if let Err(TopologyError::InvalidFieldReference {
+            index,
+            field_count,
+            context,
+            ..
+        }) = result
+        {
+            assert_eq!(index, 5);
+            assert_eq!(field_count, 2);
+            assert_eq!(context, "replace_field_indices");
+        }
+    }
+
+    #[test]
+    fn test_validate_keys_catches_invalid_replace_after_finish_field_index() {
+        let mut graph: StateGraph<StateWithBadAfterFinishIndex> = StateGraph::new();
+        graph
+            .add_node_simple(
+                "node_a",
+                NodeFnUpdate(|_s| async move { Ok(StateWithBadAfterFinishIndexUpdate::default()) }),
+            )
+            .unwrap();
+        graph.set_entry_point("node_a");
+        graph.set_finish_point("node_a");
+
+        let result = graph.validate_keys();
+        assert!(matches!(
+            result,
+            Err(TopologyError::InvalidFieldReference { .. })
+        ));
+        if let Err(TopologyError::InvalidFieldReference {
+            index,
+            field_count,
+            context,
+            ..
+        }) = result
+        {
+            assert_eq!(index, 99);
+            assert_eq!(field_count, 2);
+            assert_eq!(context, "replace_after_finish_field_indices");
+        }
+    }
+
+    /// State type with a `replace` field index that exceeds the field count.
+    /// Simulates an inconsistency that would be caught by `validate_keys()`.
+    #[derive(Clone, Debug)]
+    struct StateWithBadReplaceIndex {
+        a: i32,
+        b: i32,
+    }
+
+    #[derive(Clone, Debug, Default)]
+    struct StateWithBadReplaceIndexUpdate {
+        a: Option<i32>,
+        b: Option<i32>,
+    }
+
+    impl crate::State for StateWithBadReplaceIndex {
+        type Update = StateWithBadReplaceIndexUpdate;
+
+        fn apply(&mut self, update: Self::Update) -> crate::FieldsChanged {
+            let mut changed = crate::FieldsChanged::default();
+            if let Some(v) = update.a {
+                self.a = v;
+                changed.set_field(0);
+            }
+            if let Some(v) = update.b {
+                self.b = v;
+                changed.set_field(1);
+            }
+            changed
+        }
+
+        fn reset_ephemeral(&mut self) {}
+
+        fn field_count() -> usize {
+            2
+        }
+
+        fn field_names() -> &'static [&'static str] {
+            &["a", "b"]
+        }
+
+        fn replace_field_indices() -> &'static [usize] {
+            &[5] // Invalid: index 5 but only 2 fields (0, 1)
+        }
+    }
+
+    /// State type with a `replace_after_finish` field index that exceeds the field count.
+    /// Simulates an inconsistency that would be caught by `validate_keys()`.
+    #[derive(Clone, Debug)]
+    struct StateWithBadAfterFinishIndex {
+        x: String,
+        y: String,
+    }
+
+    #[derive(Clone, Debug, Default)]
+    struct StateWithBadAfterFinishIndexUpdate {
+        x: Option<String>,
+        y: Option<String>,
+    }
+
+    impl crate::State for StateWithBadAfterFinishIndex {
+        type Update = StateWithBadAfterFinishIndexUpdate;
+
+        fn apply(&mut self, update: Self::Update) -> crate::FieldsChanged {
+            let mut changed = crate::FieldsChanged::default();
+            if let Some(v) = update.x {
+                self.x = v;
+                changed.set_field(0);
+            }
+            if let Some(v) = update.y {
+                self.y = v;
+                changed.set_field(1);
+            }
+            changed
+        }
+
+        fn reset_ephemeral(&mut self) {}
+
+        fn field_count() -> usize {
+            2
+        }
+
+        fn field_names() -> &'static [&'static str] {
+            &["x", "y"]
+        }
+
+        fn replace_after_finish_field_indices() -> &'static [usize] {
+            &[99] // Invalid: index 99 but only 2 fields (0, 1)
+        }
+    }
+
     #[derive(Clone, Debug)]
     struct StateDummy;
 
     impl crate::State for StateDummy {
         type Update = StateDummyUpdate;
-        type FieldVersions = ();
 
         fn apply(&mut self, _update: Self::Update) -> crate::FieldsChanged {
             crate::FieldsChanged(0)

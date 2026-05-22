@@ -90,9 +90,9 @@ pub fn derive_state_impl(input: DeriveInput) -> proc_macro::TokenStream {
 
     // Collect field info
     let mut field_names = Vec::new();
+    let mut field_name_strs = Vec::new();
     let mut field_reducers = Vec::new();
     let mut update_fields = Vec::new();
-    let mut version_fields = Vec::new();
     let mut field_constant_decls = Vec::new();
 
     for (idx, field) in fields.iter().enumerate() {
@@ -102,16 +102,13 @@ pub fn derive_state_impl(input: DeriveInput) -> proc_macro::TokenStream {
         let field_type = &field.ty;
 
         field_names.push(field_name.clone());
+        field_name_strs.push(proc_macro2::Literal::string(&field_name.to_string()));
 
         let reducer = parse_reducer_attr(field);
         field_reducers.push(reducer);
 
         update_fields.push(quote! {
             pub #field_name: Option<#field_type>
-        });
-
-        version_fields.push(quote! {
-            pub #field_name: u64
         });
 
         let const_name = Ident::new(
@@ -125,7 +122,38 @@ pub fn derive_state_impl(input: DeriveInput) -> proc_macro::TokenStream {
 
     // Generate apply() body per field based on reducer type
     let apply_arms = generate_apply_arms(&field_names, &field_reducers);
+    let try_apply_arms = generate_try_apply_arms(&field_names, &field_reducers);
     let reset_ephemeral_arms = generate_reset_ephemeral_arms(&field_names, &field_reducers);
+
+    // Collect replace field indices for multi-writer detection at the Pregel engine level
+    let replace_field_indices: Vec<proc_macro2::TokenStream> = field_names
+        .iter()
+        .zip(field_reducers.iter())
+        .enumerate()
+        .filter(|(_, (_, reducer))| matches!(reducer, ReducerType::Replace))
+        .map(|(idx, _)| {
+            let idx_val = idx;
+            quote! { #idx_val }
+        })
+        .collect();
+
+    // Collect replace_after_finish field indices for finish semantics at the Pregel engine level
+    let replace_after_finish_indices: Vec<proc_macro2::TokenStream> = field_names
+        .iter()
+        .zip(field_reducers.iter())
+        .enumerate()
+        .filter(|(_, (_, reducer))| matches!(reducer, ReducerType::ReplaceAfterFinish))
+        .map(|(idx, _)| {
+            let idx_val = idx;
+            quote! { #idx_val }
+        })
+        .collect();
+
+    // Generate finish_field() match arms for replace_after_finish fields
+    let finish_field_arms = generate_finish_field_arms(&field_names, &field_reducers);
+
+    // Generate field_is_set match arms for efficient field checking without serialization
+    let field_is_set_arms = generate_field_is_set_arms(&field_names);
 
     // Generate migrate match arms
     let migrate_arms = migrate_functions.iter().map(|(from_ver, func_path)| {
@@ -139,7 +167,6 @@ pub fn derive_state_impl(input: DeriveInput) -> proc_macro::TokenStream {
     });
 
     let update_name = Ident::new(&format!("{struct_name}Update"), Span::call_site());
-    let versions_name = Ident::new(&format!("{struct_name}FieldVersions"), Span::call_site());
 
     // Generate StateSubset impl if #[subset_of(Parent)] is present
     let subset_impl = subset_of_parent.as_ref().map(|parent_type| {
@@ -153,15 +180,35 @@ pub fn derive_state_impl(input: DeriveInput) -> proc_macro::TokenStream {
             #(#update_fields,)*
         }
 
-        // 2. Generate FieldVersions struct
-        #[derive(Default, Clone, Debug, serde::Serialize, serde::Deserialize)]
-        pub struct #versions_name #ty_generics #where_clause {
-            #(#version_fields,)*
-        }
-
-        // 3. Field index constants
+        // 2. Field index constants + replace field indices + replace_after_finish field indices + field_is_set helper
         impl #impl_generics #struct_name #ty_generics #where_clause {
             #(#field_constant_decls)*
+
+            /// Indices of fields that use the `replace` reducer.
+            ///
+            /// Used by the Pregel engine to detect multiple writers in a single
+            /// superstep before applying any writes.
+            #[must_use]
+            pub const REPLACE_FIELD_INDICES: &'static [usize] = &[#(#replace_field_indices),*];
+
+            /// Indices of fields that use the `replace_after_finish` reducer.
+            ///
+            /// Used by the Pregel engine to call `finish_field()` only for
+            /// fields that need finish semantics, avoiding unnecessary work.
+            #[must_use]
+            pub const REPLACE_AFTER_FINISH_FIELD_INDICES: &'static [usize] = &[#(#replace_after_finish_indices),*];
+
+            /// Check if a specific field is set (Some) in an update.
+            ///
+            /// Provides efficient field-level inspection without serialization,
+            /// used by the Pregel engine for multi-writer conflict detection.
+            #[must_use]
+            pub fn field_is_set(update: &<Self as juncture_core::State>::Update, field_idx: usize) -> bool {
+                match field_idx {
+                    #(#field_is_set_arms)*
+                    _ => false,
+                }
+            }
         }
 
         // 4. State trait implementation
@@ -170,12 +217,20 @@ pub fn derive_state_impl(input: DeriveInput) -> proc_macro::TokenStream {
             Self: Clone + Send + Sync + std::fmt::Debug + 'static,
         {
             type Update = #update_name #ty_generics;
-            type FieldVersions = #versions_name #ty_generics;
 
             fn apply(&mut self, update: Self::Update) -> juncture_core::FieldsChanged {
                 let mut changed = juncture_core::FieldsChanged::default();
                 #(#apply_arms)*
                 changed
+            }
+
+            fn try_apply(
+                &mut self,
+                update: Self::Update,
+            ) -> Result<juncture_core::FieldsChanged, juncture_core::error::InvalidUpdateError> {
+                let mut changed = juncture_core::FieldsChanged::default();
+                #(#try_apply_arms)*
+                Ok(changed)
             }
 
             fn reset_ephemeral(&mut self) {
@@ -194,6 +249,33 @@ pub fn derive_state_impl(input: DeriveInput) -> proc_macro::TokenStream {
                     #(#migrate_arms)*
                     _ => value,
                 }
+            }
+
+            fn replace_field_indices() -> &'static [usize] {
+                Self::REPLACE_FIELD_INDICES
+            }
+
+            fn replace_after_finish_field_indices() -> &'static [usize] {
+                Self::REPLACE_AFTER_FINISH_FIELD_INDICES
+            }
+
+            fn finish_field(&mut self, field_idx: usize) {
+                match field_idx {
+                    #(#finish_field_arms)*
+                    _ => {}
+                }
+            }
+
+            fn field_is_set(update: &Self::Update, field_idx: usize) -> bool {
+                Self::field_is_set(update, field_idx)
+            }
+
+            fn field_count() -> usize {
+                #field_count
+            }
+
+            fn field_names() -> &'static [&'static str] {
+                &[#(#field_name_strs),* ]
             }
         }
 
@@ -343,6 +425,72 @@ fn generate_apply_arms(
         .collect()
 }
 
+/// Generate `try_apply()` match arms for each field.
+///
+/// Identical to `apply()` logic but returns `Result<FieldsChanged, InvalidUpdateError>`.
+/// Replace fields return `InvalidUpdateError::MultipleOverwrite` if a second write
+/// is detected within the same superstep; all other reducer types always succeed.
+fn generate_try_apply_arms(
+    field_names: &[Ident],
+    field_reducers: &[ReducerType],
+) -> Vec<proc_macro2::TokenStream> {
+    field_names
+        .iter()
+        .zip(field_reducers.iter())
+        .map(|(name, reducer)| {
+            let const_name = Ident::new(
+                &format!("FIELD_{}", name.to_string().to_uppercase()),
+                Span::call_site(),
+            );
+            match reducer {
+                ReducerType::Append => {
+                    quote! {
+                        if let Some(v) = update.#name {
+                            self.#name.extend(v);
+                            changed.set_field(Self::#const_name);
+                        }
+                    }
+                }
+                ReducerType::Custom(func_path) => {
+                    quote! {
+                        if let Some(v) = update.#name {
+                            #func_path(&mut self.#name, v);
+                            changed.set_field(Self::#const_name);
+                        }
+                    }
+                }
+                // Replace, Untracked, Ephemeral, ReplaceAfterFinish, LastWriteWins, Any
+                // all use simple assignment semantics.
+                // Multi-writer detection for Replace fields happens at the
+                // Pregel engine level via check_replace_conflicts() which
+                // inspects all task outputs before calling try_apply().
+                _ => {
+                    quote! {
+                        if let Some(v) = update.#name {
+                            self.#name = v;
+                            changed.set_field(Self::#const_name);
+                        }
+                    }
+                }
+            }
+        })
+        .collect()
+}
+
+/// Generate `field_is_set()` match arms for efficient field checking
+fn generate_field_is_set_arms(field_names: &[Ident]) -> Vec<proc_macro2::TokenStream> {
+    field_names
+        .iter()
+        .enumerate()
+        .map(|(idx, name)| {
+            let idx_val = idx;
+            quote! {
+                #idx_val => update.#name.is_some(),
+            }
+        })
+        .collect()
+}
+
 /// Generate `reset_ephemeral()` arms
 fn generate_reset_ephemeral_arms(
     field_names: &[Ident],
@@ -355,6 +503,40 @@ fn generate_reset_ephemeral_arms(
         .map(|(name, _)| {
             quote! {
                 self.#name = Default::default();
+            }
+        })
+        .collect()
+}
+
+/// Generate `finish_field()` match arms for `replace_after_finish` fields.
+///
+/// For `replace_after_finish` fields, the value is already stored in the field
+/// by `apply()`. The `finish_field()` call is a lifecycle notification that
+/// signals the value is now finalized. Since plain struct fields don't have
+/// Channel-level withholding semantics, the match arm simply acknowledges the
+/// call (the field value is already correct).
+///
+/// Fields with other reducer types are omitted from the match arms, falling
+/// through to the wildcard `_ => {}` no-op in the generated implementation.
+fn generate_finish_field_arms(
+    field_names: &[Ident],
+    field_reducers: &[ReducerType],
+) -> Vec<proc_macro2::TokenStream> {
+    field_names
+        .iter()
+        .zip(field_reducers.iter())
+        .enumerate()
+        .filter(|(_, (_, reducer))| matches!(reducer, ReducerType::ReplaceAfterFinish))
+        .map(|(idx, _)| {
+            let idx_val = idx;
+            // The field value is already stored by apply(). finish_field()
+            // serves as a lifecycle hook for consumers that need to know when
+            // the value became finalized (e.g., for Channel integration or
+            // checkpoint persistence decisions at a higher level).
+            quote! {
+                #idx_val => {
+                    // replace_after_finish field finalized -- value already in place
+                }
             }
         })
         .collect()

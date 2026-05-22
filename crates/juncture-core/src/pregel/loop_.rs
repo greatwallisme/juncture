@@ -13,7 +13,8 @@ use crate::{
         context::ExecutionContext,
         runner::execute_superstep,
         scheduler::{
-            FieldVersionTracker, VersionsSeen, compute_next_tasks, schedule_error_handlers,
+            FieldVersionTracker, VersionsSeen, apply_writes, compute_next_tasks,
+            schedule_error_handlers,
         },
         types::{BubbleUp, LoopStatus, PendingTask, SuperstepResult},
     },
@@ -655,23 +656,18 @@ impl<S: State> PregelLoop<S> {
     where
         S: Clone + serde::Serialize,
     {
-        // Apply writes from completed tasks
-        let mut total_changed = crate::FieldsChanged(0);
+        // Apply writes from completed tasks using path-based deterministic merge order.
+        // apply_writes sorts by trigger type (PULL before PUSH) then by node name / send
+        // index so that concurrent writes to the same field produce a deterministic result
+        // matching LangGraph semantics. It also checks for replace-field conflicts before
+        // applying any writes, so a double-write rejects the entire superstep.
+        let _total_changed = apply_writes(
+            &mut self.state,
+            &result.task_outputs,
+            &mut self.field_versions,
+        )?;
 
-        for task_output in &result.task_outputs {
-            if let Some(ref update) = task_output.command.update {
-                let changed = self
-                    .state
-                    .try_apply(update.clone())
-                    .map_err(|e| JunctureError::invalid_update(e.to_string()))?;
-                total_changed.merge(&changed);
-            }
-        }
-
-        // Bump field versions for changed fields
-        self.field_versions.bump_all(&total_changed);
-
-        // Mark versions as consumed
+        // Mark versions as consumed after bumping
         for task_output in &result.task_outputs {
             let current_versions = self.field_versions.versions().to_vec();
             self.versions_seen
@@ -1310,6 +1306,11 @@ impl<S: State> PregelLoop<S> {
     /// This allows channels like `LastValueAfterFinishChannel` to finalize
     /// their state and make values available to consumers.
     ///
+    /// Only calls `finish_field()` for fields that use the
+    /// `replace_after_finish` reducer, as indicated by
+    /// [`State::replace_after_finish_field_indices`]. Other field types
+    /// have no-op finish semantics.
+    ///
     /// # Examples
     ///
     /// ```ignore
@@ -1322,10 +1323,7 @@ impl<S: State> PregelLoop<S> {
     /// }
     /// ```
     fn finish_all_channels(&mut self) {
-        // Finish all fields by index
-        // The number of fields is tracked by field_versions
-        let field_count = self.field_versions.len();
-        for field_idx in 0..field_count {
+        for &field_idx in S::replace_after_finish_field_indices() {
             self.state.finish_field(field_idx);
         }
     }
@@ -1584,7 +1582,6 @@ mod tests {
 
     impl State for TestState {
         type Update = TestUpdate;
-        type FieldVersions = ();
 
         fn apply(&mut self, _: Self::Update) -> crate::FieldsChanged {
             crate::FieldsChanged(0)
@@ -1719,4 +1716,4 @@ mod tests {
     }
 }
 
-// Rust guideline compliant 2026-05-21
+// Rust guideline compliant 2026-05-22

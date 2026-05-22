@@ -33,7 +33,6 @@ use serde::{Deserialize, Serialize};
 ///
 /// The `#[derive(State)]` macro generates:
 /// - [`MessagesStateUpdate`]: update struct with `messages: Option<Vec<Message>>`
-/// - [`MessagesStateFieldVersions`]: field version tracking struct
 ///
 /// # Example
 ///

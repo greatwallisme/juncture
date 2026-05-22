@@ -7,7 +7,6 @@ mod state_derive;
 ///
 /// Generates:
 /// - Update struct (each field becomes Option<T>)
-/// - `FieldVersions` struct (each field becomes u64)
 /// - Field index constants
 /// - State trait implementation
 #[proc_macro_derive(State, attributes(reducer, state_version, migrate_from, subset_of))]

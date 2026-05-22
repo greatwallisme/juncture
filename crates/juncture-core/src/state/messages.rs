@@ -135,7 +135,6 @@ pub struct MessagesStateUpdate {
 
 impl crate::State for MessagesState {
     type Update = MessagesStateUpdate;
-    type FieldVersions = ();
 
     fn apply(&mut self, update: Self::Update) -> crate::FieldsChanged {
         let mut changed = crate::FieldsChanged(0);

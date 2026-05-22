@@ -216,7 +216,6 @@ impl<S: State> PendingTask<S> {
     /// # struct MyState;
     /// # impl State for MyState {
     /// #     type Update = ();
-    /// #     type FieldVersions = ();
     /// #     fn apply(&mut self, _: ()) -> juncture_core::FieldsChanged { juncture_core::FieldsChanged(0) }
     /// #     fn reset_ephemeral(&mut self) {}
     /// # }
