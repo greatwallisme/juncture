@@ -881,6 +881,19 @@ let subgraph_stream = subgraph.stream(input, &config, StreamMode::Updates).await
 
 ---
 
+## 10. Implementation Enhancements (Category C)
+
+1. **[C-07-001]** SubgraphTransformer uses `/` separator for stream events (more readable than `:`)
+2. **[C-07-002]** CheckpointNamespace implements Display trait for idiomatic formatting
+3. **[C-07-003]** SubgraphTransformer provides with_filter_types() convenience method
+4. **[C-07-004]** SubgraphConfig simplified to single persistence field (cleaner than design)
+5. **[C-07-005]** StateSubset proc-macro generates stricter trait bounds (Clone + Send + Sync + Debug)
+6. **[C-07-006]** compute_child_namespace returns Option (Stateless mode returns None correctly)
+7. **[C-07-007]** ParentCommand implemented as JunctureError variant (reuses error infrastructure)
+8. **[C-07-008]** BubbleUp enum has richer variants: Interrupt, Drained, ParentCommand
+
+---
+
 ## 源码参考索引
 
 | 概念 | LangGraph 源码位置 | 说明 |
