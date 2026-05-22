@@ -84,12 +84,26 @@ pub struct ToolExecutionTrace {
 
     /// Whether the execution succeeded
     pub success: bool,
+
+    /// Tool input arguments at time of execution
+    pub input: serde_json::Value,
+
+    /// Tool output on success
+    pub output: Option<String>,
+
+    /// Error message on failure
+    pub error: Option<String>,
 }
 
 impl ToolExecutionTrace {
     /// Create a new tool execution trace
     #[must_use]
-    pub fn new(tool_name: String, tool_call_id: String, attempt: usize) -> Self {
+    pub fn new(
+        tool_name: String,
+        tool_call_id: String,
+        attempt: usize,
+        input: serde_json::Value,
+    ) -> Self {
         Self {
             tool_name,
             tool_call_id,
@@ -97,13 +111,24 @@ impl ToolExecutionTrace {
             first_attempt_time: Self::now(),
             duration_ms: 0,
             success: false,
+            input,
+            output: None,
+            error: None,
         }
     }
 
-    /// Mark the trace as completed
-    pub const fn complete(&mut self, duration_ms: u64, success: bool) {
+    /// Mark the trace as completed with duration, success status, and optional output/error
+    pub fn complete(
+        &mut self,
+        duration_ms: u64,
+        success: bool,
+        output: Option<String>,
+        error: Option<String>,
+    ) {
         self.duration_ms = duration_ms;
         self.success = success;
+        self.output = output;
+        self.error = error;
     }
 
     /// Get current Unix timestamp
@@ -310,7 +335,22 @@ impl ToolNode {
                 return Err(error);
             };
 
-            let tool_call = tool_call.clone();
+            let mut tool_call = tool_call.clone();
+
+            // Apply transformer if configured
+            if let Some(ref transformer) = self.call_transformer
+                && let Err(e) = transformer.transform(&mut tool_call)
+            {
+                if self.handle_errors {
+                    tool_messages.push(Message::tool_result(
+                        tool_call.id.clone(),
+                        format!("Error: {e}"),
+                    ));
+                    continue;
+                }
+                return Err(e);
+            }
+
             let interceptor = Arc::clone(&interceptor);
 
             results.spawn(async move {
@@ -369,6 +409,14 @@ impl ToolNode {
         // Pre-execute hook
         interceptor.pre_execute(tool_call, &state).await?;
 
+        // Create execution trace capturing the tool input at time of execution
+        let mut trace = ToolExecutionTrace::new(
+            tool.name().to_string(),
+            tool_call.id.clone(),
+            1,
+            tool_call.arguments.clone(),
+        );
+
         // Execute the tool
         let start = std::time::Instant::now();
         let result = tool.invoke(tool_call.arguments.clone()).await;
@@ -391,8 +439,25 @@ impl ToolNode {
 
         // Post-execute hook
         let output = match interceptor.post_execute(tool_call, &result).await {
-            Ok(out) => out,
+            Ok(out) => {
+                // Complete trace with success details
+                trace.complete(duration_ms, true, Some(out.clone()), None);
+                out
+            }
             Err(e) => {
+                // Complete trace with failure details
+                trace.complete(duration_ms, false, None, Some(e.to_string()));
+
+                // Log execution trace before returning error
+                tracing::debug!(
+                    name: "juncture.tool.trace",
+                    tool_name = %trace.tool_name,
+                    tool_call_id = %trace.tool_call_id,
+                    attempt = trace.attempt,
+                    duration_ms = trace.duration_ms,
+                    success = trace.success,
+                );
+
                 // Record error attribute
                 tracing::Span::current().record(attrs::TOOL_ERROR, e.to_string());
 
@@ -405,6 +470,16 @@ impl ToolNode {
                 return Err(e);
             }
         };
+
+        // Log execution trace for successful execution
+        tracing::debug!(
+            name: "juncture.tool.trace",
+            tool_name = %trace.tool_name,
+            tool_call_id = %trace.tool_call_id,
+            attempt = trace.attempt,
+            duration_ms = trace.duration_ms,
+            success = trace.success,
+        );
 
         Ok((tool_call.id.clone(), output))
     }
@@ -727,25 +802,195 @@ mod tests {
 
     #[tokio::test]
     async fn test_tool_execution_trace() {
-        let mut trace = ToolExecutionTrace::new("test_tool".to_string(), "call_123".to_string(), 1);
+        let mut trace = ToolExecutionTrace::new(
+            "test_tool".to_string(),
+            "call_123".to_string(),
+            1,
+            json!({"key": "value"}),
+        );
         assert_eq!(trace.tool_name, "test_tool");
         assert_eq!(trace.tool_call_id, "call_123");
         assert_eq!(trace.attempt, 1);
         assert!(!trace.success);
         assert_eq!(trace.duration_ms, 0);
+        assert_eq!(trace.input["key"], "value");
+        assert!(trace.output.is_none());
+        assert!(trace.error.is_none());
 
-        trace.complete(100, true);
+        trace.complete(100, true, Some("ok".to_string()), None);
         assert_eq!(trace.duration_ms, 100);
         assert!(trace.success);
+        assert_eq!(trace.output, Some("ok".to_string()));
+        assert!(trace.error.is_none());
     }
 
     #[test]
     fn test_tool_execution_trace_now() {
-        let trace1 = ToolExecutionTrace::new("t".to_string(), "c".to_string(), 1);
-        let trace2 = ToolExecutionTrace::new("t".to_string(), "c".to_string(), 1);
+        let trace1 = ToolExecutionTrace::new("t".to_string(), "c".to_string(), 1, json!(null));
+        let trace2 = ToolExecutionTrace::new("t".to_string(), "c".to_string(), 1, json!(null));
         // Both should have timestamps close to each other
         assert!(trace2.first_attempt_time >= trace1.first_attempt_time);
     }
+
+    /// Test tool that returns its input as a JSON string for verification
+    struct JsonDumpTool;
+
+    #[async_trait]
+    impl Tool for JsonDumpTool {
+        fn name(&self) -> &'static str {
+            "json_dump"
+        }
+
+        fn description(&self) -> &'static str {
+            "Returns the input as a JSON string"
+        }
+
+        fn schema(&self) -> serde_json::Value {
+            json!({"type": "object"})
+        }
+
+        async fn invoke(&self, input: serde_json::Value) -> Result<String, ToolError> {
+            Ok(input.to_string())
+        }
+    }
+
+    /// Transformer that injects a default limit parameter into tool calls
+    struct AddDefaultLimit;
+
+    impl ToolCallTransformer for AddDefaultLimit {
+        fn transform(&self, tool_call: &mut ToolCall) -> Result<(), ToolError> {
+            if let Some(obj) = tool_call.arguments.as_object_mut() {
+                obj.entry("limit").or_insert(json!(10));
+            }
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn test_tool_node_with_transformer() {
+        let node = ToolNode::new(vec![Box::new(JsonDumpTool) as Box<dyn Tool>])
+            .with_transformer(Box::new(AddDefaultLimit));
+
+        let messages = vec![Message::ai_with_tool_calls(
+            "test",
+            vec![ToolCall {
+                id: "call_1".to_string(),
+                name: "json_dump".to_string(),
+                arguments: json!({"query": "test"}),
+            }],
+        )];
+
+        let results = node.execute(&messages).await.unwrap();
+        assert_eq!(results.len(), 1);
+
+        match &results[0].content {
+            juncture_core::state::messages::Content::Text(text) => {
+                let output: serde_json::Value =
+                    serde_json::from_str(text).expect("output should be valid JSON");
+                assert_eq!(output["limit"], 10);
+                assert_eq!(output["query"], "test");
+            }
+            juncture_core::state::messages::Content::MultiPart(_) => {
+                panic!("Expected Text content with transformed arguments")
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_tool_node_with_transformer_error_handling() {
+        struct BlockingTransformer;
+
+        impl ToolCallTransformer for BlockingTransformer {
+            fn transform(&self, tool_call: &mut ToolCall) -> Result<(), ToolError> {
+                Err(ToolError::intercepted(format!(
+                    "Transformer blocked '{}'",
+                    tool_call.name
+                )))
+            }
+        }
+
+        let node = ToolNode::new(vec![Box::new(EchoTool) as Box<dyn Tool>])
+            .with_transformer(Box::new(BlockingTransformer));
+
+        let messages = vec![Message::ai_with_tool_calls(
+            "test",
+            vec![ToolCall {
+                id: "call_1".to_string(),
+                name: "echo".to_string(),
+                arguments: json!({"message": "hello"}),
+            }],
+        )];
+
+        let results = node.execute(&messages).await.unwrap();
+        assert_eq!(results.len(), 1);
+        match &results[0].content {
+            juncture_core::state::messages::Content::Text(text) => {
+                assert!(text.contains("Error:"));
+                assert!(text.contains("Transformer blocked"));
+            }
+            juncture_core::state::messages::Content::MultiPart(_) => {
+                panic!("Expected Text content with error message")
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_tool_node_with_transformer_no_error_handling() {
+        struct FatalBlockingTransformer;
+
+        impl ToolCallTransformer for FatalBlockingTransformer {
+            fn transform(&self, _tool_call: &mut ToolCall) -> Result<(), ToolError> {
+                Err(ToolError::Intercepted("fatal block".to_string()))
+            }
+        }
+
+        let node = ToolNode::new(vec![Box::new(EchoTool) as Box<dyn Tool>])
+            .with_transformer(Box::new(FatalBlockingTransformer))
+            .with_error_handling(false);
+
+        let messages = vec![Message::ai_with_tool_calls(
+            "test",
+            vec![ToolCall {
+                id: "call_1".to_string(),
+                name: "echo".to_string(),
+                arguments: json!({"message": "hello"}),
+            }],
+        )];
+
+        let result = node.execute(&messages).await;
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), ToolError::Intercepted(_)));
+    }
+
+    #[tokio::test]
+    async fn test_tool_execution_trace_with_fields() {
+        let mut trace = ToolExecutionTrace::new(
+            "tracker".to_string(),
+            "call_42".to_string(),
+            1,
+            json!({"cmd": "deploy"}),
+        );
+        assert_eq!(trace.input["cmd"], "deploy");
+
+        // Simulate a successful execution
+        trace.complete(250, true, Some("deployed".to_string()), None);
+        assert_eq!(trace.duration_ms, 250);
+        assert!(trace.success);
+        assert_eq!(trace.output, Some("deployed".to_string()));
+        assert!(trace.error.is_none());
+
+        // Simulate a failed execution
+        let mut err_trace = ToolExecutionTrace::new(
+            "tracker".to_string(),
+            "call_99".to_string(),
+            2,
+            json!({"cmd": "fail"}),
+        );
+        err_trace.complete(50, false, None, Some("timeout".to_string()));
+        assert!(!err_trace.success);
+        assert!(err_trace.output.is_none());
+        assert_eq!(err_trace.error, Some("timeout".to_string()));
+    }
 }
 
-// Rust guideline compliant 2026-05-19
+// Rust guideline compliant 2026-05-22
