@@ -131,7 +131,8 @@ impl<S: State> StateGraph<S> {
     /// 添加线性链：便捷方法用于添加连续的节点序列。
     /// nodes[0] 连接到 nodes[1]，nodes[1] 连接到 nodes[2]，依此类推。
     /// 如果 entry_point 未设置，nodes[0] 自动设为入口点。
-    pub fn add_sequence(&mut self, nodes: &[impl AsRef<str>]) -> &mut Self {
+    /// <!-- Addresses finding: B-02-001 (implementation returns Result for early validation) -->
+    pub fn add_sequence(&mut self, nodes: &[impl AsRef<str>]) -> Result<&mut Self, TopologyError> {
         for window in nodes.windows(2) {
             self.add_edge(window[0].as_ref(), window[1].as_ref());
         }
@@ -836,6 +837,16 @@ impl<S: State> Command<S> {
     /// 终止当前路径
     pub fn end() -> Self {
         Self { update: None, goto: Some(Goto::End), graph: GraphTarget::Current }
+    }
+
+    /// <!-- Addresses finding: B-02-003 (code exceeds design) -->
+    /// 附加 Resume 值用于中断恢复
+    ///
+    /// 当一个节点在中断前返回 Command 时，可以通过 with_resume() 预置
+    /// 恢复值，使调用者在恢复执行时无需手动提供每个中断的响应数据。
+    pub fn with_resume(mut self, resume: ResumeValue) -> Self {
+        self.resume = Some(resume);
+        self
     }
 
     /// 子图向父图发送路由指令

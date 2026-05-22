@@ -251,7 +251,7 @@ Juncture 保留此设计：`CheckpointSaver::put_writes()` 在每个节点完成
 | `add_conditional_edges` | `graph.add_conditional_edges` | 一致，额外支持异步路由 |
 | `compile(checkpointer=)` | `graph.compile(checkpointer)` | 额外执行拓扑验证 |
 | `invoke(input, config)` | `graph.invoke(input, &config)` | 一致 |
-| `stream(input, stream_mode=)` | `graph.stream(input, &config, mode)` | 10 种模式全部支持 |
+| `stream(input, stream_mode=)` | `graph.stream(input, &config, mode)` | 9 种模式全部支持 (Values, Updates, Messages, Custom, Debug, Tools, Checkpoints, Tasks, Multi) |
 | `Command(update=, goto=)` | `Command::new().update().goto()` | builder 模式 |
 | `interrupt(value)` | `interrupt!(value)` | 宏实现，支持命名中断 ID |
 | `Send(node, arg)` | `Send::new(node, state)` | 一致 |
