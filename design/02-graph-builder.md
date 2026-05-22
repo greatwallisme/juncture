@@ -1509,6 +1509,21 @@ Command 是一个 struct，各字段独立组合，天然支持任意组合。
 
 ---
 
+## 9. Implementation Enhancements (Category C)
+
+The following items represent code-level enhancements that extend beyond the design specification. These are categorized as Category C (Implementation Enhancements) findings from the design-to-code conformance audit.
+
+- **C-02-001: NodeMetadata consolidation** -- Implementation consolidates per-node parameters (defer, metadata, destinations, retry_policies) into a `NodeMetadata` struct (`builder.rs:20-33`), providing a cleaner API than many individual parameters in `add_node()`.
+- **C-02-002: RetryPolicy production-grade features** -- Implementation extends basic retry with exponential backoff, configurable initial interval, full jitter strategy (to avoid thundering herd), max interval caps, max attempt limits, and a `retry_on` predicate for error-type-specific retry decisions.
+- **C-02-003: ErrorHandlerNode wrapper pattern** -- Implementation uses an `ErrorHandlerNode<S>` wrapper that composes the original node with its error handler into a single `Node<S>` implementation, intercepting errors and delegating to the error handler without special-case handling in the Pregel engine.
+- **C-02-004: TimeoutNode with TimeoutPolicy** -- Implementation introduces a `TimeoutNode<S>` wrapper that enforces per-node timeout via `TimeoutPolicy`, using `tokio::time::timeout` with `CancellationToken` propagation for reliable deadline enforcement.
+- **C-02-005: Command::with_resume() enhancement** -- Implementation extends `Command::with_resume()` to support `ById` and `ByNamespace` resume variants, enabling more precise interrupt resumption beyond the single-value resume pattern.
+- **C-02-006: SendTarget with timeout override** -- Implementation adds a `timeout: Option<Duration>` field to `SendTarget`, allowing per-send-target timeout configuration that overrides the graph-level default for fine-grained fan-out control.
+- **C-02-007: TopologyValidator with Tarjan SCC** -- Implementation enhances topology validation with Tarjan's strongly connected components algorithm, distinguishing valid agent loops (conditional edges with exit paths) from true infinite loops (fixed edges with no exit).
+- **C-02-008: CompiledGraph invoke/stream async variants** -- Implementation adds `invoke_async()` and `stream_with_config()` convenience variants on `CompiledGraph`, providing ergonomic async entry points alongside the primary `invoke()` and `stream()` methods.
+
+---
+
 ## 源码参考索引
 
 | LangGraph 源码路径 | 说明 |
