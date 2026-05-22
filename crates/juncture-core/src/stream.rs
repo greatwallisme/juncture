@@ -1,6 +1,7 @@
 use crate::state::State;
 use futures::StreamExt;
 use std::collections::HashMap;
+use std::sync::Mutex;
 
 /// Stream mode for graph execution
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -323,7 +324,13 @@ impl StreamChannel {
 
 /// Transformer for stream data
 pub trait StreamTransformer: Send + Sync + 'static {
-    fn transform(&self, data: serde_json::Value) -> serde_json::Value;
+    /// Transform the data.
+    ///
+    /// Returns `Some(value)` with the transformed result, or `None` if
+    /// the data was buffered and should not be emitted yet (e.g. when
+    /// using [`BatchTransformer`] which accumulates to a threshold).
+    #[must_use]
+    fn transform(&self, data: serde_json::Value) -> Option<serde_json::Value>;
 }
 
 /// Event emitter for streaming
@@ -877,13 +884,13 @@ impl StreamTransformer for JsonParseTransformer {
         clippy::option_if_let_else,
         reason = "project rules prohibit map_or with unwrap; match is explicit and readable"
     )]
-    fn transform(&self, data: serde_json::Value) -> serde_json::Value {
+    fn transform(&self, data: serde_json::Value) -> Option<serde_json::Value> {
         match data {
             serde_json::Value::String(s) => match serde_json::from_str(&s) {
-                Ok(v) => v,
-                Err(_) => serde_json::Value::Null,
+                Ok(v) => Some(v),
+                Err(_) => Some(serde_json::Value::Null),
             },
-            _ => data,
+            _ => Some(data),
         }
     }
 }
@@ -902,47 +909,95 @@ impl FilterFieldsTransformer {
 }
 
 impl StreamTransformer for FilterFieldsTransformer {
-    fn transform(&self, data: serde_json::Value) -> serde_json::Value {
+    fn transform(&self, data: serde_json::Value) -> Option<serde_json::Value> {
         match data {
             serde_json::Value::Object(mut map) => {
                 let keys_to_keep: std::collections::HashSet<_> = self.fields.iter().collect();
                 map.retain(|k, _| keys_to_keep.contains(k));
-                serde_json::Value::Object(map)
+                Some(serde_json::Value::Object(map))
             }
-            _ => data,
+            _ => Some(data),
         }
     }
 }
 
-/// Transformer that batches events
-#[derive(Clone, Debug)]
+/// Transformer that batches events by accumulation.
+///
+/// Accumulates stream data values until `size` items are collected,
+/// then emits them as a single JSON array. This reduces overhead for
+/// high-volume token streaming by coalescing small chunks into fewer
+/// deliveries.
+///
+/// Use [`flush()`](Self::flush) to retrieve any remaining buffered items
+/// before the transformer is dropped.
+#[derive(Debug)]
 pub struct BatchTransformer {
+    /// Maximum number of items to accumulate before emitting a batch.
     pub size: usize,
+
+    /// Internal buffer for accumulated items.
+    buffer: Mutex<Vec<serde_json::Value>>,
 }
 
 impl BatchTransformer {
+    /// Create a new `BatchTransformer` with the given batch size.
+    ///
+    /// A `size` of `0` is clamped to `1` to ensure forward progress.
     #[must_use]
-    pub const fn new(size: usize) -> Self {
-        Self { size }
+    pub fn new(size: usize) -> Self {
+        Self {
+            size: size.max(1),
+            buffer: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Flush all buffered items as a JSON array.
+    ///
+    /// Returns `None` if the buffer is empty.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal mutex is poisoned (i.e., another thread
+    /// panicked while holding the lock).
+    #[must_use]
+    pub fn flush(&self) -> Option<serde_json::Value> {
+        let mut buffer = self.buffer.lock().expect("BatchTransformer buffer lock");
+        if buffer.is_empty() {
+            return None;
+        }
+        let items = std::mem::take(&mut *buffer);
+        drop(buffer);
+        Some(serde_json::Value::Array(items))
+    }
+}
+
+impl Clone for BatchTransformer {
+    fn clone(&self) -> Self {
+        Self {
+            size: self.size,
+            // Each clone starts with an independent empty buffer.
+            buffer: Mutex::new(Vec::new()),
+        }
     }
 }
 
 impl StreamTransformer for BatchTransformer {
-    fn transform(&self, data: serde_json::Value) -> serde_json::Value {
-        // Batching requires stateful accumulation of events
-        // This transformer defines the batching size; the runtime
-        // manages the actual batching logic using this configuration
-        data
+    fn transform(&self, data: serde_json::Value) -> Option<serde_json::Value> {
+        let mut buffer = self.buffer.lock().expect("BatchTransformer buffer lock");
+        buffer.push(data);
+        let items = (buffer.len() >= self.size).then(|| std::mem::take(&mut *buffer));
+        drop(buffer);
+        items.map(serde_json::Value::Array)
     }
 }
 
-// Rust guideline compliant 2026-05-21
+// Rust guideline compliant 2026-05-22
 
 #[cfg(test)]
 mod tests {
     use super::{
-        EventEmitter, MessageBatchConfig, MessageChunk, MessageStreamMetadata, StreamConfig,
-        StreamEvent, StreamMode, StreamResumption, ToolsEvent,
+        BatchTransformer, EventEmitter, MessageBatchConfig, MessageChunk, MessageStreamMetadata,
+        StreamConfig, StreamEvent, StreamMode, StreamResumption, StreamTransformer, ToolsEvent,
     };
     use crate::state::{FieldsChanged, State};
 
@@ -1104,9 +1159,7 @@ mod tests {
     fn should_emit_end_event_always_in_messages_mode() {
         let (tx, _rx) = tokio::sync::mpsc::channel(16);
         let emitter = EventEmitter::<TestState>::new(tx, StreamMode::Messages);
-        let event = StreamEvent::End {
-            output: TestState,
-        };
+        let event = StreamEvent::End { output: TestState };
         assert!(emitter.should_emit(&event));
     }
 
@@ -1144,5 +1197,130 @@ mod tests {
             duration_ms: 100,
         });
         assert!(emitter.should_emit(&event));
+    }
+
+    // --- BatchTransformer unit tests ---
+
+    #[test]
+    fn batch_transformer_emits_batch_when_max_size_reached() {
+        let transformer = BatchTransformer::new(3);
+        let item = serde_json::json!({"token": "hello"});
+
+        // First two items are buffered (None returned)
+        assert!(transformer.transform(item.clone()).is_none());
+        assert!(transformer.transform(item.clone()).is_none());
+
+        // Third item triggers batch emit
+        let result = transformer.transform(item);
+        assert!(result.is_some());
+        let batch = result.expect("batch should be emitted");
+        assert!(batch.is_array());
+        assert_eq!(batch.as_array().expect("batch should be an array").len(), 3);
+    }
+
+    #[test]
+    fn batch_transformer_returns_none_below_threshold() {
+        let transformer = BatchTransformer::new(5);
+        let item = serde_json::json!("test");
+
+        // Single item below threshold returns None
+        assert!(transformer.transform(item).is_none());
+    }
+
+    #[test]
+    fn batch_transformer_flush_returns_remaining() {
+        let transformer = BatchTransformer::new(10);
+        let item = serde_json::json!("data");
+
+        let _ = transformer.transform(item.clone());
+        let _ = transformer.transform(item.clone());
+        let _ = transformer.transform(item);
+
+        let flushed = transformer.flush();
+        assert!(flushed.is_some());
+        let batch = flushed.expect("flush should return items");
+        assert_eq!(
+            batch.as_array().expect("flush should return array").len(),
+            3
+        );
+    }
+
+    #[test]
+    fn batch_transformer_flush_empty_returns_none() {
+        let transformer = BatchTransformer::new(10);
+        assert!(transformer.flush().is_none());
+    }
+
+    #[test]
+    fn batch_transformer_size_one_emits_immediately() {
+        let transformer = BatchTransformer::new(1);
+        let result = transformer.transform(serde_json::json!("single"));
+        assert!(result.is_some());
+        let batch = result.expect("batch should be emitted");
+        assert_eq!(batch.as_array().expect("batch should be array").len(), 1);
+    }
+
+    #[test]
+    fn batch_transformer_size_zero_clamped_to_one() {
+        let transformer = BatchTransformer::new(0);
+        let result = transformer.transform(serde_json::json!("clamped"));
+        assert!(result.is_some());
+        let batch = result.expect("batch should be emitted immediately");
+        assert_eq!(batch.as_array().expect("batch should be array").len(), 1);
+    }
+
+    #[test]
+    fn batch_transformer_multiple_batches() {
+        let transformer = BatchTransformer::new(2);
+        let item = serde_json::json!("x");
+
+        // First batch
+        assert!(transformer.transform(item.clone()).is_none());
+        let batch1 = transformer.transform(item.clone());
+        assert!(batch1.is_some());
+        assert_eq!(
+            batch1
+                .expect("batch1")
+                .as_array()
+                .expect("batch1 array")
+                .len(),
+            2
+        );
+
+        // Second batch
+        assert!(transformer.transform(item.clone()).is_none());
+        let batch2 = transformer.transform(item);
+        assert!(batch2.is_some());
+        assert_eq!(
+            batch2
+                .expect("batch2")
+                .as_array()
+                .expect("batch2 array")
+                .len(),
+            2
+        );
+    }
+
+    #[test]
+    fn batch_transformer_clone_maintains_independent_buffer() {
+        let transformer = BatchTransformer::new(3);
+        let item = serde_json::json!("x");
+
+        let _ = transformer.transform(item);
+        let cloned = transformer.clone();
+
+        // Original has 1 item in buffer, cloned starts empty
+        let flushed_original = transformer.flush();
+        assert!(flushed_original.is_some());
+        assert_eq!(
+            flushed_original
+                .expect("original flush")
+                .as_array()
+                .expect("original flush array")
+                .len(),
+            1
+        );
+
+        assert!(cloned.flush().is_none());
     }
 }
