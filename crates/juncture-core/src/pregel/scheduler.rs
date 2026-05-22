@@ -798,10 +798,7 @@ pub fn schedule_error_handlers<S: State>(
 ///
 /// `Some(error_handler_name)` if an error handler is registered, `None` otherwise
 #[must_use]
-#[allow(
-    dead_code,
-    reason = "public API for external error handler introspection"
-)]
+#[allow(dead_code, reason = "tested via unit tests; public API awaiting external consumers")]
 pub fn get_error_handler_node(
     node_name: &str,
     error_handler_map: &std::collections::HashMap<String, String>,

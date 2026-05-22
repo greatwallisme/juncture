@@ -205,10 +205,6 @@ impl<S: State> SubgraphMount<S> {
 /// ensuring proper state isolation between concurrent subgraph executions.
 /// This uniqueness is guaranteed by [`SubgraphPersistence::Inherit`] mode,
 /// which generates a fresh UUID on every call to [`compute_child_namespace`].
-#[allow(
-    dead_code,
-    reason = "will be used when subgraph support is fully implemented"
-)]
 pub struct SubgraphNode<S: State, Sub: State> {
     /// Compiled subgraph to execute
     pub subgraph: Arc<crate::graph::CompiledGraph<Sub>>,
@@ -249,10 +245,6 @@ impl<S: State, Sub: State> std::fmt::Debug for SubgraphNode<S, Sub> {
 impl<S: State, Sub: State> SubgraphNode<S, Sub> {
     /// Create a new subgraph node
     #[must_use]
-    #[allow(
-        dead_code,
-        reason = "will be used when subgraph support is fully implemented"
-    )]
     #[allow(
         clippy::type_complexity,
         reason = "requires type erasure for trait object"

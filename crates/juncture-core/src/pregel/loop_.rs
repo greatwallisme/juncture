@@ -1810,10 +1810,6 @@ impl<S: State> PregelLoop<S> {
     ///
     /// Returns a clone of the current delta counters so the checkpoint carries an
     /// accurate snapshot of write activity since the last full snapshot.
-    #[allow(
-        dead_code,
-        reason = "used by checkpoint delta snapshot logic (B-04-003)"
-    )]
     fn build_checkpoint_delta_counters(&self) -> HashMap<String, DeltaCounters> {
         self.delta_counters.clone()
     }
@@ -1824,10 +1820,7 @@ impl<S: State> PregelLoop<S> {
     /// If any field's update count exceeds its frequency, returns `true` to
     /// indicate that a full snapshot is needed. Non-DeltaChannel fields are
     /// excluded from this decision since they always snapshot fully.
-    #[allow(
-        dead_code,
-        reason = "used by checkpoint delta snapshot logic (B-04-003)"
-    )]
+    #[allow(dead_code, reason = "wired only in tests; needs integration into save_superstep_checkpoint")]
     fn should_take_full_snapshot(&self) -> bool {
         let specs = S::delta_channel_specs();
         if specs.is_empty() {
@@ -1849,10 +1842,6 @@ impl<S: State> PregelLoop<S> {
     }
 
     /// Reset delta counters after a full snapshot checkpoint has been saved.
-    #[allow(
-        dead_code,
-        reason = "used by checkpoint delta snapshot logic (B-04-003)"
-    )]
     fn reset_delta_counters(&mut self) {
         self.delta_counters.clear();
     }

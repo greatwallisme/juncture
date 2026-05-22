@@ -57,7 +57,6 @@ pub struct ChatOllama {
     top_p: Option<f32>,
 
     /// Whether to stream responses by default.
-    #[allow(dead_code, reason = "Reserved for future streaming feature")]
     stream: bool,
 }
 
@@ -459,7 +458,6 @@ struct OllamaOptions {
 
 /// Ollama API response format.
 #[derive(Debug, Deserialize)]
-#[allow(dead_code, reason = "API response fields for future use")]
 struct OllamaResponse {
     message: OllamaResponseMessage,
     #[serde(default)]
@@ -469,7 +467,6 @@ struct OllamaResponse {
 /// Ollama API response message.
 #[derive(Debug, Deserialize)]
 struct OllamaResponseMessage {
-    #[allow(dead_code, reason = "API response field for future use")]
     role: String,
     content: String,
 }

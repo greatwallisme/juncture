@@ -626,7 +626,6 @@ enum OpenAIToolChoice {
 
 /// `OpenAI` API response format.
 #[derive(Debug, Deserialize)]
-#[allow(dead_code, reason = "API response fields for future use")]
 struct OpenAIResponse {
     choices: Vec<OpenAIChoice>,
     usage: Option<TokenUsage>,
@@ -640,7 +639,6 @@ struct OpenAIChoice {
 
 /// `OpenAI` API response message.
 #[derive(Debug, Deserialize)]
-#[allow(dead_code, reason = "API response fields for future use")]
 struct OpenAIResponseMessage {
     role: String,
     content: Option<String>,
@@ -801,7 +799,6 @@ fn convert_api_response(response: &OpenAIResponse) -> Result<Message, LlmError> 
 
 /// `OpenAI` SSE chunk format.
 #[derive(Debug, Deserialize)]
-#[allow(dead_code, reason = "SSE response fields for future use")]
 struct OpenAISSEChunk {
     id: String,
     object: String,
@@ -813,7 +810,6 @@ struct OpenAISSEChunk {
 
 /// `OpenAI` SSE choice chunk.
 #[derive(Debug, Deserialize)]
-#[allow(dead_code, reason = "SSE choice fields for future use")]
 struct OpenAIChoiceChunk {
     index: usize,
     delta: OpenAIDelta,
@@ -822,7 +818,6 @@ struct OpenAIChoiceChunk {
 
 /// `OpenAI` SSE delta.
 #[derive(Debug, Deserialize)]
-#[allow(dead_code, reason = "SSE delta fields for future use")]
 struct OpenAIDelta {
     role: Option<String>,
     content: Option<String>,
@@ -831,7 +826,6 @@ struct OpenAIDelta {
 
 /// `OpenAI` SSE tool call chunk.
 #[derive(Debug, Deserialize)]
-#[allow(dead_code, reason = "SSE tool call fields for future use")]
 struct OpenAIToolCallChunk {
     index: usize,
     id: Option<String>,

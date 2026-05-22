@@ -633,7 +633,6 @@ enum AnthropicContent {
 /// Anthropic API content block.
 #[derive(Debug, Serialize)]
 #[serde(tag = "type")]
-#[allow(dead_code, reason = "ToolResult used for API compatibility")]
 enum ContentBlock {
     #[serde(rename = "text")]
     Text { text: String },
@@ -684,7 +683,6 @@ enum AnthropicToolChoice {
 
 /// Anthropic API response format.
 #[derive(Debug, Deserialize)]
-#[allow(dead_code, reason = "API response fields for future use")]
 struct AnthropicResponse {
     id: String,
     role: String,
@@ -842,7 +840,6 @@ fn convert_role_to_anthropic(role: &Role) -> &'static str {
 /// Anthropic SSE event type during streaming.
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type")]
-#[allow(dead_code, reason = "SSE event fields for future use")]
 enum AnthropicSSEEvent {
     #[serde(rename = "message_start")]
     MessageStart,
@@ -876,7 +873,6 @@ struct DeltaContent {
 
 /// Delta message in SSE events.
 #[derive(Debug, Deserialize)]
-#[allow(dead_code, reason = "Delta message fields for future use")]
 struct DeltaMessage {
     stop_reason: Option<String>,
     stop_sequence: Option<String>,
