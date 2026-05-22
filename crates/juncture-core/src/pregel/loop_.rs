@@ -707,7 +707,6 @@ impl<S: State> PregelLoop<S> {
     /// loop.after_tick(result).await?;
     /// ```
     #[expect(
-        clippy::cognitive_complexity,
         clippy::too_many_lines,
         reason = "after_tick requires multiple steps: apply writes, bump versions, emit events, compute tasks, drain interrupts, check interrupts, finish channels, increment step"
     )]
