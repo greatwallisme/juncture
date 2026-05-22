@@ -231,7 +231,7 @@ pub use pregel::{
     StreamEvent as PregelStreamEvent, SuperstepResult, SyncAsyncFuture, TaskOutput, TaskTrigger,
     TimeoutPolicy, TriggerToNodes, apply_writes, compute_next_tasks, execute_superstep,
 };
-pub use runtime::{ExecutionInfo, Heartbeat, ManagedValues, RunControl, Runtime, RuntimeStore};
+pub use runtime::{ExecutionInfo, Heartbeat, HeartbeatWatcher, ManagedValues, RunControl, Runtime, RuntimeStore};
 pub use send::Send;
 pub use state::{
     AnyValueReducer, AppendReducer, Channel, Content, ContentPart, CowState, DeltaBlob,

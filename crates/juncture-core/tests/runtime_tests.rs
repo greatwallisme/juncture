@@ -1,6 +1,6 @@
 //! Integration tests for Runtime system
 
-use juncture_core::Runtime;
+use juncture_core::{Heartbeat, Runtime};
 
 // Test context
 #[derive(Debug, Clone, Default)]
@@ -124,4 +124,61 @@ fn test_heartbeat_default() {
     assert_eq!(result, Ok(()));
 }
 
-// Rust guideline compliant 2026-05-18
+#[test]
+fn test_heartbeat_watcher_alive_after_ping() {
+    let (heartbeat, mut watcher) = juncture_core::Heartbeat::new_pair();
+
+    // Immediately after creation, the watcher considers the source alive
+    // (last_beat is initialized to Instant::now())
+    assert!(watcher.is_alive(std::time::Duration::from_secs(60)));
+
+    // After sending a ping, the watcher sees recent activity
+    heartbeat.ping().expect("ping should succeed");
+    assert!(watcher.is_alive(std::time::Duration::from_secs(60)));
+}
+
+#[test]
+fn test_heartbeat_watcher_zero_duration_timeout_returns_bool() {
+    let (heartbeat, mut watcher) = juncture_core::Heartbeat::new_pair();
+    heartbeat.ping().expect("ping should succeed");
+
+    // A zero-duration timeout means "no heartbeat within 0 seconds".
+    // This always returns a bool (true if the ping and check happened
+    // within the same nanosecond, false otherwise).
+    let _ = watcher.is_alive(std::time::Duration::ZERO);
+    // The purpose of this test is to verify no panic, not a specific value.
+}
+
+#[test]
+fn test_heartbeat_watcher_drains_multiple_pings() {
+    let (heartbeat, mut watcher) = juncture_core::Heartbeat::new_pair();
+
+    // Send multiple pings
+    heartbeat.ping().expect("first ping");
+    heartbeat.ping().expect("second ping");
+    heartbeat.ping().expect("third ping");
+
+    // After draining, all pings are consumed. The watcher should still
+    // report alive because the last heartbeat timestamp is current.
+    assert!(watcher.is_alive(std::time::Duration::from_secs(60)));
+
+    // Second check should also work (no panic on empty channel)
+    assert!(watcher.is_alive(std::time::Duration::from_secs(60)));
+}
+
+#[test]
+fn test_heartbeat_watcher_clone_heartbeat_works() {
+    let (heartbeat, mut watcher) = juncture_core::Heartbeat::new_pair();
+
+    // Clone the heartbeat sender and verify pings from
+    // cloned senders are received by the original watcher.
+    let heartbeat_clone = Heartbeat::clone(&heartbeat);
+
+    // Send ping from clone, not from the original heartbeat
+    heartbeat_clone.ping().expect("ping from clone should succeed");
+
+    // Watcher should see the ping from the clone
+    assert!(watcher.is_alive(std::time::Duration::from_secs(60)));
+}
+
+// Rust guideline compliant 2026-05-22

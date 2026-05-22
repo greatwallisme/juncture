@@ -15,7 +15,7 @@ use crate::observability::{
 };
 use crate::pregel::BudgetConfig;
 use crate::pregel::Durability;
-use crate::runtime::RuntimeStore;
+use crate::runtime::{Heartbeat, RuntimeStore};
 
 /// Configuration for graph execution
 #[derive(Clone, Default)]
@@ -98,6 +98,13 @@ pub struct RunnableConfig {
 
     /// LLM response cache policy for controlling key generation and TTL
     pub llm_cache_policy: Option<LlmCachePolicy>,
+
+    /// Optional heartbeat sender for long-running node liveness signals
+    ///
+    /// When set by the execution engine, nodes can call
+    /// `config.heartbeat.as_ref().map(Heartbeat::ping)` periodically
+    /// to prevent idle timeout detection.
+    pub heartbeat: Option<Heartbeat>,
 }
 
 impl std::fmt::Debug for RunnableConfig {
@@ -148,6 +155,10 @@ impl std::fmt::Debug for RunnableConfig {
                 "llm_cache_policy",
                 &self.llm_cache_policy.as_ref().map(|_| "<CachePolicy>"),
             )
+            .field(
+                "heartbeat",
+                &self.heartbeat.as_ref().map(|_| "<Heartbeat>"),
+            )
             .finish()
     }
 }
@@ -159,6 +170,7 @@ impl RunnableConfig {
         Self {
             recursion_limit: 25,
             max_parallel_tasks: 100,
+            heartbeat: None,
             ..Default::default()
         }
     }
@@ -472,6 +484,7 @@ mod tests {
         assert!(config.budget.is_none());
         assert!(config.durability.is_none());
         assert!(config.resume_value.is_none());
+        assert!(config.heartbeat.is_none());
     }
 
     #[test]

@@ -10,6 +10,7 @@ use crate::{
     interrupt::{InterruptContext, InterruptSignal, ResumeValue, Scratchpad},
     pregel::context::TimeoutPolicy,
     pregel::types::{PendingTask, SuperstepResult, TaskOutput},
+    runtime::Heartbeat,
 };
 use std::collections::HashMap;
 use std::{sync::Arc, time::Instant};
@@ -155,7 +156,7 @@ where
 
         let task_state = task.state_override.clone().unwrap_or_else(|| state.clone());
 
-        let task_config = config.clone();
+        let mut task_config = config.clone();
         let task_id = task.id.clone();
         let node_name = task.node_name.clone();
         let task_trigger = task.trigger.clone();
@@ -169,6 +170,19 @@ where
 
         // Extract per-node timeout policy (if any) before moving into the async block
         let timeout_policy = timeout_policies.get(&task.node_name).cloned();
+
+        // Create a per-task heartbeat watcher when idle_timeout is configured.
+        // The heartbeat sender is stored in the task_config so nodes with config
+        // access can call `config.heartbeat.as_ref().map(|h| h.ping())` to signal
+        // liveness. The watcher is moved into the spawned future for idle timeout
+        // monitoring alongside the node execution.
+        let idle_watcher = timeout_policy.as_ref().and_then(|tp| {
+            tp.idle_timeout.map(|_| {
+                let (heartbeat, watcher) = Heartbeat::new_pair();
+                task_config.heartbeat = Some(heartbeat);
+                watcher
+            })
+        });
 
         // Extract callback handler separately so it can be used after task_config
         // is moved into the async block for node.call()
@@ -216,12 +230,15 @@ where
                 // Layering order (outermost to innermost):
                 //   1. cancellation (tokio::select!)
                 //   2. timeout (tokio::time::timeout, when configured)
-                //   3. retry (execute_with_retry, when configured)
-                //   4. interrupt context (INTERRUPT_CONTEXT.scope)
-                //   5. node.call()
+                //   3. idle timeout (heartbeat-based, when configured)
+                //   4. retry (execute_with_retry, when configured)
+                //   5. interrupt context (INTERRUPT_CONTEXT.scope)
+                //   6. node.call()
                 //
                 // The timeout wraps the entire retry sequence so that cumulative
-                // retry time is bounded by the run_timeout.
+                // retry time is bounded by the run_timeout. The idle timeout
+                // runs concurrently with the node execution and fires when no
+                // heartbeat is received within the configured idle timeout.
                 let result = tokio::select! {
                     biased;
                     () = token.cancelled() => {
@@ -263,22 +280,60 @@ where
                         };
 
                         // Wrap with timeout when a timeout policy is configured.
-                        // The timeout bounds the entire execution (including retries).
+                        // When idle_timeout is also configured, the task wraps
+                        // with idle timeout monitoring that checks heartbeats.
                         if let Some(ref tp) = timeout_policy {
-                            tokio::time::timeout(tp.run_timeout, inner_future)
+
+                            let timeout_result = if let (Some(idle_to), Some(mut watcher)) = (
+                                tp.idle_timeout,
+                                idle_watcher,
+                            ) {
+                                // With both run_timeout and idle_timeout.
+                                // The idle timeout wraps the execution: if no
+                                // heartbeat is received within idle_to, the
+                                // task is considered stale.
+                                let to_name = timeout_node_name.clone();
+                                tokio::time::timeout(tp.run_timeout, async move {
+                                    tokio::pin!(inner_future);
+                                    loop {
+                                        tokio::select! {
+                                            result = &mut inner_future => return result,
+                                            () = tokio::time::sleep(idle_to) => {
+                                                if !watcher.is_alive(idle_to) {
+                                                    return Err(
+                                                        crate::JunctureError::node_timeout(
+                                                            crate::error::NodeTimeoutError::IdleTimeout {
+                                                                node: to_name,
+                                                                timeout: u64::try_from(
+                                                                    idle_to.as_millis(),
+                                                                ).unwrap_or(u64::MAX),
+                                                            },
+                                                        ),
+                                                    );
+                                                }
+                                            }
+                                        }
+                                    }
+                                })
                                 .await
-                                .map_or_else(
-                                    |_| {
-                                        Err(crate::JunctureError::node_timeout(
-                                            crate::error::NodeTimeoutError::RunTimeout {
-                                                node: timeout_node_name,
-                                                timeout: u64::try_from(tp.run_timeout.as_millis())
-                                                    .unwrap_or(u64::MAX),
-                                            },
-                                        ))
-                                    },
-                                    std::convert::identity,
-                                )
+                            } else {
+                                // Standard run_timeout without idle monitoring
+                                tokio::time::timeout(tp.run_timeout, inner_future)
+                                    .await
+                            };
+
+                            timeout_result.map_or_else(
+                                |_| {
+                                    Err(crate::JunctureError::node_timeout(
+                                        crate::error::NodeTimeoutError::RunTimeout {
+                                            node: timeout_node_name,
+                                            timeout: u64::try_from(tp.run_timeout.as_millis())
+                                                .unwrap_or(u64::MAX),
+                                        },
+                                    ))
+                                },
+                                std::convert::identity,
+                            )
                         } else {
                             inner_future.await
                         }

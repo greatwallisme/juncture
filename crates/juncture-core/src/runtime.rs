@@ -3,6 +3,7 @@
 //! The runtime provides external dependencies and execution metadata to nodes.
 
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 /// Execution context for graph nodes
 ///
@@ -71,11 +72,10 @@ impl<C: Clone + Send + Sync + 'static> Runtime<C> {
     where
         C: Default,
     {
-        let (heartbeat_tx, _heartbeat_rx) = tokio::sync::mpsc::unbounded_channel();
         Self {
             context: C::default(),
             store: None,
-            heartbeat: Heartbeat::new(heartbeat_tx),
+            heartbeat: Heartbeat::default(),
             previous: None,
             execution_info: None,
             control: None,
@@ -85,11 +85,10 @@ impl<C: Clone + Send + Sync + 'static> Runtime<C> {
     /// Create a new runtime with custom context
     #[must_use]
     pub fn with_context(context: C) -> Self {
-        let (heartbeat_tx, _heartbeat_rx) = tokio::sync::mpsc::unbounded_channel();
         Self {
             context,
             store: None,
-            heartbeat: Heartbeat::new(heartbeat_tx),
+            heartbeat: Heartbeat::default(),
             previous: None,
             execution_info: None,
             control: None,
@@ -143,21 +142,35 @@ pub trait RuntimeStore: Send + Sync + 'static + std::fmt::Debug {}
 ///
 /// Nodes can send heartbeats to indicate they are still active,
 /// preventing idle timeout detection. The heartbeat carries an
-/// unbounded channel sender that signals the runtime's idle-timeout
+/// unbounded channel sender that signals the engine's idle-timeout
 /// watchdog each time `ping()` is called.
+///
+/// Create paired heartbeat and watcher with [`Heartbeat::new_pair`]:
+///
+/// ```ignore
+/// use juncture_core::Heartbeat;
+/// use std::time::Duration;
+///
+/// let (heartbeat, mut watcher) = Heartbeat::new_pair();
+/// heartbeat.ping().unwrap();
+/// assert!(watcher.is_alive(Duration::from_secs(10)));
+/// ```
 pub struct Heartbeat {
     tx: tokio::sync::mpsc::UnboundedSender<()>,
-    // Keep the receiver alive so ping() doesn't fail when using
-    // the default constructor (the runtime's idle-timeout watcher
-    // replaces this with its own receiver).
-    _rx: std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<()>>>,
+    // Keeps the channel alive when no watcher is attached.
+    // The receiver is stored only by the original (non-cloned) Heartbeat.
+    // When dropped, all cloned senders will also fail on ping.
+    _rx: Option<tokio::sync::mpsc::UnboundedReceiver<()>>,
 }
 
 impl Clone for Heartbeat {
     fn clone(&self) -> Self {
         Self {
             tx: self.tx.clone(),
-            _rx: std::sync::Mutex::new(None),
+            // Only the original Heartbeat keeps the receiver alive.
+            // Cloned senders still work because the original's receiver
+            // keeps the channel open.
+            _rx: None,
         }
     }
 }
@@ -174,17 +187,26 @@ impl Heartbeat {
     /// Create a new heartbeat from an unbounded sender
     #[must_use]
     pub const fn new(tx: tokio::sync::mpsc::UnboundedSender<()>) -> Self {
-        Self {
-            tx,
-            _rx: std::sync::Mutex::new(None),
-        }
+        Self { tx, _rx: None }
+    }
+
+    /// Create a paired heartbeat sender and watcher
+    ///
+    /// Returns a `(Heartbeat, HeartbeatWatcher)` pair connected
+    /// by an unbounded channel. The watcher can detect staleness
+    /// by checking whether heartbeats arrived within the idle timeout.
+    #[must_use]
+    pub fn new_pair() -> (Self, HeartbeatWatcher) {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let watcher = HeartbeatWatcher::new(rx);
+        (Self { tx, _rx: None }, watcher)
     }
 
     /// Send a heartbeat signal
     ///
     /// # Errors
     ///
-    /// Returns `Err` if the receiver has been dropped (runtime shutdown).
+    /// Returns `Err` if the receiver has been dropped (engine shutdown).
     pub fn ping(&self) -> Result<(), tokio::sync::mpsc::error::SendError<()>> {
         self.tx.send(())
     }
@@ -195,8 +217,70 @@ impl Default for Heartbeat {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         Self {
             tx,
-            _rx: std::sync::Mutex::new(Some(rx)),
+            _rx: Some(rx),
         }
+    }
+}
+
+/// Watches heartbeats and detects staleness for idle timeout detection
+///
+/// The watcher receives heartbeat signals from a paired [`Heartbeat`]
+/// sender. Call [`is_alive`](Self::is_alive) to check whether a
+/// heartbeat was received within the specified idle timeout duration.
+///
+/// # Examples
+///
+/// ```ignore
+/// use juncture_core::Heartbeat;
+/// use std::time::Duration;
+///
+/// let (heartbeat, mut watcher) = Heartbeat::new_pair();
+///
+/// // Immediately after creation, the watcher considers the source alive
+/// assert!(watcher.is_alive(Duration::from_secs(60)));
+///
+/// // After sending a heartbeat and checking with a short timeout
+/// heartbeat.ping().unwrap();
+/// assert!(watcher.is_alive(Duration::from_secs(10)));
+/// ```
+pub struct HeartbeatWatcher {
+    rx: tokio::sync::mpsc::UnboundedReceiver<()>,
+    last_beat: std::time::Instant,
+}
+
+impl std::fmt::Debug for HeartbeatWatcher {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HeartbeatWatcher")
+            .field("last_beat", &self.last_beat)
+            .finish_non_exhaustive()
+    }
+}
+
+impl HeartbeatWatcher {
+    /// Create a new heartbeat watcher from an unbounded receiver
+    #[must_use]
+    pub fn new(rx: tokio::sync::mpsc::UnboundedReceiver<()>) -> Self {
+        Self {
+            rx,
+            last_beat: std::time::Instant::now(),
+        }
+    }
+
+    /// Check if the watched heartbeat source is still alive
+    ///
+    /// Drains any pending heartbeat signals and returns `true` if
+    /// at least one heartbeat was received within `idle_timeout`.
+    /// Returns `false` if no heartbeat was received within the
+    /// idle timeout duration.
+    ///
+    /// This is a non-blocking check.
+    #[must_use]
+    pub fn is_alive(&mut self, idle_timeout: Duration) -> bool {
+        // Drain all pending heartbeats and update the last beat timestamp
+        while self.rx.try_recv().is_ok() {
+            self.last_beat = std::time::Instant::now();
+        }
+        self.last_beat.elapsed() < idle_timeout
     }
 }
 
@@ -306,4 +390,4 @@ impl Default for RunControl {
     }
 }
 
-// Rust guideline compliant 2025-01-18
+// Rust guideline compliant 2026-05-22
