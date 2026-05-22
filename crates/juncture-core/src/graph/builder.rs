@@ -8,6 +8,7 @@ use crate::{
     State,
     edge::{CompiledEdge, END, Edge, START, TriggerSource},
     node::IntoNode,
+    state::{FromState, IntoState},
 };
 use indexmap::IndexMap;
 use std::collections::HashMap;
@@ -633,7 +634,7 @@ where
 /// let compiled = graph.compile()?;
 /// # Ok::<(), juncture_core::graph::TopologyError>(())
 /// ```
-pub struct StateGraph<S: State> {
+pub struct StateGraph<S: State, I: IntoState<S> = S, O: FromState<S> = S> {
     /// Registered nodes in the graph
     nodes: IndexMap<String, Arc<dyn crate::Node<S>>>,
 
@@ -651,9 +652,14 @@ pub struct StateGraph<S: State> {
 
     /// Mounted subgraphs
     subgraphs: Vec<crate::subgraph::SubgraphMount<S>>,
+
+    /// Marker for input type
+    _input: std::marker::PhantomData<I>,
+    /// Marker for output type
+    _output: std::marker::PhantomData<O>,
 }
 
-impl<S: State> std::fmt::Debug for StateGraph<S> {
+impl<S: State, I: IntoState<S>, O: FromState<S>> std::fmt::Debug for StateGraph<S, I, O> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("StateGraph")
             .field("nodes", &format_args!("{} nodes", self.nodes.len()))
@@ -669,7 +675,7 @@ impl<S: State> std::fmt::Debug for StateGraph<S> {
     }
 }
 
-impl<S: State> StateGraph<S> {
+impl<S: State, I: IntoState<S>, O: FromState<S>> StateGraph<S, I, O> {
     /// Create a new empty graph
     #[must_use]
     pub fn new() -> Self {
@@ -680,6 +686,8 @@ impl<S: State> StateGraph<S> {
             finish_points: Vec::new(),
             builder_metadata: IndexMap::new(),
             subgraphs: Vec::new(),
+            _input: std::marker::PhantomData,
+            _output: std::marker::PhantomData,
         }
     }
 
@@ -1240,7 +1248,7 @@ impl<S: State> StateGraph<S> {
     /// ```ignore
     /// let compiled = graph.compile()?;
     /// ```
-    pub fn compile(&self) -> Result<CompiledGraph<S>, TopologyError> {
+    pub fn compile(&self) -> Result<CompiledGraph<S, I, O>, TopologyError> {
         self.compile_inner(CompileConfig::default(), None)
     }
 
@@ -1268,7 +1276,7 @@ impl<S: State> StateGraph<S> {
     pub fn compile_with_config(
         &self,
         config: CompileConfig,
-    ) -> Result<CompiledGraph<S>, TopologyError> {
+    ) -> Result<CompiledGraph<S, I, O>, TopologyError> {
         self.compile_inner(config, None)
     }
 
@@ -1280,7 +1288,7 @@ impl<S: State> StateGraph<S> {
     /// # Errors
     ///
     /// Returns [`TopologyError`] if validation fails.
-    pub fn compile_ephemeral(&self) -> Result<CompiledGraph<S>, TopologyError> {
+    pub fn compile_ephemeral(&self) -> Result<CompiledGraph<S, I, O>, TopologyError> {
         self.compile_inner(CompileConfig::default(), None)
     }
 
@@ -1295,7 +1303,7 @@ impl<S: State> StateGraph<S> {
     pub fn compile_with_checkpointer(
         &self,
         checkpointer: Option<Arc<dyn crate::checkpoint::CheckpointSaver>>,
-    ) -> Result<CompiledGraph<S>, TopologyError> {
+    ) -> Result<CompiledGraph<S, I, O>, TopologyError> {
         self.compile_inner(CompileConfig::default(), checkpointer)
     }
 
@@ -1307,7 +1315,7 @@ impl<S: State> StateGraph<S> {
         &self,
         config: CompileConfig,
         checkpointer: Option<Arc<dyn crate::checkpoint::CheckpointSaver>>,
-    ) -> Result<CompiledGraph<S>, TopologyError> {
+    ) -> Result<CompiledGraph<S, I, O>, TopologyError> {
         // Validate topology
         TopologyValidator::validate(&self.nodes, &self.edges, self.entry_point.as_deref())?;
 
@@ -1398,7 +1406,7 @@ impl<S: State> StateGraph<S> {
     }
 }
 
-impl<S: State> Default for StateGraph<S> {
+impl<S: State, I: IntoState<S>, O: FromState<S>> Default for StateGraph<S, I, O> {
     fn default() -> Self {
         Self::new()
     }

@@ -14,6 +14,7 @@ use crate::{
     edge::TriggerTable,
     interrupt::ResumeValue,
     pregel::PregelLoop,
+    state::{FromState, IntoState},
     stream::{EventEmitter, StreamEvent, StreamMode},
 };
 use futures::Stream;
@@ -128,11 +129,13 @@ impl<S: State> StreamHandle<S> {
 /// # Ok::<(), juncture_core::JunctureError>(())
 /// ```
 #[derive(Clone)]
-pub struct CompiledGraph<S: State> {
+pub struct CompiledGraph<S: State, I: IntoState<S> = S, O: FromState<S> = S> {
     inner: Arc<CompiledGraphInner<S>>,
+    _input: std::marker::PhantomData<I>,
+    _output: std::marker::PhantomData<O>,
 }
 
-impl<S: State> std::fmt::Debug for CompiledGraph<S> {
+impl<S: State, I: IntoState<S>, O: FromState<S>> std::fmt::Debug for CompiledGraph<S, I, O> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("CompiledGraph")
             .field("node_count", &self.inner.nodes.len())
@@ -141,7 +144,7 @@ impl<S: State> std::fmt::Debug for CompiledGraph<S> {
     }
 }
 
-impl<S: State> CompiledGraph<S> {
+impl<S: State, I: IntoState<S>, O: FromState<S>> CompiledGraph<S, I, O> {
     /// Create a new compiled graph
     #[must_use]
     pub(crate) fn new(
@@ -163,6 +166,8 @@ impl<S: State> CompiledGraph<S> {
                 interrupt_after,
                 subgraphs,
             }),
+            _input: std::marker::PhantomData,
+            _output: std::marker::PhantomData,
         }
     }
 
@@ -232,10 +237,11 @@ impl<S: State> CompiledGraph<S> {
     /// let output = compiled.invoke(initial_state, &config)?;
     /// let final_state = output.value;
     /// ```
-    pub fn invoke(&self, input: S, config: &RunnableConfig) -> Result<GraphOutput<S>, JunctureError>
+    pub fn invoke(&self, input: I, config: &RunnableConfig) -> Result<GraphOutput<S, O>, JunctureError>
     where
         S: serde::Serialize,
         S::Update: serde::Serialize,
+        O: FromState<S>,
     {
         let effective = self.effective_config(config);
 
@@ -262,12 +268,13 @@ impl<S: State> CompiledGraph<S> {
     /// ```
     pub async fn invoke_async(
         &self,
-        input: S,
+        input: I,
         config: &RunnableConfig,
-    ) -> Result<GraphOutput<S>, JunctureError>
+    ) -> Result<GraphOutput<S, O>, JunctureError>
     where
         S: serde::Serialize,
         S::Update: serde::Serialize,
+        O: FromState<S>,
     {
         let effective = self.effective_config(config);
         self.invoke_async_inner(input, &effective).await
@@ -276,12 +283,13 @@ impl<S: State> CompiledGraph<S> {
     /// Core async invocation used by both `invoke` (blocking) and `invoke_async`.
     async fn invoke_async_inner(
         &self,
-        input: S,
+        input: I,
         config: &RunnableConfig,
-    ) -> Result<GraphOutput<S>, JunctureError>
+    ) -> Result<GraphOutput<S, O>, JunctureError>
     where
         S: serde::Serialize,
         S::Update: serde::Serialize,
+        O: FromState<S>,
     {
         // Maximum number of fields supported (u64 bitmask in FieldsChanged)
         let num_fields = 64;
@@ -289,9 +297,12 @@ impl<S: State> CompiledGraph<S> {
         // Extract error handler map from builder metadata
         let error_handler_map = self.build_error_handler_map();
 
+        // Convert input type I into state type S
+        let state_input = input.into_state();
+
         // Create Pregel loop
         let mut pregel = PregelLoop::with_error_handlers(
-            input,
+            state_input,
             self.inner.nodes.clone(),
             self.inner.trigger_table.clone(),
             config.clone(),
@@ -309,11 +320,13 @@ impl<S: State> CompiledGraph<S> {
         let steps = pregel.step();
         let run_id = pregel.run_id().to_string();
 
-        // Return final state
+        // Return final state with extracted output
         let final_state = pregel.into_state();
+        let output = O::from_state(&final_state);
 
         Ok(GraphOutput {
             value: final_state,
+            output,
             interrupts: Vec::new(),
             metadata: GraphOutputMetadata {
                 steps,
@@ -373,7 +386,7 @@ impl<S: State> CompiledGraph<S> {
     /// ```
     pub async fn stream(
         &self,
-        input: S,
+        input: I,
         config: &RunnableConfig,
         mode: StreamMode,
     ) -> Result<StreamHandle<S>, JunctureError>
@@ -451,7 +464,7 @@ impl<S: State> CompiledGraph<S> {
     )]
     pub async fn stream_with_config(
         &self,
-        input: S,
+        input: I,
         config: &RunnableConfig,
         stream_config: crate::stream::StreamConfig,
     ) -> Result<StreamHandle<S>, JunctureError>
@@ -478,8 +491,9 @@ impl<S: State> CompiledGraph<S> {
         let error_handler_map = self.build_error_handler_map();
 
         // Create Pregel loop
+        let state_input = input.into_state();
         let mut pregel = PregelLoop::with_error_handlers(
-            input,
+            state_input,
             self.inner.nodes.clone(),
             self.inner.trigger_table.clone(),
             effective,
@@ -810,10 +824,11 @@ impl<S: State> CompiledGraph<S> {
         &self,
         config: &RunnableConfig,
         resume_value: ResumeValue,
-    ) -> Result<GraphOutput<S>, JunctureError>
+    ) -> Result<GraphOutput<S, O>, JunctureError>
     where
         S: for<'de> serde::Deserialize<'de> + serde::Serialize,
         S::Update: serde::Serialize,
+        O: FromState<S>,
     {
         let checkpointer =
             self.inner.checkpointer.as_ref().ok_or_else(|| {
@@ -878,11 +893,13 @@ impl<S: State> CompiledGraph<S> {
         let steps = pregel.step();
         let run_id = pregel.run_id().to_string();
 
-        // Return final state
+        // Return final state with extracted output
         let final_state = pregel.into_state();
+        let output = O::from_state(&final_state);
 
         Ok(GraphOutput {
             value: final_state,
+            output,
             interrupts: Vec::new(),
             metadata: GraphOutputMetadata {
                 steps,
@@ -921,10 +938,11 @@ impl<S: State> CompiledGraph<S> {
         &self,
         config: &RunnableConfig,
         value: serde_json::Value,
-    ) -> Result<GraphOutput<S>, JunctureError>
+    ) -> Result<GraphOutput<S, O>, JunctureError>
     where
         S: for<'de> serde::Deserialize<'de> + serde::Serialize,
         S::Update: serde::Serialize,
+        O: FromState<S>,
     {
         self.resume(config, ResumeValue::Single(value)).await
     }
@@ -1634,11 +1652,15 @@ struct CompiledGraphInner<S: State> {
 
 /// Output from graph execution
 ///
-/// Contains the final state, any interrupts, and execution metadata.
+/// Contains the final output (extracted via [`FromState`]), any interrupts,
+/// and execution metadata.
 #[derive(Debug)]
-pub struct GraphOutput<S: State> {
+pub struct GraphOutput<S: State, O: FromState<S> = S> {
     /// Final state value
     pub value: S,
+
+    /// Output value extracted from state via `FromState`
+    pub output: O,
 
     /// Interrupt information if execution was interrupted
     pub interrupts: Vec<InterruptInfo>,
@@ -1779,7 +1801,7 @@ mod tests {
         let trigger_table = TriggerTable::new();
         let builder_metadata = IndexMap::new();
 
-        let compiled = CompiledGraph::new(
+        let compiled: CompiledGraph<StateDummy> = CompiledGraph::new(
             nodes,
             trigger_table,
             builder_metadata,
@@ -1805,7 +1827,7 @@ mod tests {
             },
         );
 
-        let compiled = CompiledGraph::new(
+        let compiled: CompiledGraph<StateDummy> = CompiledGraph::new(
             nodes,
             trigger_table,
             IndexMap::new(),
@@ -1834,7 +1856,7 @@ mod tests {
             },
         );
 
-        let compiled = CompiledGraph::new(
+        let compiled: CompiledGraph<StateDummy> = CompiledGraph::new(
             nodes,
             trigger_table,
             IndexMap::new(),
@@ -1863,7 +1885,7 @@ mod tests {
             },
         );
 
-        let compiled = CompiledGraph::new(
+        let compiled: CompiledGraph<StateDummy> = CompiledGraph::new(
             nodes,
             trigger_table,
             IndexMap::new(),
@@ -1884,7 +1906,7 @@ mod tests {
         let mut nodes: IndexMap<String, Arc<dyn crate::Node<StateDummy>>> = IndexMap::new();
         nodes.insert("a".to_string(), mock_node("a"));
 
-        let compiled = CompiledGraph::new(
+        let compiled: CompiledGraph<StateDummy> = CompiledGraph::new(
             nodes,
             TriggerTable::new(),
             IndexMap::new(),
@@ -1905,7 +1927,7 @@ mod tests {
         let mut nodes: IndexMap<String, Arc<dyn crate::Node<StateDummy>>> = IndexMap::new();
         nodes.insert("a".to_string(), mock_node("a"));
 
-        let compiled = CompiledGraph::new(
+        let compiled: CompiledGraph<StateDummy> = CompiledGraph::new(
             nodes,
             TriggerTable::new(),
             IndexMap::new(),
@@ -1952,7 +1974,7 @@ mod tests {
             },
         ];
 
-        let compiled = CompiledGraph::new(
+        let compiled: CompiledGraph<StateDummy> = CompiledGraph::new(
             nodes,
             TriggerTable::new(),
             IndexMap::new(),
@@ -1975,7 +1997,7 @@ mod tests {
         let mut nodes: IndexMap<String, Arc<dyn crate::Node<StateDummy>>> = IndexMap::new();
         nodes.insert("a".to_string(), mock_node("a"));
 
-        let compiled = CompiledGraph::new(
+        let compiled: CompiledGraph<StateDummy> = CompiledGraph::new(
             nodes,
             TriggerTable::new(),
             IndexMap::new(),
@@ -2078,7 +2100,7 @@ mod tests {
             nodes
         };
 
-        let compiled = CompiledGraph::new(
+        let compiled: CompiledGraph<StateDummy> = CompiledGraph::new(
             nodes.clone(),
             TriggerTable::new(),
             IndexMap::new(),
@@ -2105,7 +2127,7 @@ mod tests {
         assert!(err.to_string().contains("Input"));
 
         // Test with Loop source (should fail)
-        let compiled = CompiledGraph::new(
+        let compiled: CompiledGraph<StateDummy> = CompiledGraph::new(
             nodes.clone(),
             TriggerTable::new(),
             IndexMap::new(),
@@ -2131,7 +2153,7 @@ mod tests {
         assert!(err.to_string().contains("Loop"));
 
         // Test with Interrupt source (should pass validation, though will fail later)
-        let compiled = CompiledGraph::new(
+        let compiled: CompiledGraph<StateDummy> = CompiledGraph::new(
             nodes,
             TriggerTable::new(),
             IndexMap::new(),
@@ -2164,7 +2186,7 @@ mod tests {
         let mut nodes: IndexMap<String, Arc<dyn crate::Node<StateDummy>>> = IndexMap::new();
         nodes.insert("a".to_string(), mock_node("a"));
 
-        let compiled = CompiledGraph::new(
+        let compiled: CompiledGraph<StateDummy> = CompiledGraph::new(
             nodes,
             TriggerTable::new(),
             IndexMap::new(),
@@ -2187,7 +2209,7 @@ mod tests {
         let mut nodes: IndexMap<String, Arc<dyn crate::Node<StateDummy>>> = IndexMap::new();
         nodes.insert("a".to_string(), mock_node("a"));
 
-        let compiled = CompiledGraph::new(
+        let compiled: CompiledGraph<StateDummy> = CompiledGraph::new(
             nodes,
             TriggerTable::new(),
             IndexMap::new(),
@@ -2294,7 +2316,7 @@ mod tests {
         };
 
         // Test with Input source (should fail)
-        let compiled = CompiledGraph::new(
+        let compiled: CompiledGraph<StateDummy> = CompiledGraph::new(
             nodes.clone(),
             TriggerTable::new(),
             IndexMap::new(),
@@ -2327,7 +2349,7 @@ mod tests {
         );
 
         // Test with Interrupt source (should pass source validation)
-        let compiled = CompiledGraph::new(
+        let compiled: CompiledGraph<StateDummy> = CompiledGraph::new(
             nodes,
             TriggerTable::new(),
             IndexMap::new(),
@@ -2365,7 +2387,7 @@ mod tests {
         let mut nodes: IndexMap<String, Arc<dyn crate::Node<StateDummy>>> = IndexMap::new();
         nodes.insert("a".to_string(), mock_node("a"));
 
-        let compiled = CompiledGraph::new(
+        let compiled: CompiledGraph<StateDummy> = CompiledGraph::new(
             nodes,
             TriggerTable::new(),
             IndexMap::new(),
@@ -2386,7 +2408,7 @@ mod tests {
         let mut nodes: IndexMap<String, Arc<dyn crate::Node<StateDummy>>> = IndexMap::new();
         nodes.insert("a".to_string(), mock_node("a"));
 
-        let compiled = CompiledGraph::new(
+        let compiled: CompiledGraph<StateDummy> = CompiledGraph::new(
             nodes,
             TriggerTable::new(),
             IndexMap::new(),
@@ -2407,7 +2429,7 @@ mod tests {
         let mut nodes: IndexMap<String, Arc<dyn crate::Node<StateDummy>>> = IndexMap::new();
         nodes.insert("a".to_string(), mock_node("a"));
 
-        let compiled = CompiledGraph::new(
+        let compiled: CompiledGraph<StateDummy> = CompiledGraph::new(
             nodes,
             TriggerTable::new(),
             IndexMap::new(),
@@ -2477,7 +2499,7 @@ mod tests {
             nodes
         };
 
-        let compiled = CompiledGraph::new(
+        let compiled: CompiledGraph<StateDummy> = CompiledGraph::new(
             nodes,
             TriggerTable::new(),
             IndexMap::new(),
@@ -2600,7 +2622,7 @@ mod tests {
             nodes
         };
 
-        let compiled = CompiledGraph::new(
+        let compiled: CompiledGraph<StateDummy> = CompiledGraph::new(
             nodes,
             TriggerTable::new(),
             IndexMap::new(),
@@ -2643,7 +2665,7 @@ mod tests {
         let mut nodes: IndexMap<String, Arc<dyn crate::Node<StateDummy>>> = IndexMap::new();
         nodes.insert("a".to_string(), mock_node("a"));
 
-        let compiled = CompiledGraph::new(
+        let compiled: CompiledGraph<StateDummy> = CompiledGraph::new(
             nodes,
             TriggerTable::new(),
             IndexMap::new(),
@@ -2725,7 +2747,7 @@ mod tests {
             },
         );
 
-        let compiled = CompiledGraph::new(
+        let compiled: CompiledGraph<StateDummy> = CompiledGraph::new(
             nodes,
             trigger_table,
             IndexMap::new(),
@@ -2776,7 +2798,7 @@ mod tests {
             },
         );
 
-        let compiled = CompiledGraph::new(
+        let compiled: CompiledGraph<StateDummy> = CompiledGraph::new(
             nodes,
             trigger_table,
             IndexMap::new(),
@@ -2827,7 +2849,7 @@ mod tests {
             },
         );
 
-        let compiled = CompiledGraph::new(
+        let compiled: CompiledGraph<StateDummy> = CompiledGraph::new(
             nodes,
             trigger_table,
             IndexMap::new(),
@@ -2878,7 +2900,7 @@ mod tests {
             },
         );
 
-        let compiled = CompiledGraph::new(
+        let compiled: CompiledGraph<StateDummy> = CompiledGraph::new(
             nodes,
             trigger_table,
             IndexMap::new(),
@@ -3075,7 +3097,7 @@ mod tests {
         let mut nodes: IndexMap<String, Arc<dyn crate::Node<StateDummy>>> = IndexMap::new();
         nodes.insert("a".to_string(), mock_node("a"));
 
-        let compiled = CompiledGraph::new(
+        let compiled: CompiledGraph<StateDummy> = CompiledGraph::new(
             nodes,
             TriggerTable::new(),
             IndexMap::new(),
@@ -3097,7 +3119,7 @@ mod tests {
         let mut nodes: IndexMap<String, Arc<dyn crate::Node<StateDummy>>> = IndexMap::new();
         nodes.insert("a".to_string(), mock_node("a"));
 
-        let compiled = CompiledGraph::new(
+        let compiled: CompiledGraph<StateDummy> = CompiledGraph::new(
             nodes,
             TriggerTable::new(),
             IndexMap::new(),
@@ -3128,7 +3150,7 @@ mod tests {
         let mut nodes: IndexMap<String, Arc<dyn crate::Node<StateDummy>>> = IndexMap::new();
         nodes.insert("a".to_string(), mock_node("a"));
 
-        let compiled = CompiledGraph::new(
+        let compiled: CompiledGraph<StateDummy> = CompiledGraph::new(
             nodes,
             TriggerTable::new(),
             IndexMap::new(),

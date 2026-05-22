@@ -242,13 +242,39 @@ impl<S: State> std::ops::Deref for CowState<S> {
 }
 
 /// Trait for converting input schema into full State
+///
+/// Types implementing this trait can be used as the input type `I` for
+/// [`StateGraph<S, I, O>`](crate::graph::StateGraph). The default blanket
+/// implementation converts `S` into `S` (identity), ensuring full backward
+/// compatibility when `I = S`.
 pub trait IntoState<S: State>: Clone + Send + Sync + 'static {
+    /// Convert `self` into the full state type `S`.
     fn into_state(self) -> S;
 }
 
+/// Blanket implementation: any `State` type converts to itself (identity).
+impl<S: State> IntoState<S> for S {
+    fn into_state(self) -> S {
+        self
+    }
+}
+
 /// Trait for extracting output schema from full State
+///
+/// Types implementing this trait can be used as the output type `O` for
+/// [`StateGraph<S, I, O>`](crate::graph::StateGraph). The default blanket
+/// implementation extracts `S` from `S` via `Clone`, ensuring full backward
+/// compatibility when `O = S`.
 pub trait FromState<S: State>: Clone + Send + Sync + 'static {
+    /// Extract `Self` from a reference to the full state type `S`.
     fn from_state(state: &S) -> Self;
 }
 
-// Rust guideline compliant 2025-01-18
+/// Blanket implementation: any `State` type extracts from itself via `Clone`.
+impl<S: State> FromState<S> for S {
+    fn from_state(state: &S) -> Self {
+        state.clone()
+    }
+}
+
+// Rust guideline compliant 2026-05-22
