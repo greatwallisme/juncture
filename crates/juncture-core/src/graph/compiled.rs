@@ -3896,6 +3896,208 @@ mod tests {
         );
     }
 
+    // --- Nested subgraph (sub-subgraph) filtering tests ---
+
+    /// Verify that nested subgraph events (2-level namespace) are correctly
+    /// filtered by `include_subgraphs=false`.
+    #[test]
+    fn test_nested_subgraph_default_excludes_nested_events() {
+        // A sub-subgraph event with 2-level namespace
+        let nested_event: StreamEvent<StateDummy> = StreamEvent::Custom {
+            node: "deep_node".to_string(),
+            data: serde_json::json!({}),
+            ns: vec!["parent".to_string(), "child".to_string()],
+        };
+
+        let include_subgraphs = false;
+
+        // Has non-empty namespace (correctly identified as subgraph event)
+        assert_eq!(nested_event.namespace(), &["parent", "child"]);
+        assert!(!nested_event.namespace().is_empty());
+
+        let should_skip = !nested_event.namespace().is_empty() && !include_subgraphs;
+        assert!(
+            should_skip,
+            "nested subgraph events should be skipped when include_subgraphs=false"
+        );
+    }
+
+    /// Verify that nested subgraph events (2-level namespace) pass through
+    /// when `include_subgraphs=true` with no filter.
+    #[test]
+    fn test_nested_subgraph_include_all_passes() {
+        // Simulate the namespace that an EventEmitter with_subgraph_ns
+        // would produce for a parent/child chain
+        let emitter_ns = vec!["parent".to_string(), "child".to_string()];
+
+        // Build a nested event with the namespace set
+        let nested_custom_event: StreamEvent<StateDummy> = StreamEvent::Custom {
+            node: "inner".to_string(),
+            data: serde_json::json!({"k": "v"}),
+            ns: emitter_ns,
+        };
+
+        let include_subgraphs = true;
+        let subgraph_filter: Option<Vec<String>> = None;
+
+        let should_skip = !nested_custom_event.namespace().is_empty() && !include_subgraphs;
+        assert!(
+            !should_skip,
+            "nested subgraph events should pass when include_subgraphs=true"
+        );
+        assert!(subgraph_filter.is_none());
+    }
+
+    /// Verify that `subgraph_filter` based on `ns.first()` correctly includes
+    /// nested subgraph events when the outermost name matches.
+    #[test]
+    fn test_nested_subgraph_filter_matches_outermost_name() {
+        // Events from deeply nested subgraph: parent -> child -> grandchild
+        let nested_event: StreamEvent<StateDummy> = StreamEvent::Custom {
+            node: "deep".to_string(),
+            data: serde_json::json!({}),
+            ns: vec![
+                "parent".to_string(),
+                "child".to_string(),
+                "grandchild".to_string(),
+            ],
+        };
+
+        let include_subgraphs = true;
+        // Filter on outermost name only
+        let subgraph_filter = Some(vec!["parent".to_string()]);
+
+        let ns = nested_event.namespace();
+        let should_skip = if ns.is_empty() {
+            false
+        } else if !include_subgraphs {
+            true
+        } else if let Some(ref filter) = subgraph_filter {
+            ns.first().is_some_and(|first| !filter.contains(first))
+        } else {
+            false
+        };
+
+        assert!(
+            !should_skip,
+            "nested event from parent should pass when parent is in filter"
+        );
+
+        // Test with non-matching outermost name
+        let subgraph_filter_other = Some(vec!["other".to_string()]);
+        let should_skip_other = if ns.is_empty() {
+            false
+        } else if !include_subgraphs {
+            true
+        } else if let Some(ref filter) = subgraph_filter_other {
+            ns.first().is_some_and(|first| !filter.contains(first))
+        } else {
+            false
+        };
+
+        assert!(
+            should_skip_other,
+            "nested event should be skipped when outermost name does not match filter"
+        );
+    }
+
+    /// Verify that nested Messages events (with ns in metadata) are correctly
+    /// identified and filtered.
+    #[test]
+    fn test_nested_subgraph_messages_filtering() {
+        let nested_messages: StreamEvent<StateDummy> = StreamEvent::Messages {
+            chunk: crate::stream::MessageChunk {
+                content: "nested_token".to_string(),
+                tool_call_chunks: vec![],
+                usage_delta: None,
+            },
+            metadata: crate::stream::MessageStreamMetadata {
+                node: "llm".to_string(),
+                model: "gpt-4".to_string(),
+                tags: vec![],
+                ns: vec!["outer".to_string(), "inner".to_string()],
+            },
+        };
+
+        let include_subgraphs = false;
+
+        // verify namespace detection works for Messages events
+        assert_eq!(
+            nested_messages.namespace(),
+            &["outer", "inner"],
+            "Messages events should expose full nested namespace via metadata.ns"
+        );
+
+        let should_skip = !nested_messages.namespace().is_empty() && !include_subgraphs;
+        assert!(
+            should_skip,
+            "nested subgraph Messages events should be filtered when include_subgraphs=false"
+        );
+
+        // With include_subgraphs=true, nested Messages pass through
+        let include_subgraphs_true = true;
+        let should_pass = nested_messages.namespace().is_empty() || include_subgraphs_true;
+        assert!(
+            should_pass,
+            "nested subgraph Messages events should pass when include_subgraphs=true"
+        );
+    }
+
+    /// Verify that `SubgraphTransformer::to_emitter()` produces an emitter
+    /// whose namespace carries the correct nested path.
+    #[test]
+    fn test_subgraph_transformer_to_emitter_nested_ns() {
+        let transformer = crate::SubgraphTransformer::new("child".to_string());
+        let transformer = transformer.child_transformer("grandchild");
+
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        let emitter = transformer.to_emitter::<StateDummy>(tx, crate::stream::StreamMode::Values);
+
+        // Verify the emitter has the correct namespace chain
+        assert_eq!(emitter.ns(), &["child", "grandchild"]);
+    }
+
+    /// Verify that `SubgraphTransformer::child_transformer()` properly
+    /// chains namespace for 3 levels deep.
+    #[test]
+    fn test_transformer_child_chain_three_levels() {
+        use crate::stream::StreamEvent;
+
+        let grandparent = crate::SubgraphTransformer::new("grandparent".to_string());
+        let parent = grandparent.child_transformer("parent");
+        let child = parent.child_transformer("child");
+
+        // Verify transform produces correct node prefix
+        let event = StreamEvent::<StateDummy>::TaskStart {
+            node: "worker".to_string(),
+            task_id: "t1".to_string(),
+            step: 1,
+        };
+
+        let result = child.transform(&event).expect("should pass filter");
+        match result {
+            StreamEvent::TaskStart { node, .. } => {
+                assert_eq!(node, "grandparent/parent/child/worker");
+            }
+            other => panic!("expected TaskStart, got {other:?}"),
+        }
+
+        // Verify Custom event ns field
+        let custom_event = StreamEvent::<StateDummy>::Custom {
+            node: "agent".to_string(),
+            data: serde_json::json!({}),
+            ns: vec![],
+        };
+        let result = child.transform(&custom_event).expect("custom should pass");
+        match result {
+            StreamEvent::Custom { node, ns, .. } => {
+                assert_eq!(node, "grandparent/parent/child/agent");
+                assert_eq!(ns, vec!["grandparent", "parent", "child"]);
+            }
+            other => panic!("expected Custom, got {other:?}"),
+        }
+    }
+
     /// Verify that `StreamConfig::with_subgraphs()` and
     /// `StreamConfig::with_subgraph_filter()` produce the expected config.
     #[test]

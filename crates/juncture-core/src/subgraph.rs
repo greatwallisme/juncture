@@ -1008,6 +1008,101 @@ mod tests {
         );
     }
 
+    // --- EventEmitter integration tests ---
+
+    #[test]
+    fn to_emitter_creates_emitter_with_correct_ns() {
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let t = SubgraphTransformer::new("review".to_string());
+        let emitter = t.to_emitter::<StateDummy>(tx, crate::stream::StreamMode::Updates);
+        assert_eq!(emitter.ns(), &["review"]);
+    }
+
+    #[test]
+    fn to_emitter_with_parent_ns() {
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let t = make_nested_transformer("child", &["parent"]);
+        let emitter = t.to_emitter::<StateDummy>(tx, crate::stream::StreamMode::Values);
+        assert_eq!(emitter.ns(), &["parent", "child"]);
+    }
+
+    #[test]
+    fn to_emitter_with_deep_nesting() {
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let t = make_nested_transformer("grandchild", &["root", "parent"]);
+        let emitter = t.to_emitter::<StateDummy>(tx, crate::stream::StreamMode::Custom);
+        assert_eq!(emitter.ns(), &["root", "parent", "grandchild"]);
+    }
+
+    #[test]
+    fn child_transformer_produces_correct_build_ns() {
+        let parent = SubgraphTransformer::new("parent".to_string());
+        let child = parent.child_transformer("child");
+        let event = crate::stream::StreamEvent::<StateDummy>::Updates {
+            node: "worker".to_string(),
+            update: StateDummyUpdate,
+            step: 1,
+        };
+        let result = child.transform(&event).expect("should pass filter");
+        match result {
+            crate::stream::StreamEvent::Updates { node, .. } => {
+                assert_eq!(node, "parent/child/worker");
+            }
+            other => panic!("expected Updates, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn child_transformer_three_level_deep() {
+        let root = SubgraphTransformer::new("root".to_string());
+        let middle = root.child_transformer("middle");
+        let leaf = middle.child_transformer("leaf");
+
+        let event = crate::stream::StreamEvent::<StateDummy>::Custom {
+            node: "agent".to_string(),
+            data: serde_json::json!({"key": "val"}),
+            ns: vec![],
+        };
+        let result = leaf.transform(&event).expect("should pass filter");
+        match result {
+            crate::stream::StreamEvent::Custom { node, ns, .. } => {
+                assert_eq!(node, "root/middle/leaf/agent");
+                assert_eq!(ns, vec!["root", "middle", "leaf"]);
+            }
+            other => panic!("expected Custom, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn child_transformer_preserves_filter() {
+        let root = SubgraphTransformer::new("root".to_string())
+            .with_filter_types(vec!["custom".to_string()]);
+        let child = root.child_transformer("child");
+
+        // Updates should be filtered out (filter inherited from parent)
+        let updates_event = crate::stream::StreamEvent::<StateDummy>::Updates {
+            node: "agent".to_string(),
+            update: StateDummyUpdate,
+            step: 1,
+        };
+        assert!(child.transform(&updates_event).is_none());
+
+        // Custom event should pass
+        let custom_event = crate::stream::StreamEvent::<StateDummy>::Custom {
+            node: "agent".to_string(),
+            data: serde_json::json!({}),
+            ns: vec![],
+        };
+        let result = child.transform(&custom_event).expect("custom should pass");
+        match result {
+            crate::stream::StreamEvent::Custom { node, ns, .. } => {
+                assert_eq!(node, "root/child/agent");
+                assert_eq!(ns, vec!["root", "child"]);
+            }
+            other => panic!("expected Custom, got {other:?}"),
+        }
+    }
+
     // --- Nested namespace depth tests (3+ levels) ---
 
     #[test]
@@ -1429,6 +1524,84 @@ impl SubgraphTransformer {
     /// * `segment` - The namespace segment to add
     pub fn add_namespace(&mut self, segment: String) {
         self.ns.push(segment);
+    }
+
+    /// Create a child transformer for a nested subgraph.
+    ///
+    /// The child transformer inherits the current namespace and appends the
+    /// current `subgraph_name` as an additional segment, then sets the child
+    /// name.  This enables correct namespace propagation for sub-subgraphs.
+    ///
+    /// # Arguments
+    ///
+    /// * `child_name` - Name of the nested (child) subgraph
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use juncture_core::SubgraphTransformer;
+    ///
+    /// let parent = SubgraphTransformer::new("parent".to_string());
+    /// let child = parent.child_transformer("child");
+    ///
+    /// // The child transformer's build_ns would produce:
+    /// //   ns_prefix = "parent/child"
+    /// //   full_ns   = ["parent", "child"]
+    /// ```
+    #[must_use]
+    pub fn child_transformer(&self, child_name: &str) -> Self {
+        let mut child = self.clone();
+        child.ns.push(self.subgraph_name.clone());
+        child.subgraph_name = child_name.to_string();
+        child
+    }
+
+    /// Create an [`EventEmitter`](crate::stream::EventEmitter) with this
+    /// transformer's namespace chain applied.
+    ///
+    /// Each namespace segment in `self.ns` and `self.subgraph_name` is applied
+    /// via [`EventEmitter::with_subgraph_ns`] so that events emitted through
+    /// the returned emitter carry the full subgraph nesting path.
+    ///
+    /// # Arguments
+    ///
+    /// * `tx` - The underlying sender for stream events
+    /// * `mode` - The stream mode controlling what events are emitted
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use juncture_core::{EventEmitter, SubgraphTransformer, StreamMode};
+    /// use tokio::sync::mpsc;
+    ///
+    /// #[derive(Clone, Debug)]
+    /// struct MyState;
+    /// impl juncture_core::State for MyState {
+    ///     type Update = MyUpdate;
+    ///     fn apply(&mut self, _u: MyUpdate) -> juncture_core::FieldsChanged {
+    ///         juncture_core::FieldsChanged(0)
+    ///     }
+    ///     fn reset_ephemeral(&mut self) {}
+    /// }
+    /// #[derive(Clone, Debug, Default)]
+    /// struct MyUpdate;
+    ///
+    /// let (tx, _rx) = mpsc::channel(16);
+    /// let transformer = SubgraphTransformer::new("sub".to_string());
+    /// let emitter: EventEmitter<MyState> = transformer.to_emitter(tx, StreamMode::Values);
+    /// assert_eq!(emitter.ns(), &["sub"]);
+    /// ```
+    #[must_use]
+    pub fn to_emitter<S: crate::State>(
+        &self,
+        tx: tokio::sync::mpsc::Sender<crate::stream::StreamEvent<S>>,
+        mode: crate::stream::StreamMode,
+    ) -> crate::stream::EventEmitter<S> {
+        let mut emitter = crate::stream::EventEmitter::new(tx, mode);
+        for segment in &self.ns {
+            emitter = emitter.with_subgraph_ns(segment.clone());
+        }
+        emitter.with_subgraph_ns(self.subgraph_name.clone())
     }
 }
 
