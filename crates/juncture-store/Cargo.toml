@@ -2,7 +2,7 @@
 name = "juncture-store"
 version.workspace = true
 edition.workspace = true
-description = "Cross-thread persistent key-value storage for Juncture"
+description = "Cross-thread persistent key-value storage for Juncture (re-exports juncture-core::store)"
 license.workspace = true
 repository.workspace = true
 readme.workspace = true
@@ -10,15 +10,7 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
-async-trait = "0.1"
-chrono = { version = "0.4", features = ["serde"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-thiserror = "2"
-tokio = { version = "1", features = ["sync", "rt", "time", "macros", "rt-multi-thread"] }
-
-[features]
-vector = []
+juncture-core = { path = "../juncture-core" }
 
 [lints]
 workspace = true

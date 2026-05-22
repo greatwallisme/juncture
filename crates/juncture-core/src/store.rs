@@ -310,9 +310,8 @@ pub enum StoreResult {
 /// Configuration for time-to-live (TTL) behavior on [`MemoryStore`].
 ///
 /// Controls automatic expiration of items using lazy evaluation on read.
-/// Unlike the standalone `juncture-store` crate, this implementation does
-/// not use a background sweep task -- expired items are detected and removed
-/// during `get()` and `search()` operations.
+/// Expired items are detected and removed during `get()` and `search()`
+/// operations (no background sweep task is used).
 ///
 /// # Examples
 ///

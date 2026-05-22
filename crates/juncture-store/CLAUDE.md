@@ -1,28 +1,34 @@
 # CLAUDE.md -- juncture-store
 
-Cross-thread persistent key-value storage for Juncture. Provides the `Store` trait and in-memory implementation.
+Thin re-export layer for cross-thread persistent key-value storage.
 
-## Module Map
+## Architecture
 
-| Module | Responsibility |
-|--------|---------------|
-| `trait_.rs` | `Store` async trait: `get`, `put`, `delete`, `search`, `list_namespaces`, `batch` |
-| `memory.rs` | `MemoryStore` -- `Arc<RwLock<HashMap>>` based in-memory implementation |
-| `filter.rs` | `FilterExpr` for search queries |
-| `types.rs` | `Item`, `SearchItem`, `SearchQuery`, `SearchResult`, `StoreOp`, `StoreResult`, `IndexConfig`, `EmbeddingFunc`, `TTLConfig` |
-| `error.rs` | `StoreError` enum |
+This crate has **no own implementations**. It re-exports all Store types from
+`juncture-core::store` so that downstream consumers can depend on `juncture-store`
+directly without pulling in the full `juncture-core` facade.
 
-## Key Design
+All types originate from `juncture-core::store`:
 
-- Namespace-based key organization: `namespace/key` pairs
-- Async trait (`async_trait`) for all operations
-- `SearchQuery` supports filter-based search with optional vector similarity (feature-gated)
-- `StoreOp` batch operations for efficiency
-- TTL support via `TTLConfig` with background cleanup
+| Re-exported type | Source |
+|-----------------|--------|
+| `Store` | `juncture_core::store::Store` |
+| `StoreError` | `juncture_core::store::StoreError` |
+| `Item` | `juncture_core::store::Item` |
+| `FilterExpr` | `juncture_core::store::FilterExpr` |
+| `SearchQuery` | `juncture_core::store::SearchQuery` |
+| `SearchResult` | `juncture_core::store::SearchResult` |
+| `SearchItem` | `juncture_core::store::SearchItem` |
+| `StoreOp` | `juncture_core::store::StoreOp` |
+| `StoreResult` | `juncture_core::store::StoreResult` |
+| `MemoryStore` | `juncture_core::store::MemoryStore` |
+| `TTLConfig` | `juncture_core::store::TTLConfig` |
+| `IndexConfig` | `juncture_core::store::IndexConfig` |
+| `EmbeddingFunc` | `juncture_core::store::EmbeddingFunc` |
 
-## Features
+## Dependencies
 
-- `vector` -- placeholder for vector similarity search (not yet implemented)
+- `juncture-core` -- the sole dependency, providing all Store types
 
 ## Testing
 
@@ -30,4 +36,5 @@ Cross-thread persistent key-value storage for Juncture. Provides the `Store` tra
 cargo test -p juncture-store
 ```
 
-This crate has no dependency on `juncture-core`. It is optional in the facade crate via the `store` feature flag.
+Tests run from `juncture-core::store` module tests. This crate has no own tests
+since it contains only re-exports.
