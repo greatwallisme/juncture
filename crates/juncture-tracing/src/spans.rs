@@ -85,6 +85,12 @@ pub mod attrs {
     /// Cost in USD attribute
     pub const COST_USD: &str = "juncture.cost.usd";
 
+    /// Total steps completed attribute
+    pub const TOTAL_STEPS: &str = "juncture.graph.total_steps";
+
+    /// Total tokens consumed attribute
+    pub const TOTAL_TOKENS: &str = "juncture.graph.total_tokens";
+
     /// LLM has tool calls attribute
     pub const LLM_HAS_TOOL_CALLS: &str = "juncture.llm.has_tool_calls";
 
@@ -140,6 +146,8 @@ mod tests {
         assert!(attrs::LLM_MODEL.starts_with("juncture."));
         assert!(attrs::TOOL_NAME.starts_with("juncture."));
         assert!(attrs::CHECKPOINT_ID.starts_with("juncture."));
+        assert!(attrs::TOTAL_STEPS.starts_with("juncture."));
+        assert!(attrs::TOTAL_TOKENS.starts_with("juncture."));
     }
 }
 

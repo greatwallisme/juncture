@@ -5,7 +5,10 @@
 
 use crate::{
     JunctureError, Node, State,
-    checkpoint::{Checkpoint, CheckpointMetadata, CheckpointSource, generate_checkpoint_id},
+    checkpoint::{
+        Checkpoint, CheckpointMetadata, CheckpointSource, DeltaCounters,
+        generate_checkpoint_id,
+    },
     edge::TriggerTable,
     interrupt::should_interrupt,
     pregel::{
@@ -205,6 +208,13 @@ pub struct PregelLoop<S: State> {
     /// The timeout wraps the entire execution (including retry attempts when a
     /// retry policy is also configured).
     timeout_policies: HashMap<String, crate::pregel::context::TimeoutPolicy>,
+
+    /// Per-channel delta counters tracking updates and supersteps since last full snapshot.
+    ///
+    /// Keys are channel names (e.g. `"field_0"`), values track cumulative write counts.
+    /// Populated from [`FieldsChanged`] after each superstep and reset when a full
+    /// snapshot checkpoint is saved.
+    delta_counters: HashMap<String, DeltaCounters>,
 }
 
 impl<S: State> std::fmt::Debug for PregelLoop<S> {
@@ -239,6 +249,7 @@ impl<S: State> std::fmt::Debug for PregelLoop<S> {
                 "timeout_policies",
                 &self.timeout_policies.keys().collect::<Vec<_>>(),
             )
+            .field("delta_counters", &self.delta_counters.len())
             .finish()
     }
 }
@@ -351,6 +362,7 @@ impl<S: State> PregelLoop<S> {
             error_handler_map,
             retry_policies: HashMap::new(),
             timeout_policies: HashMap::new(),
+            delta_counters: HashMap::new(),
         })
     }
 
@@ -707,11 +719,17 @@ impl<S: State> PregelLoop<S> {
         // index so that concurrent writes to the same field produce a deterministic result
         // matching LangGraph semantics. It also checks for replace-field conflicts before
         // applying any writes, so a double-write rejects the entire superstep.
-        let _total_changed = apply_writes(
+        let total_changed = apply_writes(
             &mut self.state,
             &result.task_outputs,
             &mut self.field_versions,
         )?;
+
+        // Increment delta counters for all tracked fields.
+        // DeltaChannel fields get update+superstep increments; other changed
+        // fields get update+superstep increments too, providing a consistent
+        // view of write activity across all channels.
+        self.update_delta_counters(&total_changed);
 
         // Mark versions as consumed after bumping
         for task_output in &result.task_outputs {
@@ -1272,7 +1290,7 @@ impl<S: State> PregelLoop<S> {
             created_at,
             v: 1,
             new_versions,
-            counters_since_delta_snapshot: HashMap::new(),
+            counters_since_delta_snapshot: self.build_checkpoint_delta_counters(),
         };
 
         let metadata = CheckpointMetadata {
@@ -1291,6 +1309,9 @@ impl<S: State> PregelLoop<S> {
         {
             Ok(updated_config) => {
                 self.runnable_config.checkpoint_id = updated_config.checkpoint_id;
+                // Reset delta counters after a successful interrupt checkpoint
+                // save, same as superstep checkpoint logic.
+                self.reset_delta_counters();
                 tracing::debug!(
                     name: "juncture.checkpoint.interrupt.saved",
                     node = node,
@@ -1400,7 +1421,7 @@ impl<S: State> PregelLoop<S> {
             created_at,
             v: 1,
             new_versions,
-            counters_since_delta_snapshot: HashMap::new(),
+            counters_since_delta_snapshot: self.build_checkpoint_delta_counters(),
         };
 
         let metadata = CheckpointMetadata {
@@ -1417,6 +1438,10 @@ impl<S: State> PregelLoop<S> {
         {
             Ok(updated_config) => {
                 self.runnable_config.checkpoint_id = updated_config.checkpoint_id;
+                // Reset delta counters after a successful checkpoint save.
+                // The checkpoint now carries the cumulative counters, and a
+                // fresh counting window starts for the next checkpoint cycle.
+                self.reset_delta_counters();
                 tracing::debug!(
                     name: "juncture.checkpoint.superstep.saved",
                     step = self.step,
@@ -1527,6 +1552,76 @@ impl<S: State> PregelLoop<S> {
     }
 
     // -----------------------------------------------------------------------
+    // Delta counter tracking (B-04-001)
+    // -----------------------------------------------------------------------
+
+    /// Increment delta counters after a superstep applies writes.
+    ///
+    /// For every field that changed, increment its `updates` counter. For all
+    /// fields tracked in `delta_counters` (whether or not they changed), increment
+    /// the `supersteps` counter. This provides a consistent view of write activity
+    /// that the checkpoint builder consults to decide full-snapshot vs delta.
+    fn update_delta_counters(&mut self, changed: &crate::FieldsChanged) {
+        let field_names = S::field_names();
+        let num_fields = field_names.len().min(self.field_versions.len());
+
+        for field_idx in 0..num_fields {
+            let channel_name = format!("field_{field_idx}");
+            let entry = self.delta_counters.entry(channel_name).or_default();
+
+            // Always increment supersteps for tracked channels
+            entry.supersteps = entry.supersteps.saturating_add(1);
+
+            // Only increment updates for channels that actually changed
+            if changed.has_field(field_idx) {
+                entry.updates = entry.updates.saturating_add(1);
+            }
+        }
+    }
+
+    /// Build the `counters_since_delta_snapshot` map for checkpoint persistence.
+    ///
+    /// Returns a clone of the current delta counters so the checkpoint carries an
+    /// accurate snapshot of write activity since the last full snapshot.
+    #[allow(dead_code, reason = "used by checkpoint delta snapshot logic (B-04-003)")]
+    fn build_checkpoint_delta_counters(&self) -> HashMap<String, DeltaCounters> {
+        self.delta_counters.clone()
+    }
+
+    /// Decide whether a full snapshot checkpoint should be taken.
+    ///
+    /// Checks each `DeltaChannel` field against its configured `snapshot_frequency`.
+    /// If any field's update count exceeds its frequency, returns `true` to
+    /// indicate that a full snapshot is needed. Non-DeltaChannel fields are
+    /// excluded from this decision since they always snapshot fully.
+    #[allow(dead_code, reason = "used by checkpoint delta snapshot logic (B-04-003)")]
+    fn should_take_full_snapshot(&self) -> bool {
+        let specs = S::delta_channel_specs();
+        if specs.is_empty() {
+            // No DeltaChannel fields configured -- always take full snapshots
+            // since there is no delta optimization to apply.
+            return true;
+        }
+
+        for &(field_idx, frequency) in specs {
+            let channel_name = format!("field_{field_idx}");
+            if let Some(counters) = self.delta_counters.get(&channel_name)
+                && counters.exceeds_frequency(frequency)
+            {
+                return true;
+            }
+        }
+
+        false
+    }
+
+    /// Reset delta counters after a full snapshot checkpoint has been saved.
+    #[allow(dead_code, reason = "used by checkpoint delta snapshot logic (B-04-003)")]
+    fn reset_delta_counters(&mut self) {
+        self.delta_counters.clear();
+    }
+
+    // -----------------------------------------------------------------------
     // Metric emission helpers
     // -----------------------------------------------------------------------
 
@@ -1558,9 +1653,26 @@ impl<S: State> PregelLoop<S> {
     // Lifecycle callback helpers
     // -----------------------------------------------------------------------
 
-    /// Invoke graph-end callback if a handler is configured.
+    /// Invoke graph-end callback if a handler is configured and emit
+    /// the `juncture.graph.complete` tracing event with execution metrics.
     #[inline]
     fn on_graph_end(&self, result: &Result<(), JunctureError>) {
+        // Extract budget metrics for the completion event.
+        let (total_tokens, cost_usd) = self.budget_tracker.as_ref().map_or((0, 0.0), |tracker| {
+            let usage = tracker.current_usage();
+            (usage.tokens_used, usage.cost_usd)
+        });
+
+        let success = result.is_ok();
+        tracing::info!(
+            name: "juncture.graph.complete",
+            total_steps = self.step,
+            total_tokens = total_tokens,
+            cost_usd = cost_usd,
+            success = success,
+            "Graph execution completed",
+        );
+
         if let Some(ref handler) = self.runnable_config.callback_handler {
             handler.on_graph_end(result);
         }

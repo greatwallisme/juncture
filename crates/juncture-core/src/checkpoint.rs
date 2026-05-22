@@ -388,6 +388,29 @@ pub struct DeltaCounters {
     pub supersteps: u64,
 }
 
+impl DeltaCounters {
+    /// Create a new delta counter with zero values.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            updates: 0,
+            supersteps: 0,
+        }
+    }
+
+    /// Check if this channel's update count exceeds the given snapshot frequency.
+    ///
+    /// Returns `true` when a full snapshot should be taken instead of a delta.
+    /// A frequency of zero is treated as "always snapshot" (snapshot on every write).
+    #[must_use]
+    pub fn exceeds_frequency(&self, snapshot_frequency: usize) -> bool {
+        if snapshot_frequency == 0 {
+            return true;
+        }
+        usize::try_from(self.updates).unwrap_or(usize::MAX) >= snapshot_frequency
+    }
+}
+
 /// Checkpoint metadata
 ///
 /// Provides context about how and when a checkpoint was created.

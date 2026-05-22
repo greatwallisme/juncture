@@ -104,6 +104,22 @@ pub trait State: Clone + Send + Sync + std::fmt::Debug + 'static {
     fn field_names() -> &'static [&'static str] {
         &[]
     }
+
+    /// Field indices and snapshot frequencies for `DeltaChannel` fields.
+    ///
+    /// Returns `(field_index, snapshot_frequency)` pairs identifying which
+    /// fields use [`DeltaChannel`](super::channel::DeltaChannel) and their
+    /// configured snapshot interval. The Pregel engine uses this to track
+    /// per-channel delta counters and decide when to persist a full snapshot
+    /// versus an incremental delta.
+    ///
+    /// The proc-macro generates a static slice from `#[delta(frequency = N)]`
+    /// annotations. Default returns an empty slice for manually implemented
+    /// states (no delta channels).
+    #[must_use]
+    fn delta_channel_specs() -> &'static [(usize, usize)] {
+        &[]
+    }
 }
 
 /// Bitmask tracking which fields changed
