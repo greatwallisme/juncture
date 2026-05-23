@@ -16,13 +16,13 @@ src/
 
 | File | Description |
 |------|-------------|
-| `trait_.rs` | `ChatModel` trait, `StructuredOutputModel`, `CallOptions`, `LlmError` |
+| `trait_.rs` | `ChatModel` trait, `StructuredOutputModel`, `CallOptions`, `LlmError` (`Other` holds `Box<dyn Error + Send + Sync>`) |
 | `message.rs` | Message builder helpers |
 | `anthropic.rs` | `ChatAnthropic` (feature `anthropic`) -- Anthropic Claude API |
 | `openai.rs` | `ChatOpenAI` (feature `openai`) -- OpenAI GPT API |
 | `ollama.rs` | `ChatOllama` (feature `ollama`) -- Ollama local model API |
-| `mock.rs` | `MockChatModel` for testing |
-| `retry.rs` | `RetryingModel` wrapper with configurable retry policy |
+| `mock.rs` | `MockChatModel` for testing (uses `MockError` custom error type) |
+| `retry.rs` | `RetryingModel` wrapper with configurable retry policy (`RetryExhaustedError` custom error type) |
 | `pricing.rs` | `ModelPricing`, `PricingTable` for cost tracking |
 | `structured.rs` | Structured output extraction (feature `structured-output`) |
 
@@ -31,7 +31,7 @@ src/
 | File | Description |
 |------|-------------|
 | `trait_.rs` | `Tool` trait, `ToolDefinition` |
-| `node.rs` | `ToolNode`, `ToolNodeConfig`, `ToolExecutionTrace` |
+| `node.rs` | `ToolNode`, `ToolNodeConfig`, `ToolExecutionTrace` -- emits `ToolsEvent::ToolStarted`/`ToolFinished` with timestamp and success flag |
 | `interceptor.rs` | `ToolInterceptor`, `CompositeInterceptor`, `NopToolInterceptor` |
 | `transformer.rs` | `ToolCallTransformer`, `CompositeTransformer` |
 | `runtime.rs` | `ToolRuntime` for execution context |

@@ -12,7 +12,7 @@ Juncture is a Rust implementation of LangGraph. The programming model is semanti
 
 ```
 juncture/              # facade crate - prelude, LLM providers, Tool trait, prebuilt agents
-juncture-core/         # Channel system, StateGraph, Pregel engine, Node/Edge, Command, HITL, Subgraph
+juncture-core/         # Channel system, StateGraph, Pregel engine, Node/Edge, Command, HITL, Subgraph, Func API
 juncture-derive/       # #[derive(State)] proc-macro generating Update structs, merge(), field_versions
 juncture-checkpoint/   # CheckpointSaver trait, MemorySaver, SqliteSaver, PostgresSaver
 juncture-tracing/      # OpenTelemetry integration, node-level spans, token metrics

@@ -8,7 +8,6 @@ OpenTelemetry integration and structured tracing for Juncture graph execution.
 |--------|---------------|
 | `spans.rs` | Span name constants (`juncture.graph.invoke`, etc.) and attribute key constants (`juncture.thread.id`, etc.) |
 | `callback.rs` | `GraphCallbackHandler`, `GraphInterruptEvent`, `GraphResumeEvent` for hooking into graph lifecycle |
-| `debug.rs` | `DebugEvent` enum for structured debug output (superstep start/end, node events) |
 | `test_utils.rs` | `TestMetricsCollector` for asserting metrics in tests |
 | `types.rs` | `LlmCacheKeyInput`, `LlmCachePolicy`, `ServerInfo` |
 | `config.rs` | `TracingConfig`, `init()` builder for OTLP setup (feature `otel`) |
