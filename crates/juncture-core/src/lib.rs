@@ -232,7 +232,7 @@ pub use pregel::{
     TimeoutPolicy, TriggerToNodes, apply_writes, compute_next_tasks, execute_superstep,
 };
 pub use runtime::{
-    ExecutionInfo, Heartbeat, HeartbeatWatcher, ManagedValues, RunControl, Runtime, RuntimeStore,
+    ExecutionInfo, Heartbeat, HeartbeatWatcher, ManagedValues, RunControl, Runtime,
     StreamWriterTrait,
 };
 pub use send::Send;

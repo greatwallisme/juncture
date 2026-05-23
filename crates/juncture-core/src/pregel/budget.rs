@@ -2,9 +2,26 @@
 //!
 //! This module provides budget tracking for limiting execution based on
 //! tokens, cost, duration, and steps.
+//!
+//! # Task-Local Budget Tracking
+//!
+//! The budget tracker is available as a task-local variable during node
+//! execution, allowing LLM providers to report token usage without explicit
+//! parameter passing. Use [`try_report_model_call`] to report usage from
+//! within LLM implementations.
 
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
+
+// Task-local budget tracker for LLM usage reporting.
+//
+// This task-local variable is set by the Pregel execution engine during
+// node execution, allowing LLM providers to report token usage without
+// requiring explicit parameter passing through the ChatModel trait.
+tokio::task_local! {
+    pub static BUDGET_TRACKER: Arc<BudgetTracker>;
+}
 
 /// Action to take when a budget limit is exceeded
 ///
@@ -413,6 +430,68 @@ pub struct BudgetUsage {
     /// Number of steps completed
     pub steps_completed: usize,
 }
+
+/// Attempt to report model call token usage to the current budget tracker.
+///
+/// This function accesses the task-local budget tracker set by the Pregel
+/// execution engine and reports token usage from an LLM call. It returns
+/// an error if called outside of a task-local budget tracker context.
+///
+/// This is the preferred method for LLM providers to report usage, as it
+/// integrates seamlessly with the budget tracking system without requiring
+/// explicit parameter passing.
+///
+/// # Errors
+///
+/// Returns `BudgetReportError::NoTracker` if called outside of a task-local
+/// budget tracker context (e.g., during direct LLM calls without graph execution).
+///
+/// # Examples
+///
+/// ```ignore
+/// use juncture_core::pregel::budget::try_report_model_call;
+///
+/// // In an LLM provider's invoke() method
+/// if let Some(usage) = &response.usage {
+///     let _ = try_report_model_call(usage.input_tokens, usage.output_tokens);
+/// }
+/// ```
+pub fn try_report_model_call(
+    input_tokens: u64,
+    output_tokens: u64,
+) -> Result<(), BudgetReportError> {
+    BUDGET_TRACKER
+        .try_with(|tracker| {
+            tracker.report_model_call(input_tokens, output_tokens);
+        })
+        .map_err(|_err| BudgetReportError::NoTracker)
+}
+
+/// Error returned when budget reporting fails.
+///
+/// This error indicates that budget reporting was attempted outside of
+/// a task-local budget tracker context.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BudgetReportError {
+    /// No budget tracker is available in the current context.
+    ///
+    /// This typically means the LLM call is happening outside of graph
+    /// execution, where no budget tracker has been configured.
+    NoTracker,
+}
+
+impl std::fmt::Display for BudgetReportError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoTracker => write!(
+                f,
+                "Cannot report budget usage: no budget tracker in current context"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for BudgetReportError {}
 
 #[cfg(test)]
 mod tests {

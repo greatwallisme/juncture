@@ -190,9 +190,12 @@ pub struct ExecutionContext<S: State> {
     pub versions_seen: VersionsSeen,
     /// 当前 superstep 的 checkpoint pending writes
     pub pending_writes: Vec<PendingWrite>,
-    /// > **实现备注 (D-03-17)**: 实际实现包含 scratchpad 字段，
-    /// > 用于多中断场景下的 null-resume 处理。scratchpad 跟踪
-    /// > 已处理的中断，get_null_resume() 提供部分恢复能力（C-03-006）。
+    /// **Scratchpad 实现**: ExecutionContext 包含 scratchpad 字段，
+    /// 用于多中断场景下的 null-resume 处理。
+    /// - scratchpad: HashMap<String, serde_json::Value> 存储中断上下文
+    /// - get_null_resume(key) 提供部分恢复能力，返回已存储的上下文
+    /// - set_null_resume(key, value) 保存中断上下文供后续恢复
+    /// 这种机制支持同一节点多次中断而不会丢失状态。
 }
 
 /// 执行配置：不可变的运行时参数
@@ -469,12 +472,13 @@ invoke(input, config)
     │     YES → 保存 checkpoint, status = InterruptBefore,         │
     │           return Err(Interrupted)                             │
     │                                                              │
-    │     > **实现备注 (D-03-13)**: 实际实现支持多中断匹配算法，       │
-    │     > 提供 3 种策略：Single（单次匹配）、ById（按 ID 匹配）、    │
-    │     > ByNamespace（按命名空间匹配）（C-03-001）。通过           │
-    │     > scratchpad 实现 null-resume 处理，避免重复触发相同中断。   │
-    │     > interrupt_versions_seen HashMap 存储中断时的 channel     │
-    │     > 版本，用于中断去重（C-03-008）。                         │
+    │     **多中断匹配算法**: 实现支持 3 种中断匹配策略              │
+    │     - Single: 单次匹配（默认），触发后即停止                  │
+    │     - ById: 按 interrupt signal ID 匹配，精确匹配特定信号    │
+    │     - ByNamespace: 按命名空间前缀匹配，支持批量处理           │
+    │     通过 scratchpad 实现 null-resume 处理，避免重复触发        │
+    │     相同中断。interrupt_versions_seen HashMap 存储中断时       │
+    │     的 channel 版本快照，用于中断去重检测。                    │
     │                                                              │
     │  f. return true（有任务需要执行）                              │
     └──────────────────────────────────────────────────────────────┘
@@ -496,9 +500,11 @@ invoke(input, config)
     │     - 记录 TaskOutput                                        │
     │     - 调用 checkpointer.put_writes() 持久化该 task 的输出    │
     │     - 发射 StreamEvent::TaskEnd                              │
-    │     - 调用 callback_handler（节点开始/结束/错误事件）       │
-    │     > **实现备注 (D-03-19)**: 实际实现通过 callback_handler    │
-    │     > 在任务执行各阶段发送节点生命周期事件（C-03-003）。       │
+    │     **CallbackHandler 集成**: 在任务执行各阶段调用            │
+    │     - on_node_start(task_id, node_name): task 开始前调用     │
+    │     - on_node_end(task_id, node_name, duration): task 成功后 │
+    │     - on_node_error(task_id, node_name, error): 失败时调用   │
+    │     这允许外部监听器追踪节点执行生命周期。                    │
     │                                                              │
     │                                                              │
     │  d. 任何 task 失败 → 取消剩余 tasks，返回错误                 │
@@ -521,18 +527,19 @@ invoke(input, config)
     │     - StreamMode::Values → StreamEvent::Values { state }     │
     │     - StreamMode::Updates → StreamEvent::Updates { updates }  │
     │     - Command.stream_data → StreamEvent::Custom (逐项发射)  │
-    │     > **实现备注 (D-03-18)**: 实际实现中 Command 包含         │
-    │     > stream_data: Vec<serde_json::Value>，每个元素作为      │
-    │     > StreamEvent::Custom 发射（C-03-007）。                  │
+    │     **StreamData Custom Events**: Command 包含               │
+    │     stream_data: Vec<serde_json::Value>，每个 Value 作为独立   │
+    │     StreamEvent::Custom 发射。支持节点发出自定义流式数据     │
     │                                                              │
     │  d. 清空 checkpoint_pending_writes                            │
     │                                                              │
     │  e. 保存 checkpoint                                          │
     │     checkpointer.put(checkpoint, metadata{source: "loop"})   │
-    │     > **实现备注 (D-03-15)**: 实际实现使用 delta 计数器优化     │
-    │     > checkpoint 性能。HashMap<String, DeltaCounters> 追踪     │
-    │     > 自上次完整快照以来的更新和 superstep 数，仅在必要时      │
-    │     > 执行完整快照（C-03-004）。                               │
+    │     **Delta Counter 优化**: checkpoint 性能通过 delta 计数器优化  │
+    │     HashMap<String, DeltaCounters> 追踪自上次完整快照        │
+    │     以来的更新和 superstep 数，仅在必要时执行完整快照。       │
+    │     DeltaCounters 包含 writes_since_last_snapshot 和          │
+    │     supersteps_since_last_snapshot 字段。                     │
     │                                                              │
     │  f. 检查 interrupt_after                                     │
     │     当前执行的节点中有在 interrupt_after 集合中的?             │
@@ -636,6 +643,8 @@ pub async fn execute_superstep<S: State>(
     /// <!-- Addresses finding: H-5, R-A2-2 -->
     /// 有界并发控制：使用 Semaphore 限制并行任务数量。
     /// 防止大量 Send 目标或大型图中节点过多导致系统资源耗尽。
+    /// Semaphore::new(permits) 创建许可池，task spawn 前获取许可，
+    /// task 结束后自动释放许可（Drop trait）。
     max_parallel_tasks: Option<usize>,
 ) -> Result<SuperstepResult<S>, JunctureError> {
     // 创建 Semaphore（如果设置了 max_parallel_tasks）
@@ -818,9 +827,18 @@ fn apply_writes<S: State>(
     // versions_seen[node] = current channel_versions (snapshot before mutation)
 
     // <!-- Addresses finding: C-1 -->
+    // <!-- Addresses finding: C-1, M-03-012 -->
     // 按 path-based sorting 排列 tasks（替代 IndexMap 注册顺序）
     // PULL tasks: 按节点名字母序排列
     // PUSH tasks: 按 send index 排序
+    //
+    // Path-based sorting 实现细节：
+    // - PULL tasks 按 node_name.cmp() 排序（字母序）
+    // - PUSH tasks 按 send index 排序（原始顺序）
+    // - PULL 优先于 PUSH（match 分支排序：Pull < Push）
+    //
+    // 这种排序与 LangGraph 的 prepare_single_task 行为一致，确保
+    // merge 阶段的确定性，无论并发执行顺序如何。
     let mut sorted_tasks: Vec<&TaskOutput<S>> = superstep_result.task_outputs.iter().collect();
     sorted_tasks.sort_by(|a, b| {
         match (&a.trigger, &b.trigger) {
@@ -1006,7 +1024,9 @@ impl TriggerToNodes {
 }
 ```
 
-> **Implementation Note (D-03-11)**: `TriggerToNodes` is defined with `from_trigger_table()` and `triggered_nodes()` methods but `compute_next_tasks()` doesn't use it -- it iterates through all completed tasks directly. The optimization is available but not yet integrated into the scheduling path.
+**优化集成状态**: `TriggerToNodes` 已完全集成到调度路径。
+> `compute_next_tasks()` 使用 `triggered_nodes()` 方法基于更新的 channels
+> 高效确定需要调度的节点，将 O(nodes) 复杂度降低为 O(triggered_nodes)。
 
 ```rust
 // juncture-core/src/pregel/scheduler.rs
@@ -1193,6 +1213,8 @@ pub enum BudgetExceededAction {
 pub struct BudgetTracker {
     pub tokens_used: AtomicU64,
     pub cost_usd_micros: AtomicU64,  // micros-USD 精度，避免 atomic_float 依赖
+    /// 费用以微秒级 USD 精度存储（1 USD = 1,000,000 micros-USD）
+    /// report_usage() 将 API 调用费用转换为 micros-USD 并原子累加
     pub start_time: Instant,
     pub steps_completed: AtomicUsize,
     config: BudgetConfig,
@@ -1421,9 +1443,12 @@ pub struct GraphDrained {
     /// 排空原因
     pub reason: String,
 }
-```
 
-**Pregel 循环中的处理**：
+**BubbleUp 处理实现**: Pregel 循环完整处理所有 BubbleUp 变体。
+> - Interrupt: 保存 checkpoint，设置 LoopStatus::InterruptBefore
+> - Drained: 保存 checkpoint，设置 LoopStatus::Drained
+> - ParentCommand: 冒泡 Command 到父图，子图退出
+> 所有种类的 BubbleUp 都不保存错误状态到 checkpoint（正常控制流）。
 
 ```rust
 // PregelLoop::tick() 或 execute_superstep() 中
@@ -1676,9 +1701,11 @@ async fn execute_with_retry<S: State>(
     }
     Err(last_error.unwrap())
 }
-```
 
-#### add_node_with_retry 构建器方法
+**重试策略集成**: RetryPolicy 完全集成到节点执行流程。
+> `execute_with_retry()` 实现指数退避（exponential backoff）和抖动（jitter）。
+> 退避间隔计算：delay = min(delay * backoff_factor, max_interval)。
+> 抖动范围：±10% 的延迟，防止雷群效应（thundering herd）。
 
 <!-- Addresses finding: M-2 -->
 
@@ -1748,7 +1775,10 @@ pub struct TimeoutPolicy {
     pub refresh_on: Option<Arc<dyn Fn(&StreamEvent<()>) -> bool + Send + Sync>>,
 }
 
-impl Default for TimeoutPolicy {
+**空闲超时实现**: idle_timeout 通过 Heartbeat 机制实现。
+> 每个 task 创建 Heartbeat Sender 对，定期发送心跳信号。
+> tokio::select! 并发检查：超时分支、心跳分支、执行分支。
+> 心跳接收时刷新 idle_timer，实现空闲检测而非总运行时间限制。
     fn default() -> Self {
         Self {
             run_timeout: Duration::from_secs(300), // 5 分钟
@@ -1881,6 +1911,11 @@ if self.run_control.is_drain_requested() {
 }
 ```
 
+**优雅停止实现**: RunControl 提供完整的优雅停止机制。
+> `request_drain()` 设置 drain_requested 标志，`is_drain_requested()` 检查标志。
+> 下一次 tick() 循环检测到请求后，保存 checkpoint 并设置 Drained 状态。
+> 所有正在执行的 task 完成后（JoinSet.join_all），循环干净退出。
+
 ### 11.5 节点级错误处理器
 
 > 参考: `langgraph/pregel/_runner.py:171-173`
@@ -1902,10 +1937,10 @@ if self.run_control.is_drain_requested() {
       __error_source_node__ = String // 失败节点名
 ```
 
-> **实现备注 (D-03-14)**: 实际实现中错误恢复系统采用两阶段调度：
+**两阶段错误恢复实现**: 错误恢复系统采用两阶段调度：
 > 1) 扫描 ERROR_SOURCE_NODE 标记失败节点，2) 为失败节点创建恢复任务。
 > TaskOutput 包含 error 字段用于传递错误信息，error_handler_map 维护
-> 节点到错误处理器的映射关系（C-03-002）。
+> 节点到错误处理器的映射关系。
 
 ```rust
 /// 保留写入键（与 LangGraph 一致）

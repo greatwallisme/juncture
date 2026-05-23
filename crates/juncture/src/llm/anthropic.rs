@@ -369,7 +369,17 @@ impl ChatModel for ChatAnthropic {
             model = %model,
         );
 
-        Ok(convert_api_response(api_response))
+        let message = convert_api_response(api_response);
+
+        // Report token usage to the budget tracker (if configured)
+        if let Some(ref usage) = message.usage {
+            let _ = juncture_core::pregel::try_report_model_call(
+                usage.input_tokens,
+                usage.output_tokens,
+            );
+        }
+
+        Ok(message)
     }
 
     #[allow(
@@ -822,7 +832,9 @@ fn convert_api_response(response: AnthropicResponse) -> Message {
         }
     }
 
-    Message::ai_with_tool_calls(content, tool_calls)
+    let mut msg = Message::ai_with_tool_calls(content, tool_calls);
+    msg.usage = response.usage;
+    msg
 }
 
 /// Convert role to Anthropic API format.
@@ -857,7 +869,7 @@ enum AnthropicSSEEvent {
     #[serde(rename = "content_block_stop")]
     ContentBlockStop {
         #[allow(dead_code, reason = "deserialization target, fields read indirectly")]
-        index: usize
+        index: usize,
     },
     #[serde(rename = "message_delta")]
     MessageDelta {

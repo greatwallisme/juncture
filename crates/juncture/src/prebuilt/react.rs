@@ -560,7 +560,7 @@ impl Router<MessagesState> for AgentRouter {
 /// The adapter also carries an optional cross-thread persistent [`Store`]
 /// for stateful tool execution.
 struct ToolNodeAdapter {
-    tool_node: Arc<ToolNode>,
+    tool_node: Arc<ToolNode<MessagesState>>,
     /// Optional cross-thread persistent store for long-term memory.
     store: Option<Arc<dyn Store>>,
 }
@@ -568,7 +568,7 @@ struct ToolNodeAdapter {
 impl ToolNodeAdapter {
     /// Create a new adapter wrapping the given tool node.
     #[must_use]
-    fn new(tool_node: Arc<ToolNode>, store: Option<Arc<dyn Store>>) -> Self {
+    fn new(tool_node: Arc<ToolNode<MessagesState>>, store: Option<Arc<dyn Store>>) -> Self {
         Self { tool_node, store }
     }
 }
@@ -595,9 +595,10 @@ impl Node<MessagesState> for ToolNodeAdapter {
         >,
     > {
         Box::pin(async move {
+            // Execute tools with state access for stateful tools
             let results = self
                 .tool_node
-                .execute(&state.messages)
+                .execute_with_state(&state.messages, Some(&state))
                 .await
                 .map_err(|e| JunctureError::execution(e.to_string()))?;
 

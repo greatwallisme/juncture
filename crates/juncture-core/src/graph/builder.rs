@@ -2063,17 +2063,28 @@ mod tests {
 
         // Before compile(), validate_keys() should catch the error
         let validate_result = graph.validate_keys();
-        assert!(validate_result.is_err(), "validate_keys should detect invalid field index");
+        assert!(
+            validate_result.is_err(),
+            "validate_keys should detect invalid field index"
+        );
 
         // compile() should also catch the same error (by calling validate_keys internally)
         let compile_result = graph.compile();
-        assert!(compile_result.is_err(), "compile should detect invalid field index");
+        assert!(
+            compile_result.is_err(),
+            "compile should detect invalid field index"
+        );
 
         // Both should return the same error type
         match (validate_result, compile_result) {
-            (Err(TopologyError::InvalidFieldReference { index: v_idx, .. }),
-             Err(TopologyError::InvalidFieldReference { index: c_idx, .. })) => {
-                assert_eq!(v_idx, c_idx, "Both methods should report the same invalid index");
+            (
+                Err(TopologyError::InvalidFieldReference { index: v_idx, .. }),
+                Err(TopologyError::InvalidFieldReference { index: c_idx, .. }),
+            ) => {
+                assert_eq!(
+                    v_idx, c_idx,
+                    "Both methods should report the same invalid index"
+                );
             }
             _ => panic!("Both methods should return InvalidFieldReference error"),
         }

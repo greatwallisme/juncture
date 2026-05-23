@@ -616,8 +616,9 @@ mod tests {
             clippy::type_complexity,
             reason = "complex type is needed for compile-time type checking of the install() return signature"
         )]
-        let _check: std::sync::Arc<std::sync::Mutex<dyn Fn() -> Result<Option<MetricsRegistry>, TracingError>>> =
-            std::sync::Arc::new(std::sync::Mutex::new(|| Ok(None)));
+        let _check: std::sync::Arc<
+            std::sync::Mutex<dyn Fn() -> Result<Option<MetricsRegistry>, TracingError>>,
+        > = std::sync::Arc::new(std::sync::Mutex::new(|| Ok(None)));
     }
 
     #[test]

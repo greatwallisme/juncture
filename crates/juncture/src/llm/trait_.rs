@@ -1,10 +1,10 @@
 //! Core traits and error types for LLM integration.
 
 use async_trait::async_trait;
+use futures::Stream;
 use std::pin::Pin;
 use std::time::Duration;
 use thiserror::Error;
-use futures::Stream;
 
 use crate::llm::{Message, MessageChunk};
 

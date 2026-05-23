@@ -7,6 +7,9 @@ use juncture::tools::{
 use juncture_core::state::messages::{Message, MessagesState, ToolCall};
 use serde_json::json;
 
+// Type alias for tests
+type TestToolNode = ToolNode<juncture_core::state::messages::MessagesState>;
+
 /// Simple test tool
 struct TestTool;
 
@@ -41,7 +44,7 @@ impl Tool for TestTool {
 #[tokio::test]
 async fn test_tool_node_integration() {
     let tools = vec![Box::new(TestTool) as Box<dyn Tool>];
-    let node = ToolNode::new(tools);
+    let node = TestToolNode::new(tools);
 
     let messages = vec![Message::ai_with_tool_calls(
         "Execute test",

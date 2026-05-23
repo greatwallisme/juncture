@@ -1,9 +1,5 @@
 use crate::{
-    State,
-    command::Command,
-    config::RunnableConfig,
-    error::JunctureError,
-    node::Node,
+    State, command::Command, config::RunnableConfig, error::JunctureError, node::Node,
     runtime::Runtime,
 };
 use std::{marker::PhantomData, sync::Arc};

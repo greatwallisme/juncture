@@ -294,6 +294,53 @@ impl VersionsSeen {
     pub fn get_versions(&self, node_name: &str) -> &[u64] {
         self.get_seen(node_name)
     }
+
+    /// Compute which fields triggered a node to activate
+    ///
+    /// Compares the node's seen versions with current field versions to determine
+    /// which specific fields had updates that caused the node to be scheduled.
+    ///
+    /// # Arguments
+    ///
+    /// * `node_name` - Name of the node to check
+    /// * `trigger_fields` - Field indices that the node subscribes to
+    /// * `current_versions` - Current field versions
+    ///
+    /// # Returns
+    ///
+    /// Vector of field indices that triggered this node (subset of `trigger_fields`)
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// use juncture_core::pregel::scheduler::VersionsSeen;
+    ///
+    /// let node_names = vec!["node_a".to_string()];
+    /// let mut seen = VersionsSeen::new(&node_names, 3);
+    ///
+    /// let trigger_fields = vec![0, 2]; // node subscribes to fields 0 and 2
+    /// let current = vec![1, 0, 1]; // fields 0 and 2 have new versions
+    /// let triggered = seen.compute_triggered_fields("node_a", &trigger_fields, &current);
+    /// assert_eq!(triggered, vec![0, 2]); // both fields triggered
+    /// ```
+    #[must_use]
+    pub fn compute_triggered_fields(
+        &self,
+        node_name: &str,
+        trigger_fields: &[usize],
+        current_versions: &[u64],
+    ) -> Vec<usize> {
+        let Some(seen_versions) = self.seen.get(node_name) else {
+            // Node not yet tracked, all trigger fields are new
+            return trigger_fields.to_vec();
+        };
+
+        trigger_fields
+            .iter()
+            .filter(|&&field_idx| current_versions[field_idx] > seen_versions[field_idx])
+            .copied()
+            .collect()
+    }
 }
 
 /// Compute the next set of tasks to execute
@@ -938,6 +985,7 @@ mod scheduler_tests {
 
         let task_output_a: crate::pregel::types::TaskOutput<TestState> =
             crate::pregel::types::TaskOutput {
+                triggered_fields: vec![],
                 task_id: "task_1".to_string(),
                 node_name: "node_a".to_string(),
                 trigger: crate::pregel::types::TaskTrigger::Pull,
@@ -992,6 +1040,7 @@ mod scheduler_tests {
         );
 
         let task_outputs = vec![TaskOutput {
+            triggered_fields: vec![],
             task_id: "task-1".to_string(),
             node_name: "failing_node".to_string(),
             command: Command::default(),
@@ -1016,6 +1065,7 @@ mod scheduler_tests {
             indexmap::IndexMap::new();
 
         let task_outputs = vec![TaskOutput {
+            triggered_fields: vec![],
             task_id: "task-1".to_string(),
             node_name: "failing_node".to_string(),
             command: Command::default(),
@@ -1045,6 +1095,7 @@ mod scheduler_tests {
             indexmap::IndexMap::new();
 
         let task_outputs = vec![TaskOutput {
+            triggered_fields: vec![],
             task_id: "task-1".to_string(),
             node_name: "failing_node".to_string(),
             command: Command::default(),

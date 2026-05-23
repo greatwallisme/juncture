@@ -493,6 +493,7 @@ fn subset_roundtrip_extract_then_map_update() {
 fn check_replace_conflicts_detects_multiple_writers() {
     // Two tasks both write to the "count" field (replace reducer)
     let task_a = TaskOutput {
+        triggered_fields: vec![],
         task_id: "t1".to_string(),
         node_name: "node_a".to_string(),
         trigger: TaskTrigger::Pull,
@@ -504,6 +505,7 @@ fn check_replace_conflicts_detects_multiple_writers() {
         error: None,
     };
     let task_b = TaskOutput {
+        triggered_fields: vec![],
         task_id: "t2".to_string(),
         node_name: "node_b".to_string(),
         trigger: TaskTrigger::Pull,
@@ -534,6 +536,7 @@ fn check_replace_conflicts_detects_multiple_writers() {
 #[test]
 fn check_replace_conflicts_allows_single_writer() {
     let task_a = TaskOutput {
+        triggered_fields: vec![],
         task_id: "t1".to_string(),
         node_name: "node_a".to_string(),
         trigger: TaskTrigger::Pull,
@@ -556,6 +559,7 @@ fn check_replace_conflicts_allows_single_writer() {
 #[test]
 fn check_replace_conflicts_allows_different_fields() {
     let task_a = TaskOutput {
+        triggered_fields: vec![],
         task_id: "t1".to_string(),
         node_name: "node_a".to_string(),
         trigger: TaskTrigger::Pull,
@@ -567,6 +571,7 @@ fn check_replace_conflicts_allows_different_fields() {
         error: None,
     };
     let task_b = TaskOutput {
+        triggered_fields: vec![],
         task_id: "t2".to_string(),
         node_name: "node_b".to_string(),
         trigger: TaskTrigger::Pull,
@@ -597,6 +602,7 @@ fn apply_writes_rejects_multiple_writers_on_replace_field() {
     let mut tracker = FieldVersionTracker::new(2);
 
     let task_a = TaskOutput {
+        triggered_fields: vec![],
         task_id: "t1".to_string(),
         node_name: "node_a".to_string(),
         trigger: TaskTrigger::Pull,
@@ -608,6 +614,7 @@ fn apply_writes_rejects_multiple_writers_on_replace_field() {
         error: None,
     };
     let task_b = TaskOutput {
+        triggered_fields: vec![],
         task_id: "t2".to_string(),
         node_name: "node_b".to_string(),
         trigger: TaskTrigger::Pull,
@@ -640,6 +647,7 @@ fn apply_writes_allows_single_writer_on_replace_field() {
     let mut tracker = FieldVersionTracker::new(2);
 
     let task_a = TaskOutput {
+        triggered_fields: vec![],
         task_id: "t1".to_string(),
         node_name: "node_a".to_string(),
         trigger: TaskTrigger::Pull,
@@ -673,6 +681,7 @@ fn apply_writes_allows_append_field_multiple_writers() {
 
     // Both tasks write to items (append reducer) -- this should be fine
     let task_a = TaskOutput {
+        triggered_fields: vec![],
         task_id: "t1".to_string(),
         node_name: "node_a".to_string(),
         trigger: TaskTrigger::Pull,
@@ -688,6 +697,7 @@ fn apply_writes_allows_append_field_multiple_writers() {
         error: None,
     };
     let task_b = TaskOutput {
+        triggered_fields: vec![],
         task_id: "t2".to_string(),
         node_name: "node_b".to_string(),
         trigger: TaskTrigger::Pull,

@@ -60,6 +60,13 @@ pub struct PendingTask<S: State> {
     /// which can't be deserialized to S without S: `DeserializeOwned` bound.
     /// This is deserialized during task execution in the runner.
     pub state_json: Option<serde_json::Value>,
+
+    /// Field indices that triggered this task
+    ///
+    /// Tracks which specific fields had updates that caused this task to be scheduled.
+    /// This allows fine-grained consumption of only triggered channels instead of
+    /// consuming all changed fields.
+    pub triggered_fields: Vec<usize>,
 }
 
 /// What triggered a task to be scheduled
@@ -96,8 +103,8 @@ pub struct SuperstepResult<S: State> {
 /// Output from a single completed task
 ///
 /// Contains the task ID, node name, command returned by the node,
-/// trigger type, execution duration, and optional error information
-/// when the node has a registered error handler.
+/// trigger type, execution duration, triggered fields, and optional
+/// error information when the node has a registered error handler.
 pub struct TaskOutput<S: State> {
     /// Task identifier
     pub task_id: String,
@@ -114,6 +121,13 @@ pub struct TaskOutput<S: State> {
     /// What triggered this task
     pub trigger: TaskTrigger,
 
+    /// Field indices that triggered this task
+    ///
+    /// Tracks which specific fields had updates that caused this task to be scheduled.
+    /// This allows fine-grained consumption of only triggered channels instead of
+    /// consuming all changed fields.
+    pub triggered_fields: Vec<usize>,
+
     /// Error that occurred during execution, if the node has a registered
     /// error handler. When present, `command` contains the error handler's
     /// output. When absent but the task failed, the error propagates
@@ -129,6 +143,7 @@ impl<S: State> std::fmt::Debug for TaskOutput<S> {
             .field("command", &"<command>")
             .field("duration", &self.duration)
             .field("trigger", &self.trigger)
+            .field("triggered_fields", &self.triggered_fields)
             .field("error", &self.error)
             .finish()
     }
@@ -145,6 +160,7 @@ where
             command: self.command.clone(),
             duration: self.duration,
             trigger: self.trigger.clone(),
+            triggered_fields: self.triggered_fields.clone(),
             // JunctureError is not Clone (contains Backtrace). For cloned
             // TaskOutputs the error is reconstructed from the display string
             // so that recovery scheduling still works after cloning.
@@ -192,6 +208,21 @@ pub struct GraphInterrupt {
 
     /// Step at which interrupt occurred
     pub step: usize,
+
+    /// Namespace of the graph that interrupted (for proper subgraph attribution)
+    ///
+    /// This field carries the namespace of the graph where the interrupt originated,
+    /// ensuring that when interrupts bubble up from subgraphs, they are properly
+    /// attributed to their nested context.
+    ///
+    /// For example, if a subgraph named "review" (under parent "agent") interrupts,
+    /// this field will contain `["agent", "review"]` so that stream events
+    /// correctly identify the interrupt source.
+    ///
+    /// This is separate from checkpoint namespace because we need namespace
+    /// attribution for stream events even when checkpointing is disabled
+    /// (e.g., `SubgraphPersistence::Stateless`).
+    pub namespace: Vec<String>,
 }
 
 /// Information about graph being drained
@@ -225,6 +256,7 @@ impl<S: State> PendingTask<S> {
     ///     trigger: TaskTrigger::Pull,
     ///     state_override: None,
     ///     state_json: None,
+    ///     triggered_fields: vec![],
     /// };
     /// ```
     #[must_use]
@@ -233,6 +265,7 @@ impl<S: State> PendingTask<S> {
         node_name: String,
         trigger: TaskTrigger,
         state_override: Option<S>,
+        triggered_fields: Vec<usize>,
     ) -> Self {
         Self {
             id,
@@ -240,6 +273,7 @@ impl<S: State> PendingTask<S> {
             trigger,
             state_override,
             state_json: None,
+            triggered_fields,
         }
     }
 
@@ -252,6 +286,24 @@ impl<S: State> PendingTask<S> {
             trigger: TaskTrigger::Pull,
             state_override: None,
             state_json: None,
+            triggered_fields: Vec::new(),
+        }
+    }
+
+    /// Create a pull-based task with triggered fields
+    #[must_use]
+    pub const fn pull_with_triggered(
+        id: String,
+        node_name: String,
+        triggered_fields: Vec<usize>,
+    ) -> Self {
+        Self {
+            id,
+            node_name,
+            trigger: TaskTrigger::Pull,
+            state_override: None,
+            state_json: None,
+            triggered_fields,
         }
     }
 
@@ -272,6 +324,7 @@ impl<S: State> PendingTask<S> {
             trigger: TaskTrigger::Push { index },
             state_override: None,
             state_json: Some(state_json),
+            triggered_fields: Vec::new(),
         }
     }
 
@@ -292,6 +345,7 @@ impl<S: State> PendingTask<S> {
             trigger: TaskTrigger::Push { index },
             state_override: Some(state_override),
             state_json: None,
+            triggered_fields: Vec::new(),
         }
     }
 }

@@ -2,6 +2,7 @@
 //!
 //! The runtime provides external dependencies and execution metadata to nodes.
 
+use crate::store::Store;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -58,7 +59,7 @@ pub struct Runtime<C: Clone + Send + Sync + 'static = ()> {
     pub context: C,
 
     /// Optional cross-thread persistent storage
-    pub store: Option<Arc<dyn RuntimeStore>>,
+    pub store: Option<Arc<dyn Store>>,
 
     /// Heartbeat mechanism for long-running nodes
     pub heartbeat: Heartbeat,
@@ -88,7 +89,7 @@ where
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Runtime")
             .field("context", &self.context)
-            .field("store", &self.store)
+            .field("store", &self.store.as_ref().map(|_| "<Store>"))
             .field("heartbeat", &self.heartbeat)
             .field("previous", &self.previous)
             .field("execution_info", &self.execution_info)
@@ -178,15 +179,6 @@ where
         Self::new()
     }
 }
-
-/// Persistent storage trait for cross-thread state
-///
-/// Abstracts storage backends for checkpoint persistence and
-/// cross-thread communication.
-///
-/// `RuntimeStore` operations will be implemented in Phase 8 according to
-/// the design document at `design/10-store.md`.
-pub trait RuntimeStore: Send + Sync + 'static + std::fmt::Debug {}
 
 /// Heartbeat mechanism for long-running nodes
 ///

@@ -221,6 +221,10 @@ impl ChatOpenAI {
 
 #[async_trait]
 impl ChatModel for ChatOpenAI {
+    #[allow(
+        clippy::too_many_lines,
+        reason = "invoke method requires: message conversion, request building, HTTP call, response parsing, span attribute recording, metrics emission, and budget reporting. The length is justified by the complexity of LLM integration with proper observability."
+    )]
     async fn invoke(
         &self,
         messages: &[Message],
@@ -341,7 +345,17 @@ impl ChatModel for ChatOpenAI {
             model = %model,
         );
 
-        convert_api_response(&api_response)
+        let message = convert_api_response(&api_response)?;
+
+        // Report token usage to the budget tracker (if configured)
+        if let Some(ref usage) = message.usage {
+            let _ = juncture_core::pregel::try_report_model_call(
+                usage.input_tokens,
+                usage.output_tokens,
+            );
+        }
+
+        Ok(message)
     }
 
     #[allow(
@@ -804,7 +818,9 @@ fn convert_api_response(response: &OpenAIResponse) -> Result<Message, LlmError> 
         Vec::new()
     };
 
-    Ok(Message::ai_with_tool_calls(content, tool_calls))
+    let mut msg = Message::ai_with_tool_calls(content, tool_calls);
+    msg.usage.clone_from(&response.usage);
+    Ok(msg)
 }
 
 /// `OpenAI` SSE chunk format.

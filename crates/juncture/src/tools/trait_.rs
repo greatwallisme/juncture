@@ -134,6 +134,22 @@ pub trait Tool: Send + Sync + 'static {
         }
     }
 
+    /// Whether this tool requires access to the cross-thread persistent store
+    ///
+    /// Default implementation returns `false`. Tools that need store access
+    /// should override this method to return `true`. When `true`, `ToolNode`
+    /// will provide the store via [`ToolRuntime`] if available.
+    ///
+    /// # Note
+    ///
+    /// For tools that need full runtime access (state, store, config), consider
+    /// implementing [`StatefulTool`] instead which receives a complete
+    /// [`ToolRuntime`] context.
+    #[must_use]
+    fn requires_store(&self) -> bool {
+        false
+    }
+
     /// Execute the tool
     ///
     /// # Errors
@@ -158,6 +174,10 @@ impl<T: Tool + ?Sized> Tool for Arc<T> {
 
     fn schema(&self) -> serde_json::Value {
         T::schema(self)
+    }
+
+    fn requires_store(&self) -> bool {
+        T::requires_store(self)
     }
 
     async fn invoke(&self, input: serde_json::Value) -> Result<String, ToolError> {
@@ -373,6 +393,24 @@ mod tests {
         assert_eq!(tool.description(), "A test tool");
 
         tool.invoke(json!({})).await.unwrap();
+    }
+
+    #[test]
+    fn test_tool_requires_store_default() {
+        let tool = TestTool;
+        assert!(
+            !tool.requires_store(),
+            "default requires_store should return false"
+        );
+    }
+
+    #[test]
+    fn test_tool_requires_store_arc_wrapper() {
+        let tool = Arc::new(TestTool);
+        assert!(
+            !tool.requires_store(),
+            "Arc-wrapped tool should use default requires_store"
+        );
     }
 
     // --- StatefulTool tests ---

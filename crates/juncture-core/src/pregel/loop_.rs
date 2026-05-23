@@ -21,6 +21,7 @@ use crate::{
         },
         types::{BubbleUp, LoopStatus, PendingTask, SuperstepResult},
     },
+    state::FieldsChanged,
     stream::{DebugEvent, StreamEvent},
 };
 use indexmap::IndexMap;
@@ -158,6 +159,13 @@ pub struct PregelLoop<S: State> {
     /// Pending tasks for next superstep
     pub pending_tasks: Vec<PendingTask<S>>,
 
+    /// Fields that were changed in the previous superstep and triggered the current one
+    ///
+    /// This tracks which fields should be consumed after each superstep completes.
+    /// The fields are stored from the previous superstep's `apply_writes` result and
+    /// consumed in the current superstep's `after_tick`.
+    previous_superstep_changed_fields: FieldsChanged,
+
     /// Optional budget tracker (shared with `RunnableConfig` via Arc)
     budget_tracker: Option<Arc<BudgetTracker>>,
 
@@ -215,6 +223,17 @@ pub struct PregelLoop<S: State> {
     /// Populated from [`FieldsChanged`] after each superstep and reset when a full
     /// snapshot checkpoint is saved.
     delta_counters: HashMap<String, DeltaCounters>,
+
+    /// Tracks whether [`finish_all_channels`](Self::finish_all_channels) has been called.
+    ///
+    /// This flag ensures `finish_all_channels()` is only called once per execution,
+    /// even when there are multiple termination paths (interrupt, cancellation, budget,
+    /// recursion limit, etc.). Calling it multiple times would be redundant and could
+    /// cause unexpected behavior with `LastValueAfterFinishChannel` semantics.
+    ///
+    /// Set to `true` after the first call to `finish_all_channels()`, preventing
+    /// subsequent calls on other termination paths.
+    channels_finished: bool,
 }
 
 impl<S: State> std::fmt::Debug for PregelLoop<S> {
@@ -232,6 +251,10 @@ impl<S: State> std::fmt::Debug for PregelLoop<S> {
             .field("step", &self.step)
             .field("status", &self.status)
             .field("pending_tasks", &self.pending_tasks)
+            .field(
+                "previous_superstep_changed_fields",
+                &self.previous_superstep_changed_fields,
+            )
             .field("budget_tracker", &self.budget_tracker.is_some())
             .field("run_control", &self.run_control)
             .field("run_id", &self.run_id)
@@ -250,6 +273,7 @@ impl<S: State> std::fmt::Debug for PregelLoop<S> {
                 &self.timeout_policies.keys().collect::<Vec<_>>(),
             )
             .field("delta_counters", &self.delta_counters.len())
+            .field("channels_finished", &self.channels_finished)
             .finish()
     }
 }
@@ -351,6 +375,7 @@ impl<S: State> PregelLoop<S> {
             step: 0,
             status: LoopStatus::Running,
             pending_tasks,
+            previous_superstep_changed_fields: FieldsChanged(0),
             budget_tracker: None,
             run_control: RunControl::new(),
             run_id,
@@ -363,6 +388,7 @@ impl<S: State> PregelLoop<S> {
             retry_policies: HashMap::new(),
             timeout_policies: HashMap::new(),
             delta_counters: HashMap::new(),
+            channels_finished: false,
         })
     }
 
@@ -470,6 +496,10 @@ impl<S: State> PregelLoop<S> {
     ///     loop.after_tick(result)?;
     /// }
     /// ```
+    #[allow(
+        clippy::too_many_lines,
+        reason = "Function contains multiple termination path checks (recursion limit, cancellation, budget, drain, interrupt) with finish_all_channels() calls on each path. Refactoring would reduce clarity by splitting related checks."
+    )]
     pub fn tick(&mut self) -> Result<bool, JunctureError> {
         // Create graph invocation span with proper attribute names
         let span = tracing::info_span!(
@@ -491,6 +521,8 @@ impl<S: State> PregelLoop<S> {
                 self.runnable_config.recursion_limit,
             ));
             self.on_graph_end(&result);
+            // Finalize channels before returning error
+            self.finish_all_channels();
             // Extract the error from the Result for the return value.
             // This is safe because we just constructed it as Err.
             let Err(err) = result else {
@@ -503,6 +535,8 @@ impl<S: State> PregelLoop<S> {
         if self.cancellation_token.is_cancelled() {
             self.status = LoopStatus::Cancelled;
             self.on_graph_end(&Ok(()));
+            // Finalize channels before returning
+            self.finish_all_channels();
             return Ok(false);
         }
 
@@ -516,6 +550,8 @@ impl<S: State> PregelLoop<S> {
                 "Budget exceeded: {reason}"
             )));
             self.on_graph_end(&result);
+            // Finalize channels before returning error
+            self.finish_all_channels();
             let Err(err) = result else {
                 unreachable!("result was constructed as Err");
             };
@@ -538,11 +574,9 @@ impl<S: State> PregelLoop<S> {
                         clippy::cast_sign_loss,
                         reason = "Gauge values are u64; cost is converted to micro-units (6 decimal places) for precision. Truncation is acceptable for gauge display."
                     )]
-                    let remaining_micro_usd = ((max_cost - usage.cost_usd).max(0.0) * 1_000_000.0) as u64;
-                    self.emit_gauge(
-                        "juncture.budget.remaining_cost_usd",
-                        remaining_micro_usd,
-                    );
+                    let remaining_micro_usd =
+                        ((max_cost - usage.cost_usd).max(0.0) * 1_000_000.0) as u64;
+                    self.emit_gauge("juncture.budget.remaining_cost_usd", remaining_micro_usd);
                 }
             }
         }
@@ -593,6 +627,8 @@ impl<S: State> PregelLoop<S> {
                 self.interrupt_versions_seen = channel_versions;
                 self.pending_interrupts.clone_from(&signals);
                 self.status = LoopStatus::InterruptBefore(signals);
+                // Finalize channels before returning
+                self.finish_all_channels();
                 return Ok(false);
             }
         }
@@ -759,11 +795,18 @@ impl<S: State> PregelLoop<S> {
         // view of write activity across all channels.
         self.update_delta_counters(&total_changed);
 
-        // Consume all triggered channels after writes have been applied.
-        // For EphemeralChannel fields, this marks the consumed flag so the
-        // channel knows its value has been read by the framework. The value
-        // itself is cleared by the subsequent reset_ephemeral() call.
-        self.consume_triggered_channels(&total_changed);
+        // Consume the channels that were triggered by the PREVIOUS superstep's writes.
+        // These are the fields that caused the current superstep's tasks to be scheduled.
+        // We consume these fields after applying the current superstep's writes but before
+        // resetting ephemeral fields, matching LangGraph's consume semantics.
+        //
+        // Note: We consume `previous_superstep_changed_fields` (from the last superstep)
+        // rather than `total_changed` (from this superstep) because:
+        // 1. The current superstep was triggered by writes from the previous superstep
+        // 2. Those triggered fields should be consumed after the current superstep executes
+        // 3. The current superstep's writes will trigger the NEXT superstep and be consumed then
+        let fields_to_consume = self.previous_superstep_changed_fields.clone();
+        self.consume_triggered_channels(&fields_to_consume);
 
         // Mark versions as consumed after bumping
         for task_output in &result.task_outputs {
@@ -874,6 +917,11 @@ impl<S: State> PregelLoop<S> {
             }
         }
 
+        // Store the current superstep's changed fields for consumption in the next superstep.
+        // The fields changed in THIS superstep will trigger the NEXT superstep's tasks,
+        // and should be consumed after that next superstep completes.
+        self.previous_superstep_changed_fields = total_changed;
+
         // Save superstep checkpoint after state merge and next-task computation.
         // This provides crash recovery for normal superstep completion (B-04-002).
         // The checkpoint is only saved when no interrupts are pending; interrupt
@@ -902,6 +950,8 @@ impl<S: State> PregelLoop<S> {
             let node = self.interrupt_node_name().to_string();
             self.save_interrupt_checkpoint(&node).await;
 
+            // Finalize channels before returning
+            self.finish_all_channels();
             return Ok(());
         }
 
@@ -913,6 +963,8 @@ impl<S: State> PregelLoop<S> {
                 let node = self.interrupt_node_name().to_string();
                 self.save_interrupt_checkpoint(&node).await;
             }
+            // Finalize channels before returning
+            self.finish_all_channels();
             return Ok(());
         }
 
@@ -948,6 +1000,8 @@ impl<S: State> PregelLoop<S> {
                 let node = self.interrupt_node_name().to_string();
                 self.save_interrupt_checkpoint(&node).await;
 
+                // Finalize channels before returning
+                self.finish_all_channels();
                 return Ok(());
             }
         }
@@ -1013,6 +1067,7 @@ impl<S: State> PregelLoop<S> {
             step = self.step,
             num_signals = graph_interrupt.interrupts.len(),
             interrupt_step = graph_interrupt.step,
+            namespace = ?graph_interrupt.namespace,
             "Subgraph interrupt bubbling up to parent"
         );
 
@@ -1021,7 +1076,12 @@ impl<S: State> PregelLoop<S> {
         self.status = LoopStatus::InterruptAfter(graph_interrupt.interrupts.clone());
 
         // Emit interrupt events to stream (hidden nodes filtered)
-        self.emit_interrupt_events(&graph_interrupt.interrupts);
+        // Use the namespace from the GraphInterrupt to properly attribute
+        // the interrupt to the subgraph where it originated
+        self.emit_interrupt_events_with_namespace(
+            &graph_interrupt.interrupts,
+            &graph_interrupt.namespace,
+        );
     }
 
     /// Handle a subgraph drain bubbling up to the parent graph
@@ -1640,11 +1700,28 @@ impl<S: State> PregelLoop<S> {
     /// Hidden nodes represent internal infrastructure (routing, error handling)
     /// that should never surface to external stream consumers.
     fn emit_interrupt_events(&self, signals: &[crate::interrupt::InterruptSignal]) {
+        self.emit_interrupt_events_with_namespace(signals, &self.current_ns());
+    }
+
+    /// Emit interrupt stream events with the specified namespace, filtering out
+    /// hidden/internal nodes (names starting and ending with `__`).
+    ///
+    /// This variant is used when handling interrupts that bubbled up from subgraphs,
+    /// where we need to use the subgraph's namespace rather than the parent's namespace.
+    ///
+    /// # Arguments
+    ///
+    /// * `signals` - Interrupt signals to emit
+    /// * `namespace` - Namespace to use for the events (typically from a subgraph)
+    fn emit_interrupt_events_with_namespace(
+        &self,
+        signals: &[crate::interrupt::InterruptSignal],
+        namespace: &[String],
+    ) {
         let Some(ref tx) = self.stream_tx else {
             return;
         };
 
-        let ns = self.current_ns();
         for signal in signals {
             let node = signal
                 .payload
@@ -1661,7 +1738,7 @@ impl<S: State> PregelLoop<S> {
                 node: node.to_string(),
                 payload: signal.payload.clone(),
                 resumable: true,
-                ns: ns.clone(),
+                ns: namespace.to_vec(),
             };
             let _ = tx.send(event);
         }
@@ -1690,9 +1767,19 @@ impl<S: State> PregelLoop<S> {
     /// }
     /// ```
     fn finish_all_channels(&mut self) {
+        // Only finish channels once per execution to avoid duplicate finalization.
+        // This is called on all termination paths (normal completion, interrupt,
+        // cancellation, budget exceeded, recursion limit, drain), but we only want
+        // to execute the actual finish operation once.
+        if self.channels_finished {
+            return;
+        }
+
         for &field_idx in S::replace_after_finish_field_indices() {
             self.state.finish_field(field_idx);
         }
+
+        self.channels_finished = true;
     }
 
     /// Consume all channels that were triggered (changed) in the current superstep.
@@ -2125,6 +2212,7 @@ mod tests {
         let bubble_ups = vec![BubbleUp::Interrupt(crate::pregel::types::GraphInterrupt {
             interrupts: signals,
             step: 2,
+            namespace: vec![],
         })];
 
         let should_stop = loop_.handle_bubble_ups(&bubble_ups);
@@ -2227,6 +2315,7 @@ mod tests {
                     payload: serde_json::Value::Null,
                 }],
                 step: 1,
+                namespace: vec![],
             }),
         ];
 
@@ -3131,6 +3220,7 @@ mod tests {
         let bubble_ups = vec![BubbleUp::Interrupt(crate::pregel::types::GraphInterrupt {
             interrupts: signals,
             step: 1,
+            namespace: vec!["review".to_string()],
         })];
 
         let _ = loop_.handle_bubble_ups(&bubble_ups);
@@ -3189,6 +3279,7 @@ mod tests {
         let bubble_ups = vec![BubbleUp::Interrupt(crate::pregel::types::GraphInterrupt {
             interrupts: signals,
             step: 1,
+            namespace: vec![],
         })];
 
         let _ = loop_.handle_bubble_ups(&bubble_ups);
@@ -3241,6 +3332,7 @@ mod tests {
         let bubble_ups = vec![BubbleUp::Interrupt(crate::pregel::types::GraphInterrupt {
             interrupts: signals,
             step: 1,
+            namespace: vec![],
         })];
 
         let _ = loop_.handle_bubble_ups(&bubble_ups);
@@ -3620,6 +3712,7 @@ mod tests {
         // Build a SuperstepResult with a task output that has stream_data
         let result = SuperstepResult {
             task_outputs: vec![TaskOutput {
+                triggered_fields: vec![],
                 task_id: "task-1".to_string(),
                 node_name: "test_node".to_string(),
                 command: Command::end()
@@ -3665,6 +3758,7 @@ mod tests {
         // Build a SuperstepResult with a task output that has NO stream_data
         let result = SuperstepResult {
             task_outputs: vec![TaskOutput {
+                triggered_fields: vec![],
                 task_id: "task-1".to_string(),
                 node_name: "test_node".to_string(),
                 command: Command::end(),
@@ -3703,6 +3797,7 @@ mod tests {
         let result = SuperstepResult {
             task_outputs: vec![
                 TaskOutput {
+                    triggered_fields: vec![],
                     task_id: "task-1".to_string(),
                     node_name: "node_a".to_string(),
                     command: Command::end().with_stream_data(serde_json::json!("from_a")),
@@ -3711,6 +3806,7 @@ mod tests {
                     error: None,
                 },
                 TaskOutput {
+                    triggered_fields: vec![],
                     task_id: "task-2".to_string(),
                     node_name: "node_b".to_string(),
                     command: Command::end(),

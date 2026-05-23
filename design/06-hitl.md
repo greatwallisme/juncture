@@ -220,59 +220,403 @@ graph.resume(values, config)
 
 ---
 
-## 3. 多重中断
+## 3. 多重中断与 Scratchpad 机制
 
-### null-resume 语义
+### 3.1 Scratchpad：每任务的临时状态追踪
+
+> 参考: `langgraph/_internal/_scratchpad.py`
+
+Juncture 实现了完整的 Scratchpad 机制，为每个节点任务提供临时可变状态追踪，在节点重执行时保持状态一致性：
+
+```rust
+/// 每任务的临时可变状态追踪器
+///
+/// 用于在节点重执行时追踪哪些中断已经处理过，
+/// 以及存储临时数据（如部分执行结果、中间状态等）。
+pub struct Scratchpad {
+    /// 已处理的中断 ID 集合
+    processed_interrupts: HashSet<String>,
+    /// 任务级别的临时数据存储
+    /// key = 数据标识符, value = 序列化的临时数据
+    transient_data: HashMap<String, serde_json::Value>,
+    /// 中断历史记录（用于调试和审计）
+    interrupt_history: Vec<InterruptRecord>,
+}
+
+/// 中断记录（保留完整的中断上下文）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InterruptRecord {
+    /// 中断 ID
+    pub id: String,
+    /// 中断索引
+    pub index: usize,
+    /// 中断时间戳
+    pub timestamp: i64,
+    /// 是否已处理
+    pub processed: bool,
+    /// 处理时间（如果已处理）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub processed_at: Option<i64>,
+}
+
+impl Scratchpad {
+    /// 创建新的 scratchpad
+    pub fn new() -> Self {
+        Self {
+            processed_interrupts: HashSet::new(),
+            transient_data: HashMap::new(),
+            interrupt_history: Vec::new(),
+        }
+    }
+
+    /// 检查中断是否已处理（防止重执行时重复处理）
+    pub fn is_interrupt_processed(&self, id: &str) -> bool {
+        self.processed_interrupts.contains(id)
+    }
+
+    /// 标记中断为已处理
+    pub fn mark_interrupt_processed(&mut self, id: &str) {
+        self.processed_interrupts.insert(id.to_string());
+        
+        // 更新历史记录
+        if let Some(record) = self.interrupt_history.iter_mut()
+            .find(|r| r.id == id) {
+            record.processed = true;
+            record.processed_at = Some(chrono::Utc::now().timestamp());
+        }
+    }
+
+    /// 记录中断发生
+    pub fn record_interrupt(&mut self, id: String, index: usize) {
+        self.interrupt_history.push(InterruptRecord {
+            id,
+            index,
+            timestamp: chrono::Utc::now().timestamp(),
+            processed: false,
+            processed_at: None,
+        });
+    }
+
+    /// 存储临时数据（在节点重执行时持久化）
+    pub fn store_transient(&mut self, key: String, value: serde_json::Value) {
+        self.transient_data.insert(key, value);
+    }
+
+    /// 获取临时数据
+    pub fn get_transient(&self, key: &str) -> Option<&serde_json::Value> {
+        self.transient_data.get(key)
+    }
+
+    /// 清除所有临时数据（在任务完成后调用）
+    pub fn clear_transient(&mut self) {
+        self.transient_data.clear();
+    }
+}
+```
+
+**Scratchpad 的集成点**
+
+1. **任务创建时**：为每个节点任务创建独立的 Scratchpad 实例
+   ```rust
+   pub struct TaskContext<S: State> {
+       pub state: CowState<S>,
+       pub scratchpad: Scratchpad,  // 每任务独立的 scratchpad
+       pub interrupt_ctx: InterruptContext,
+   }
+   ```
+
+2. **中断发生时**：在 Scratchpad 中记录中断信息
+   ```rust
+   fn record_interrupt(&mut self, signal: &InterruptSignal) {
+       self.scratchpad.record_interrupt(
+           signal.id.clone().unwrap_or_else(|| format!("idx_{}", signal.index)),
+           signal.index
+       );
+   }
+   ```
+
+3. **Resume 处理时**：查询 Scratchpad 确定哪些中断已处理
+   ```rust
+   fn prepare_resume_values(&self, scratchpad: &Scratchpad) -> Vec<Option<Value>> {
+       scratchpad.interrupt_history.iter()
+           .map(|record| {
+               if record.processed {
+                   None  // 已处理的中断不需要新的 resume 值
+               } else {
+                   self.get_resume_value_for(&record.id)
+               }
+           })
+           .collect()
+   }
+   ```
+
+### 3.2 null-resume 语义
 
 <!-- Addresses finding: H-6 -->
 
 > 参考: `langgraph/_internal/_scratchpad.py` — Scratchpad.get_null_resume()
 
-当使用命名中断时，scratchpad 提供 `get_null_resume()` 机制，允许在不需要显式 resume 值的情况下解决中断：
+Scratchpad 提供了完整的 `get_null_resume()` 机制，支持无需显式 resume 值的中断解决：
 
 ```rust
-/// Scratchpad 的 null-resume 语义
-///
-/// 当调用 resume 时未为某个中断 ID 提供值，
-/// scratchpad 可以通过 get_null_resume() 解析中断。
-/// 这对于只需要"确认继续"而不需要实际数据的中断点很有用。
 impl Scratchpad {
     /// 检查中断是否可以通过 null-resume 解决
-    /// null-resume: 中断已标记为 processed，但 resume value 为 None
+    /// 
+    /// null-resume 语义：中断已标记为 processed，但 resume value 为 None
+    /// 这适用于只需要"确认继续"而不需要实际数据的中断点。
+    /// 
+    /// # Returns
+    /// - true: 中断已处理，可以 null-resume（返回 Value::Null）
+    /// - false: 中断未处理，需要实际的 resume value
     pub fn get_null_resume(&self, interrupt_id: &str) -> bool {
         self.is_interrupt_processed(interrupt_id)
+    }
+
+    /// 获取所有可 null-resume 的中断 ID
+    pub fn get_null_resume_ids(&self) -> Vec<&str> {
+        self.interrupt_history.iter()
+            .filter(|r| r.processed)
+            .map(|r| r.id.as_str())
+            .collect()
     }
 }
 ```
 
-**多中断匹配算法**：
+**null-resume 的使用场景**
+
+```rust
+// 场景 1: 确认型中断（只需要人类点击"继续"）
+async fn confirmation_node(state: ProcessState) -> Result<ProcessStateUpdate> {
+    let confirmation = interrupt!(json!({
+        "type": "confirmation",
+        "message": "即将执行敏感操作，请确认"
+    }))?;
+
+    // null-resume：用户只需确认，不需要提供额外数据
+    if confirmation.is_null() {
+        // 用户点击了"继续"，执行敏感操作
+        perform_sensitive_operation(&state).await?;
+    }
+
+    Ok(ProcessStateUpdate {
+        status: Some("completed".into()),
+        ..Default::default()
+    })
+}
+
+// 场景 2: 可选数据中断（用户可以选择提供数据或跳过）
+async fn optional_input_node(state: ProcessState) -> Result<ProcessStateUpdate> {
+    let input = interrupt!(json!({
+        "type": "optional_input",
+        "prompt": "是否提供额外配置？（可选）"
+    }))?;
+
+    // null-resume：用户选择跳过
+    let config = if input.is_null() {
+        None  // 使用默认配置
+    } else {
+        Some(input)
+    };
+
+    Ok(ProcessStateUpdate {
+        config,
+        ..Default::default()
+    })
+}
+```
+
+### 3.3 增强的多中断匹配算法
+
+<!-- Addresses finding: C-06-005 -->
+
+实际实现的多中断匹配算法比设计规范更加复杂和健壮，支持 Single、ById、ByNamespace 三种 resume 模式：
+
+```rust
+/// 多中断匹配算法的核心实现
+///
+/// 支持三种 resume 值格式：
+/// 1. Single(Value): 单一值，应用于所有挂起的中断
+/// 2. ById(HashMap): 按中断 ID 精确匹配
+/// 3. ByNamespace(HashMap): 按命名空间匹配（用于子图）
+pub fn match_resume_to_interrupts(
+    resume_value: &ResumeValue,
+    scratchpad: &Scratchpad,
+) -> Result<HashMap<String, serde_json::Value>, JunctureError> {
+    let mut resolved = HashMap::new();
+
+    match resume_value {
+        // 模式 1: 单一值，应用到所有挂起的中断
+        ResumeValue::Single(value) => {
+            for record in &scratchpad.interrupt_history {
+                if !record.processed {
+                    resolved.insert(record.id.clone(), value.clone());
+                }
+            }
+        }
+
+        // 模式 2: 按 ID 精确匹配
+        ResumeValue::ById(map) => {
+            for record in &scratchpad.interrupt_history {
+                if record.processed {
+                    continue;
+                }
+
+                // 查找精确匹配的 resume value
+                if let Some(value) = map.get(&record.id) {
+                    resolved.insert(record.id.clone(), value.clone());
+                } else {
+                    // 检查是否可以 null-resume
+                    if scratchpad.get_null_resume(&record.id) {
+                        resolved.insert(record.id.clone(), serde_json::Value::Null);
+                    } else {
+                        return Err(JunctureError::MissingResumeValue {
+                            interrupt_id: record.id.clone(),
+                        });
+                    }
+                }
+            }
+        }
+
+        // 模式 3: 按命名空间匹配（用于子图中断）
+        ResumeValue::ByNamespace(map) => {
+            for record in &scratchpad.interrupt_history {
+                if record.processed {
+                    continue;
+                }
+
+                // 从中断 ID 中提取命名空间
+                let namespace = extract_namespace(&record.id);
+                
+                // 按命名空间查找 resume value
+                if let Some(value) = map.get(&namespace) {
+                    resolved.insert(record.id.clone(), value.clone());
+                } else {
+                    // 回退到 null-resume 检查
+                    if scratchpad.get_null_resume(&record.id) {
+                        resolved.insert(record.id.clone(), serde_json::Value::Null);
+                    } else {
+                        return Err(JunctureError::MissingResumeValue {
+                            interrupt_id: record.id.clone(),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(resolved)
+}
+
+/// 从中断 ID 中提取命名空间
+/// 
+/// 格式："{namespace}:{local_id}" -> "{namespace}"
+/// 例如："approval_subgraph:interrupt_0" -> "approval_subgraph"
+fn extract_namespace(interrupt_id: &str) -> String {
+    interrupt_id
+        .splitn(2, ':')
+        .next()
+        .unwrap_or("")
+        .to_string()
+}
+```
+
+**匹配算法的完整流程**
 
 ```
-resume 时匹配算法:
+match_resume_to_interrupts 流程:
   │
-  ├─ 输入: resume_map (HashMap<interrupt_id, value>)
+  ├─ 输入: resume_value (ResumeValue), scratchpad (Scratchpad)
   │
-  ├─ 1. 对 scratchpad 中每个未处理的中断:
-  │     ├─ 如果 resume_map 包含该中断的 ID → 使用 map 中的值
-  │     ├─ 如果 resume_map 不包含但中断已标记 processed → null-resume
-  │     └─ 否则 → 中断仍然挂起，节点再次中断
+  ├─ 步骤 1: 遍历 scratchpad.interrupt_history（按时间顺序）
+  │     ├─ 跳过已处理的中断 (record.processed == true)
+  │     └─ 收集挂起的中断 (record.processed == false)
   │
-  ├─ 2. 兼容模式: 如果 resume 值是 Vec<Value>（非 HashMap）:
-  │     按 index 顺序匹配，跳过已 processed 的中断
+  ├─ 步骤 2: 根据 resume_value 类型进行匹配
+  │     │
+  │     ├─ Case A: ResumeValue::Single(value)
+  │     │     └─ 将单一值应用到所有挂起的中断
+  │     │
+  │     ├─ Case B: ResumeValue::ById(map)
+  │     │     ├─ 对每个挂起中断，查找 map[id]
+  │     │     ├─ 如果找到 → 使用对应的值
+  │     │     └─ 如果未找到 → 检查 null-resume
+  │     │         ├─ 如果可以 null-resume → 使用 Value::Null
+  │     │         └─ 否则 → 返回 MissingResumeValue 错误
+  │     │
+  │     └─ Case C: ResumeValue::ByNamespace(map)
+  │         ├─ 对每个挂起中断，提取命名空间
+  │         ├─ 查找 map[namespace]
+  │         ├─ 如果找到 → 使用对应的值
+  │         └─ 如果未找到 → 回退到 null-resume 检查（同 Case B）
   │
-  └─ 3. 全局匹配: 如果 resume 值是单一 Value (非 Vec, 非 HashMap):
-       作为所有挂起中断的通用 resume 值
+  ├─ 步骤 3: 验证所有挂起中断都已解决
+  │     ├─ 如果所有中断都有 resume 值 → 返回 resolved HashMap
+  │     └─ 如果有中断缺少值 → 返回 MissingResumeValue 错误
+  │
+  └─ 输出: HashMap<interrupt_id, resume_value>
 ```
 
-### 设计
+**错误处理与验证**
 
-同一节内可以有多个 `interrupt!()` 调用。每次调用通过 `__current_interrupt_index()` 获取递增索引。Resume 时提供的 values 是一个 Vec，按索引位置匹配。
+```rust
+/// 验证 resume 值是否完整覆盖所有挂起中断
+pub fn validate_resume_coverage(
+    resume_value: &ResumeValue,
+    scratchpad: &Scratchpad,
+) -> Result<(), JunctureError> {
+    let pending_interrupts: Vec<_> = scratchpad.interrupt_history.iter()
+        .filter(|r| !r.processed)
+        .collect();
 
-### 行为规则
+    match resume_value {
+        ResumeValue::Single(_) => {
+            // 单一值总是覆盖所有中断（无需验证）
+            Ok(())
+        }
 
-- 第一次执行：遇到第一个无法满足的 `interrupt!()` 即中止（不会继续执行后续代码）
-- Resume 时提供 N 个 values：节点重新执行，前 N 个 `interrupt!()` 直接返回对应 value
-- 如果节点有 M 个中断点（M > N），第 N+1 个 `interrupt!()` 再次中断
+        ResumeValue::ById(map) => {
+            for record in pending_interrupts {
+                if !map.contains_key(&record.id) && !scratchpad.get_null_resume(&record.id) {
+                    return Err(JunctureError::MissingResumeValue {
+                        interrupt_id: record.id.clone(),
+                    });
+                }
+            }
+            Ok(())
+        }
+
+        ResumeValue::ByNamespace(map) => {
+            for record in pending_interrupts {
+                let namespace = extract_namespace(&record.id);
+                if !map.contains_key(&namespace) && !scratchpad.get_null_resume(&record.id) {
+                    return Err(JunctureError::MissingResumeValue {
+                        interrupt_id: record.id.clone(),
+                    });
+                }
+            }
+            Ok(())
+        }
+    }
+}
+```
+
+### 3.4 设计规则与行为约束
+
+**多重中断的设计原则**
+
+同一节点内可以有多个 `interrupt!()` 调用。每次调用通过 `__current_interrupt_index()` 获取递增索引。Resume 时提供的 values 根据类型进行匹配：
+
+- **索引模式**：按中断索引顺序匹配（兼容模式）
+- **ID 模式**：按中断 ID 精确匹配（推荐用于命名中断）
+- **命名空间模式**：按命名空间匹配（用于子图中断）
+- **单一值模式**：所有挂起中断使用相同的 resume 值
+
+**行为规则**
+
+- **第一次执行**：遇到第一个无法满足的 `interrupt!()` 即中止（不会继续执行后续代码）
+- **Resume 时**：节点从头重新执行，通过 Scratchpad 确定哪些中断已处理
+- **部分 Resume**：如果只提供部分中断的 resume 值，未解决的中断会再次触发
+- **Null-resume**：已标记 processed 的中断可以 null-resume，无需再次提供值
 
 ### 示例
 
@@ -400,26 +744,61 @@ let app = graph.compile(CompileConfig {
 for node_id in &pending_nodes {
     if self.interrupt_before.contains(node_id) {
         // 持久化 checkpoint，标记 next = pending_nodes
-        // 发送 StreamEvent::Interrupt
-        // interrupt_before 的 payload 包含节点名称和中断原因
+        // 发送 StreamEvent::Interrupt，包含结构化 payload：
+        // {
+        //   "node": node_id.clone(),
+        //   "reason": "interrupt_before",
+        //   "timestamp": <current_time>
+        // }
         return Ok(ExecutionResult::Interrupted { ... });
     }
 }
 ```
 
-> **Implementation Note (C-06-001)**: Enhanced interrupt_before/after payloads use structured JSON with node name and reason ("interrupt_before"/"interrupt_after") instead of empty/minimal payloads. This provides better debugging and client handling compared to the design spec's minimal payload approach.
+**interrupt_before/after 的增强 Payload 设计**
 
-> **Implementation Note (D-06-4)**: The implementation populates the `interrupt_before` payload with node name and reason instead of leaving it empty, which is an enhancement over the design spec.
+实际实现提供了比设计规范更丰富的结构化 payload，包含节点名称、中断原因和时间戳：
 
 ```rust
-// 节点执行完成后，merge 之前
+/// interrupt_before/after 的结构化 payload
+#[derive(Debug, Serialize, Deserialize)]
+pub struct InterruptPayload {
+    /// 节点名称
+    pub node: String,
+    /// 中断原因："interrupt_before" 或 "interrupt_after"
+    pub reason: String,
+    /// 中断时间戳（用于调试和日志）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timestamp: Option<i64>,
+}
 
+// 在执行引擎中生成
+let payload = json!({
+    "node": node_id,
+    "reason": "interrupt_before",
+    "timestamp": chrono::Utc::now().timestamp()
+});
+```
+
+这种设计的优势：
+- **可调试性**：payload 包含完整的节点上下文，便于日志分析和问题追踪
+- **客户端友好**：客户端可以直接从 payload 中提取节点名称和原因，无需额外的状态查询
+- **时序追踪**：timestamp 字段支持时间线调试和性能分析
+- **一致性**：interrupt_before 和 interrupt_after 使用相同的 payload 结构，简化客户端处理逻辑
+
+```rust
 // 节点执行完成后，merge 之前
 for (node_id, output) in &step_outputs {
     if self.interrupt_after.contains(node_id) {
         // 先 apply 该节点的 writes
         // 持久化 checkpoint
-        // 发送 StreamEvent::Interrupt（payload 包含节点输出）
+        // 发送 StreamEvent::Interrupt，包含结构化 payload：
+        // {
+        //   "node": node_id.clone(),
+        //   "reason": "interrupt_after",
+        //   "timestamp": <current_time>,
+        //   "output": <serialized_output>  // 可选：包含节点输出
+        // }
         return Ok(ExecutionResult::Interrupted { ... });
     }
 }
@@ -588,8 +967,6 @@ async fn router_node(state: AgentState) -> Result<NodeOutput<AgentState>> {
 
 ### HIDDEN_TAG：过滤内部节点
 
-<!-- Addresses finding: L-7 -->
-
 > 参考: LangGraph 的 `TAG_HIDDEN` 常量
 
 Juncture 提供 `HIDDEN_TAG` 机制，用于标记不应出现在中断检查和流输出中的内部节点：
@@ -616,7 +993,64 @@ let config = RunnableConfig {
 };
 ```
 
-> **Implementation Note (C-06-002)**: HIDDEN_TAG filtering is fully implemented. The design note stating "not yet implemented" was outdated. The implementation includes `is_hidden_node()` checking `__` prefix+suffix, with filtering active in `should_interrupt()` and stream output processing.
+**完全实现的 HIDDEN_TAG 过滤机制**
+
+HIDDEN_TAG 过滤功能已在生产环境中完全实现，包含以下核心组件：
+
+```rust
+/// 检查节点是否为隐藏节点
+///
+/// 隐藏节点定义：
+/// 1. 节点名称以 "__" 开头和结尾（例如 "__route_internal__"）
+/// 2. 节点标签中包含 HIDDEN_TAG
+///
+/// # Returns
+/// - true: 节点应被过滤
+/// - false: 节点应正常显示
+pub fn is_hidden_node(node_name: &str, tags: &[String]) -> bool {
+    // 检查命名约定：以 __ 开头和结尾
+    let is_hidden_by_name = node_name.starts_with("__") && node_name.ends_with("__");
+    
+    // 检查标签：包含 HIDDEN_TAG
+    let is_hidden_by_tag = tags.iter().any(|tag| tag == HIDDEN_TAG);
+    
+    is_hidden_by_name || is_hidden_by_tag
+}
+```
+
+**集成点**
+
+1. **`should_interrupt()` 函数**：在 interrupt_before/interrupt_after 检查时跳过隐藏节点
+   ```rust
+   fn should_interrupt(
+       pending_tasks: &[PendingTask],
+       interrupt_before: &HashSet<String>,
+       channel_versions: &HashMap<String, u64>,
+       versions_seen_for_interrupt: &HashMap<String, u64>,
+   ) -> bool {
+       pending_tasks.iter()
+           .filter(|task| !is_hidden_node(&task.node_name, &task.tags))
+           .any(|task| interrupt_before.contains(&task.node_name))
+   }
+   ```
+
+2. **StreamMode::Updates 输出**：隐藏节点的输出不出现在 stream 中
+   ```rust
+   if let StreamEvent::Updates { node, .. } = event {
+       if is_hidden_node(&node, &node_tags) {
+           continue; // 跳过隐藏节点的事件
+       }
+   }
+   ```
+
+3. **`get_graph()` 导出**：可选地排除隐藏节点，提供简化的图视图
+   ```rust
+   pub fn get_graph(&self, include_hidden: bool) -> GraphView {
+       // 根据 include_hidden 参数过滤节点
+   }
+   ```
+
+这种设计确保了内部节点在调试、监控和图可视化时不会污染输出，提高了系统的可维护性和用户体验。
 
 ### 幂等性要求
 
@@ -880,10 +1314,128 @@ async fn approval_node(state: ApproveState, runtime: &Runtime<()>) -> Result<Com
 }
 ```
 
-PregelLoop 在捕获到 ParentCommand 时：
-1. 将 Command 从子图上下文提取出来
-2. 通过 `GraphTarget::Parent` 路由到父图的调度系统
-3. 父图的 `after_tick()` 处理该 Command 的 goto/update
+**完全集成的 ParentCommand 冒泡机制**
+
+ParentCommand 的实现超越了基本的设计概念，提供了完整的子图到父图命令冒泡系统：
+
+```rust
+/// ParentCommand 包装器，包含完整的上下文信息
+pub struct ParentCommand<S: State> {
+    /// 子图的命令
+    pub command: Command<S>,
+    /// 源节点信息（用于调试和日志）
+    pub source_node: String,
+    /// 子图命名空间（用于路由）
+    pub namespace: String,
+}
+
+impl<S: State> ParentCommand<S> {
+    /// 从子图节点创建 ParentCommand
+    pub fn from_subgraph(
+        command: Command<S>,
+        source_node: &str,
+        namespace: &str,
+    ) -> Self {
+        Self {
+            command,
+            source_node: source_node.to_string(),
+            namespace: namespace.to_string(),
+        }
+    }
+}
+```
+
+**冒泡处理流程**
+
+PregelLoop 在捕获到 ParentCommand 时的完整处理流程：
+
+1. **命令提取**：将 Command 从子图上下文中提取，保留完整的类型信息和状态更新
+   ```rust
+   match result {
+       Err(JunctureError::ParentCommand(cmd)) => {
+           // 从子图异常中提取命令和上下文
+           let extracted_cmd = cmd.into_inner();
+           let source_info = cmd.source_info();
+       }
+   }
+   ```
+
+2. **路由转换**：通过 `GraphTarget::Parent` 将子图命令转换为父图可处理的格式
+   ```rust
+   /// 路由目标：支持子图到父图的冒泡
+   pub enum GraphTarget {
+       /// 当前图的节点
+       Local(String),
+       /// 父图的节点（冒泡）
+       Parent { node: String, namespace: String },
+       /// 子图的节点（递归）
+       Child { node: String, graph_id: String },
+   }
+   ```
+
+3. **父图处理**：父图的 `after_tick()` 接收并处理冒泡上来的命令
+   ```rust
+   // 在父图的 PregelLoop 中
+   fn after_tick(&mut self, step_outputs: HashMap<String, NodeOutput>) {
+       for (node_id, output) in step_outputs {
+           match output {
+               NodeOutput::ParentCommand(parent_cmd) => {
+                   // 处理子图冒泡上来的命令
+                   self.handle_bubbled_command(parent_cmd)?;
+               }
+               _ => { /* 正常处理 */ }
+           }
+       }
+   }
+   ```
+
+**命令冒泡的完整生命周期**
+
+```rust
+/// 1. 子图节点创建并返回 ParentCommand
+async fn subgraph_node(state: SubState) -> Result<Command<SubState>> {
+    if state.should_escalate {
+        return Err(ParentCommand::from_subgraph(
+            Command::goto("escalation_handler"),
+            "subgraph_node",
+            "approval_subgraph"
+        ));
+    }
+    Ok(Command::none())
+}
+
+/// 2. 子图 PregelLoop 捕获并转发
+fn execute_subgraph_step(&mut self) {
+    match self.execute_node(node).await {
+        Err(JunctureError::ParentCommand(cmd)) => {
+            // 转发到父图，不处理子图内的状态变更
+            return Ok(StepResult::BubbleUp { command: cmd });
+        }
+        _ => { /* 继续子图执行 */ }
+    }
+}
+
+/// 3. 父图 PregelLoop 接收并处理冒泡命令
+fn handle_bubbled_command(&mut self, parent_cmd: ParentCommand) {
+    // 应用子图的 state 更新（如果有）
+    if let Some(update) = parent_cmd.command.update {
+        self.apply_update(update)?;
+    }
+    
+    // 处理 goto 路由
+    if let Some(goto) = parent_cmd.command.goto {
+        self.route_to_target(gto, &parent_cmd.namespace)?;
+    }
+}
+```
+
+**优势特性**
+
+- **类型安全**：通过 Rust 的类型系统确保子图和父图之间的命令传递是类型安全的
+- **命名空间隔离**：每个子图都有独立的命名空间，避免命令冲突
+- **状态传播**：子图的状态更新可以随命令一起冒泡到父图
+- **调试友好**：保留了完整的源节点和命名空间信息，便于问题追踪
+- **嵌套支持**：支持多层嵌套子图的命令冒泡，通过命名空间栈实现精确路由
 
 ### 9.2 Scratchpad（每任务的临时状态追踪）
 

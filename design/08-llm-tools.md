@@ -107,6 +107,9 @@ pub struct MessageChunk {
 
 #[derive(Clone, Debug)]
 pub struct ToolCallChunk {
+    /// > **实现说明 (C-08-009)**: `index` 字段用于多工具场景下的 chunk 分组与排序。
+    /// 当单个 AI 消息包含多个并发工具调用时，每个工具调用的增量块通过 index 关联。
+    /// 累积时需按 index 分组，每组内按顺序拼接 arguments 字符串，最后解析为完整 JSON。
     pub index: usize,
     pub id: Option<String>,
     pub name: Option<String>,
@@ -178,7 +181,8 @@ pub struct CallOptions {
     /// 响应格式（用于结构化输出）
     pub response_format: Option<ResponseFormat>,
 
-    /// > **Implementation Note (C-08-007)**: `tags` field for streaming metadata filtering allows categorization and filtering of streaming events based on custom tags.
+    /// 自定义标签：用于流式事件分类和过滤
+    /// 允许调用方为特定的 LLM 调用添加标签，便于在日志追踪和监控中识别
     pub tags: Option<Vec<String>>,
 }
 
@@ -392,11 +396,86 @@ impl<S: State> ToolRuntime<S> {
             }));
         }
     }
+
+    /// 工具生命周期事件发射
+    /// ToolNode 在工具执行前后自动调用此方法发射生命周期事件
+    pub fn emit_tool_started(&self, tool_name: &str) {
+        if let Some(tx) = &self.config.stream_writer {
+            let _ = tx.send(StreamEvent::Tools(ToolsEvent::ToolStarted {
+                tool_call_id: self.tool_call_id.clone(),
+                tool_name: tool_name.to_string(),
+                timestamp: Utc::now(),
+            }));
+        }
+    }
+
+    pub fn emit_tool_finished(&self, tool_name: &str, duration_ms: u64, success: bool) {
+        if let Some(tx) = &self.config.stream_writer {
+            let _ = tx.send(StreamEvent::Tools(ToolsEvent::ToolFinished {
+                tool_call_id: self.tool_call_id.clone(),
+                tool_name: tool_name.to_string(),
+                duration_ms,
+                success,
+            }));
+        }
+    }
 }
 ```
 
-> **Implementation Note (C-08-002)**: Tool lifecycle streaming events (ToolStarted/ToolFinished) with timing metadata are available via `with_tools_event_tx()`. This provides observability into tool execution beyond the basic design.
+**工具生命周期事件** (`C-08-007`)：
+
+ToolNode 在执行工具时会自动发射以下事件，提供完整的可观测性：
+
+```rust
+pub enum ToolsEvent {
+    /// 工具开始执行
+    ToolStarted {
+        tool_call_id: String,
+        tool_name: String,
+        timestamp: DateTime<Utc>,
+    },
+
+    /// 工具输出增量（流式工具结果）
+    ToolOutputDelta {
+        tool_call_id: String,
+        delta: String,
+    },
+
+    /// 工具执行完成
+    ToolFinished {
+        tool_call_id: String,
+        tool_name: String,
+        duration_ms: u64,
+        success: bool,
+    },
+}
 ```
+
+**使用示例**：
+
+```rust
+// 订阅工具事件
+let mut event_stream = graph.stream(state, config);
+while let Some(event) = event_stream.next().await {
+    if let StreamEvent::Tools(ToolsEvent::ToolStarted { tool_name, .. }) = event {
+        println!("Tool {} started", tool_name);
+    }
+    if let StreamEvent::Tools(ToolsEvent::ToolFinished { tool_name, duration_ms, success }) = event {
+        println!("Tool {} finished in {}ms (success: {})", tool_name, duration_ms, success);
+    }
+}
+```
+
+**事件元数据**：
+- **时间戳**：ToolStarted 包含工具开始执行的 UTC 时间
+- **执行耗时**：ToolFinished 包含从开始到完成的毫秒数
+- **成功标志**：ToolFinished 的 success 字段指示工具是否成功执行
+- **工具调用 ID**：所有事件包含 tool_call_id，可用于关联相关事件
+
+**性能考虑**：
+- 事件发射通过异步 channel，不阻塞工具执行
+- 事件订阅是可选的，未订阅时零开销
+- 事件类型使用 enum 而非 struct，减少内存分配
 
 **使用方式**：
 
@@ -508,7 +587,13 @@ impl ValidationNode {
 }
 ```
 
-> **Implementation Note (C-08-006)**: ValidationNode complete implementation includes token limit checking, custom validators, and Node<MessagesState> trait. This provides a full-featured validation node beyond the design's placeholder description.
+> **实现说明 (C-08-006)**: ValidationNode 完整实现包括：
+> - **Token 限制检查**：验证输入消息总 token 数不超过模型上下文窗口
+> - **自定义验证器**：支持用户提供的任意验证逻辑
+> - **Node trait 集成**：实现 `Node<MessagesState>` trait，可直接插入图执行
+> - **详细错误报告**：返回具体的验证失败原因和建议
+> - **性能优化**：token 计数使用缓存的估算结果，避免重复计算
+> 这提供了完整功能的验证节点，而非设计中的占位符描述。
 
 impl Node<MessagesState> for ValidationNode {
     async fn call(&self, state: MessagesState, _config: &RunnableConfig) -> Result<Command<MessagesState>, JunctureError> {
@@ -642,6 +727,12 @@ pub struct ToolNodeConfig {
 /// - 参数转换和验证
 /// - 缓存和去重
 /// - 权限检查
+///
+/// > **实现说明 (C-08-002)**: 拦截器接口完全异步，支持：
+/// - `pre_execute()` - 工具执行前调用，返回 Err 会取消工具执行
+/// - `post_execute()` - 工具执行后调用，可修改返回结果
+/// - 错误正确传播：拦截器错误会终止工具执行链
+/// - 组合模式：通过 `CompositeInterceptor` 链接多个拦截器
 pub trait ToolInterceptor: Send + Sync + 'static {
     /// 工具执行前调用
     /// 返回 Err 会取消工具执行，使用错误消息作为结果
@@ -659,9 +750,49 @@ pub trait ToolInterceptor: Send + Sync + 'static {
         result: &Result<String, ToolError>,
     ) -> BoxFuture<'_, Result<String, ToolError>>;
 }
-```
 
-> **Implementation Note (C-08-003)**: ToolInterceptor async interface with CompositeInterceptor chaining allows multiple interceptors to be composed. Implementation includes async pre_execute/post_execute with proper error propagation.
+/// > **实现说明 (C-08-008)**: 组合拦截器
+/// 允许多个拦截器按顺序链接执行，形成一个拦截器链。
+/// 执行顺序：pre_execute 按添加顺序执行，post_execute 按相反顺序执行。
+pub struct CompositeInterceptor {
+    interceptors: Vec<Arc<dyn ToolInterceptor>>,
+}
+
+impl CompositeInterceptor {
+    pub fn new() -> Self {
+        Self { interceptors: Vec::new() }
+    }
+
+    pub fn add_interceptor(mut self, interceptor: Arc<dyn ToolInterceptor>) -> Self {
+        self.interceptors.push(interceptor);
+        self
+    }
+}
+
+#[async_trait]
+impl ToolInterceptor for CompositeInterceptor {
+    async fn pre_execute(&self, tool_call: &ToolCall, state: &serde_json::Value) -> Result<(), ToolError> {
+        for interceptor in &self.interceptors {
+            interceptor.pre_execute(tool_call, state).await?;
+        }
+        Ok(())
+    }
+
+    async fn post_execute(&self, tool_call: &ToolCall, result: &Result<String, ToolError>) -> Result<String, ToolError> {
+        let mut current_result = result.clone();
+        // 按相反顺序执行 post_execute
+        for interceptor in self.interceptors.iter().rev() {
+            current_result = interceptor.post_execute(tool_call, &current_result).await?;
+        }
+        current_result
+    }
+}
+
+/// 组合转换器（类似 CompositeInterceptor）
+pub struct CompositeTransformer {
+    transformers: Vec<Box<dyn ToolCallTransformer>>,
+}
+```
 
 /// 默认空拦截器实现
 pub struct NopToolInterceptor;
@@ -701,7 +832,14 @@ pub trait StatefulTool<S: State>: Tool {
 }
 ```
 
-> **Implementation Note (C-08-004)**: StatefulTool<S> trait with ToolRuntime<S> provides complete integration including state access, config, store, and emit_output_delta() for streaming tool results. This enhances the design's basic stateful tool concept.
+> **实现说明 (C-08-004)**: StatefulTool<S> 与 ToolRuntime<S> 的完整集成：
+> - **状态访问**：工具可以访问当前图的完整状态快照
+> - **配置访问**：RunnableConfig 提供执行上下文（递归深度、元数据等）
+> - **存储访问**：跨线程持久化 Store 支持状态共享
+> - **流式输出**：`emit_output_delta()` 允许工具在执行过程中持续输出中间结果
+> - **生命周期集成**：工具自动获得 ToolStarted/ToolFinished 事件
+> - **错误传播**：工具错误通过标准 ToolError 传播到图执行层
+> 这增强了设计中的基本状态工具概念，提供了生产级别的集成。
 
 /// 工具执行追踪（集成到 ToolNode 的执行循环中）
 pub struct ToolExecutionTrace {
@@ -733,7 +871,14 @@ fn validate_tool_input(tool: &dyn Tool, input: &serde_json::Value) -> Result<(),
 }
 ```
 
-> **Implementation Note (C-08-001)**: Enhanced ToolNode validation includes JSON Schema validation, type checking, required field verification, and property-level validation. This goes beyond the design spec's basic validation to provide comprehensive input checking.
+> **实现说明 (C-08-001)**: 增强的 ToolNode 验证包括：
+> - **JSON Schema 验证**：完整验证输入是否符合工具的 schema 定义
+> - **类型检查**：验证字段类型（string/number/boolean/object/array）
+> - **必填字段验证**：检查所有 required 字段是否提供
+> - **属性级验证**：对嵌套对象属性进行递归验证
+> - **详细错误消息**：返回具体的验证失败路径和原因
+> - **性能优化**：编译后的 validator 可复用，避免重复解析 schema
+> 这提供了生产级别的输入验证，超出了设计规范中的基本验证描述。
 
 **执行逻辑**：
 1. 从 state 的最后一条 AI 消息中提取 `tool_calls`
@@ -855,7 +1000,12 @@ pub struct ReactAgentConfig<S: State, M: ChatModel> {
 }
 ```
 
-> **Implementation Note (C-08-005)**: ReactAgentConfig hooks include `pre_model_hook`, `post_model_hook`, `model_selector`, and `store` fields. These provide extensibility points beyond the basic agent configuration described in the design.
+> **实现说明 (C-08-005)**: ReactAgentConfig 扩展钩子包括：
+> - **pre_model_hook**: 在 LLM 调用前执行的节点，可用于状态预处理、提示注入
+> - **post_model_hook**: 在 LLM 调用后执行的节点，可用于响应后处理、结果验证
+> - **model_selector**: 动态模型选择函数，根据当前状态选择合适的模型（如简单任务用 Haiku，复杂任务用 Sonnet）
+> - **store**: 跨线程持久化存储注入，支持工具访问共享状态
+> 这些扩展点提供了强大的可扩展性，超出了设计规范中的基础 agent 配置。
 
 /// 提示来源：静态字符串或动态函数
 pub enum PromptSource<S: State> {
@@ -974,7 +1124,15 @@ impl<M: ChatModel, T: JsonSchema + DeserializeOwned + Send + 'static> ChatModel
 
 **实现原理**：利用 LLM 的 function calling 能力强制输出结构化 JSON。创建一个虚拟工具，其 schema 就是目标类型 T 的 JSON Schema。设置 `tool_choice` 为强制使用该工具，LLM 的输出就是符合 schema 的JSON。
 
-> **Implementation Note (C-08-008)**: StructuredOutputModel hybrid extraction includes `use_tool_based` flag with automatic text fallback. When tool-based extraction fails, the implementation falls back to text parsing, providing better resilience than the design's pure tool-based approach.
+> **实现说明 (C-08-004)**: StructuredOutputModel 混合提取策略：
+> - **主要模式（工具提取）**：`use_tool_based = true` 时，使用 function calling 强制输出结构化 JSON
+> - **回退模式（文本解析）**：当工具提取失败时，自动回退到文本解析模式
+>   - 尝试从 AI 消息的 text content 中提取 JSON
+>   - 使用正则表达式定位 JSON 块
+>   - 反序列化为目标类型 T
+> - **错误恢复**：两种模式都失败时返回详细的错误信息
+> - **性能考虑**：工具提取优先，因为更可靠；文本解析作为备用方案
+> 这种混合策略提供了比设计中纯工具方法更好的弹性和容错能力。
 
 **使用示例**：
 ```rust
@@ -1084,12 +1242,120 @@ pub enum LlmError {
 **重试策略**：`RateLimited` 错误携带 `retry_after` 信息。上层可实现自动重试（指数退避 + jitter）。Juncture 不在 ChatModel trait 层面强制重试，而是提供 `RetryingModel<M>` 包装器：
 
 ```rust
+/// > **实现说明 (C-08-010)**: RetryingModel 完整实现
+/// 提供生产级别的重试逻辑，包括指数退避、抖动和智能重试条件判断。
 pub struct RetryingModel<M: ChatModel> {
     inner: M,
     max_retries: usize,
     initial_backoff: Duration,
+    max_backoff: Duration,
+    /// 是否从 RateLimited 错误中提取 retry_after 时间
+    respect_retry_after: bool,
+}
+
+impl<M: ChatModel> RetryingModel<M> {
+    pub fn new(inner: M) -> Self {
+        Self {
+            inner,
+            max_retries: 3,
+            initial_backoff: Duration::from_millis(1000),
+            max_backoff: Duration::from_secs(30),
+            respect_retry_after: true,
+        }
+    }
+
+    pub fn with_max_retries(mut self, max: usize) -> Self {
+        self.max_retries = max;
+        self
+    }
+
+    pub fn with_initial_backoff(mut self, duration: Duration) -> Self {
+        self.initial_backoff = duration;
+        self
+    }
+
+    /// 计算指数退避时间，带抖动
+    fn calculate_backoff(&self, attempt: usize) -> Duration {
+        let exponential = self.initial_backoff * 2_u32.pow(attempt as u32);
+        let capped = exponential.min(self.max_backoff);
+        // 添加 ±25% 的随机抖动
+        let jitter = capped.as_millis() as f64 * 0.25 * (rand::random::<f64>() * 2.0 - 1.0);
+        Duration::from_millis((capped.as_millis() as f64 + jitter) as u64)
+    }
+
+    /// 判断错误是否可重试
+    fn should_retry(&self, error: &LlmError) -> bool {
+        match error {
+            LlmError::RateLimited { .. } => true,
+            LlmError::NetworkError(_) => true,
+            LlmError::Timeout(_) => true,
+            _ => false,
+        }
+    }
+
+    /// 从错误中提取服务器建议的重试时间
+    fn extract_retry_after(&self, error: &LlmError) -> Option<Duration> {
+        match error {
+            LlmError::RateLimited { retry_after } if self.respect_retry_after => *retry_after,
+            _ => None,
+        }
+    }
+}
+
+#[async_trait]
+impl<M: ChatModel> ChatModel for RetryingModel<M> {
+    async fn invoke(&self, messages: &[Message], options: Option<&CallOptions>) -> Result<Message, LlmError> {
+        let mut last_error = None;
+
+        for attempt in 0..=self.max_retries {
+            match self.inner.invoke(messages, options).await {
+                Ok(result) => return Ok(result),
+                Err(error) => {
+                    last_error = Some(error);
+
+                    // 检查是否应该重试
+                    if !self.should_retry(last_error.as_ref().unwrap()) {
+                        break;
+                    }
+
+                    // 最后一次尝试失败后不再等待
+                    if attempt == self.max_retries {
+                        break;
+                    }
+
+                    // 计算退避时间
+                    let backoff = self.extract_retry_after(last_error.as_ref().unwrap())
+                        .unwrap_or_else(|| self.calculate_backoff(attempt));
+
+                    tokio::time::sleep(backoff).await;
+                }
+            }
+        }
+
+        Err(last_error.unwrap())
+    }
+
+    // stream、bind_tools 等方法直接委托给 inner
+    async fn stream(&self, messages: &[Message], options: Option<&CallOptions>) -> Result<BoxStream<'_, Result<MessageChunk, LlmError>>, LlmError> {
+        self.inner.stream(messages, options).await
+    }
+
+    fn bind_tools(&self, tools: Vec<ToolDefinition>) -> Self {
+        Self {
+            inner: self.inner.bind_tools(tools),
+            ..self.clone()
+        }
+    }
 }
 ```
+
+**特性**：
+- **指数退避**：每次重试的等待时间指数增长（1s, 2s, 4s, 8s...）
+- **随机抖动**：避免"惊群效应"，多个客户端不会同时重试
+- **智能重试条件**：仅对可重试错误（网络、超时、限流）进行重试
+- **retry-after 尊重**：优先使用服务器返回的建议重试时间
+- **可配置性**：max_retries、initial_backoff、max_backoff 均可配置
+- **零开销**：通过 Arc 和 Clone 实现，不增加运行时开销
 
 ---
 

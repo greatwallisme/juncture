@@ -235,7 +235,8 @@ where
                 //   4. idle timeout (heartbeat-based, when configured)
                 //   5. retry (execute_with_retry, when configured)
                 //   6. interrupt context (INTERRUPT_CONTEXT.scope)
-                //   7. node.call()
+                //   7. budget tracker (BUDGET_TRACKER.scope)
+                //   8. node.call()
                 //
                 // The timeout wraps the entire retry sequence so that cumulative
                 // retry time is bounded by the run_timeout. The idle timeout
@@ -264,19 +265,40 @@ where
                                 // retries. State is cloned per-attempt by execute_with_retry.
                                 let ctx_ref = Arc::clone(&ctx);
                                 crate::interrupt::INTERRUPT_CONTEXT.scope(ctx_ref, async move {
-                                    execute_with_retry(
-                                        &exec_node_name,
-                                        policy,
-                                        |s, cfg| node.call(s, cfg),
-                                        task_state,
-                                        &task_config,
-                                    )
-                                    .await
+                                    if let Some(ref tracker) = task_config.budget_tracker {
+                                        let tracker_ref = Arc::clone(tracker);
+                                        crate::pregel::BUDGET_TRACKER.scope(tracker_ref, async move {
+                                            execute_with_retry(
+                                                &exec_node_name,
+                                                policy,
+                                                |s, cfg| node.call(s, cfg),
+                                                task_state,
+                                                &task_config,
+                                            )
+                                            .await
+                                        }).await
+                                    } else {
+                                        execute_with_retry(
+                                            &exec_node_name,
+                                            policy,
+                                            |s, cfg| node.call(s, cfg),
+                                            task_state,
+                                            &task_config,
+                                        )
+                                        .await
+                                    }
                                 }).await
                             } else {
                                 // Standard execution (no retry)
                                 crate::interrupt::INTERRUPT_CONTEXT.scope(ctx, async move {
-                                    node.call(task_state, &task_config).await
+                                    if let Some(ref tracker) = task_config.budget_tracker {
+                                        let tracker_ref = Arc::clone(tracker);
+                                        crate::pregel::BUDGET_TRACKER.scope(tracker_ref, async move {
+                                            node.call(task_state, &task_config).await
+                                        }).await
+                                    } else {
+                                        node.call(task_state, &task_config).await
+                                    }
                                 }).await
                             }
                         };
@@ -427,6 +449,7 @@ where
                         command,
                         duration,
                         trigger: task_trigger,
+                        triggered_fields: Vec::new(), // Will be populated by scheduler
                         error: None,
                     })
                     .map_err(|e| (node_name, e))
@@ -476,6 +499,7 @@ where
                         command: crate::Command::default(),
                         duration: std::time::Duration::ZERO,
                         trigger: crate::pregel::types::TaskTrigger::Pull,
+                        triggered_fields: Vec::new(), // Error handlers have no specific triggered fields
                         error: Some(error),
                     });
                 } else {

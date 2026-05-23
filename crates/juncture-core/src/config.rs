@@ -14,7 +14,8 @@ use crate::observability::{
     CachePolicy as LlmCachePolicy, GraphLifecycleCallback, MetricsCollector,
 };
 use crate::pregel::{BudgetConfig, BudgetTracker, Durability};
-use crate::runtime::{Heartbeat, RuntimeStore};
+use crate::runtime::Heartbeat;
+use crate::store::Store;
 
 /// Configuration for graph execution
 #[derive(Clone, Default)]
@@ -470,7 +471,7 @@ pub struct EntrypointConfig {
     pub checkpointer: Option<Arc<dyn CheckpointSaver>>,
 
     /// Optional store for cross-thread state
-    pub store: Option<Arc<dyn RuntimeStore>>,
+    pub store: Option<Arc<dyn Store>>,
 }
 
 impl std::fmt::Debug for EntrypointConfig {
@@ -480,7 +481,7 @@ impl std::fmt::Debug for EntrypointConfig {
                 "checkpointer",
                 &self.checkpointer.as_ref().map(|_| "<CheckpointSaver>"),
             )
-            .field("store", &self.store.as_ref().map(|_| "<RuntimeStore>"))
+            .field("store", &self.store.as_ref().map(|_| "<Store>"))
             .finish()
     }
 }

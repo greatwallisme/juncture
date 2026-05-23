@@ -14,6 +14,15 @@ use std::sync::Arc;
 /// Returns `None` for [`SubgraphPersistence::Stateless`] (no checkpointing),
 /// a stable `|name:thread_id` namespace for [`SubgraphPersistence::PerThread`],
 /// and a fresh UUID-based namespace for [`SubgraphPersistence::Inherit`].
+///
+/// **FIX for M06-001**: Even stateless subgraphs now get a checkpoint namespace
+/// for stream event attribution purposes. Checkpointing is still disabled
+/// (checkpointer returns None), but the namespace ensures that interrupt events
+/// can be properly attributed to their nested context.
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "return type uses Option for API compatibility even though M06-001 fix makes all branches return Some"
+)]
 fn compute_child_namespace(
     persistence: SubgraphPersistence,
     name: &str,
@@ -21,7 +30,14 @@ fn compute_child_namespace(
     thread_id: Option<&str>,
 ) -> Option<CheckpointNamespace> {
     match persistence {
-        SubgraphPersistence::Stateless => None,
+        SubgraphPersistence::Stateless => {
+            // Stateless subgraphs get a namespace for stream event attribution.
+            // Use a special "stateless" invocation ID to distinguish from other modes.
+            // This ensures interrupt events from stateless subgraphs have proper namespace.
+            let invocation_id = format!("stateless:{}", uuid::Uuid::new_v4());
+            let base = parent_ns.cloned().unwrap_or_default();
+            Some(base.child(name, &invocation_id))
+        }
         SubgraphPersistence::PerThread => {
             let thread_key = thread_id.unwrap_or("default");
             let base = parent_ns.cloned().unwrap_or_default();
@@ -295,6 +311,7 @@ where
 
         Box::pin(async move {
             // Build child checkpoint namespace based on persistence mode.
+            // Even stateless subgraphs get a namespace for stream event attribution (M06-001 fix).
             let child_ns = compute_child_namespace(
                 persistence,
                 &name,
@@ -489,7 +506,9 @@ mod tests {
             None,
             Some("thread-42"),
         );
-        assert_eq!(ns, None);
+        // M06-001 fix: Stateless subgraphs now get a namespace for stream attribution
+        let ns = ns.expect("Stateless should produce a namespace for M06-001 fix");
+        assert!(ns.as_str().starts_with("|my_sub:stateless:"));
     }
 
     #[test]
@@ -501,7 +520,9 @@ mod tests {
             Some(&parent),
             Some("thread-42"),
         );
-        assert_eq!(ns, None);
+        // M06-001 fix: Stateless subgraphs now get a namespace for stream attribution
+        let ns = ns.expect("Stateless should produce a namespace for M06-001 fix");
+        assert!(ns.as_str().starts_with("|parent:abc|my_sub:stateless:"));
     }
 
     #[test]
@@ -1168,14 +1189,20 @@ mod tests {
             "|review:uuid-1|detail:uuid-2|sub:thread-42"
         );
 
-        // Stateless mode: returns None regardless of parent depth
+        // Stateless mode: M06-001 fix - now produces a namespace for stream attribution
         let child_stateless = compute_child_namespace(
             SubgraphPersistence::Stateless,
             "sub",
             Some(&parent),
             Some("thread-1"),
         );
-        assert_eq!(child_stateless, None);
+        let child_stateless =
+            child_stateless.expect("Stateless should produce a namespace for M06-001 fix");
+        assert!(
+            child_stateless
+                .as_str()
+                .starts_with("|review:uuid-1|detail:uuid-2|sub:stateless:")
+        );
     }
 
     #[test]

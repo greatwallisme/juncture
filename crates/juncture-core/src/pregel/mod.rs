@@ -45,7 +45,8 @@ mod types;
 
 pub use crate::stream::{StreamEvent, StreamMode};
 pub use budget::{
-    BudgetConfig, BudgetExceededAction, BudgetExceededReason, BudgetTracker, BudgetUsage,
+    BUDGET_TRACKER, BudgetConfig, BudgetExceededAction, BudgetExceededReason, BudgetReportError,
+    BudgetTracker, BudgetUsage, try_report_model_call,
 };
 pub use context::{ExecutionConfig, ExecutionContext, TimeoutPolicy};
 pub use durability::Durability;

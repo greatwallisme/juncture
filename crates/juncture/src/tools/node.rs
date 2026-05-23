@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use juncture_core::state::State;
 use juncture_core::state::messages::{Message, Role, ToolCall};
 use juncture_core::stream::ToolsEvent;
 use juncture_tracing::spans::attrs;
@@ -11,16 +12,17 @@ use tokio::task::JoinSet;
 
 use crate::tools::error::ToolError;
 use crate::tools::interceptor::{NopToolInterceptor, ToolInterceptor};
-use crate::tools::trait_::Tool;
+use crate::tools::runtime::ToolRuntime;
+use crate::tools::trait_::{StatefulTool, Tool, ToolDefinition};
 use crate::tools::transformer::ToolCallTransformer;
 
 /// Configuration for `ToolNode`
 ///
 /// Controls tool execution behavior including error handling,
 /// validation, and interception.
-pub struct ToolNodeConfig {
+pub struct ToolNodeConfig<S: State> {
     /// Available tools for execution
-    pub tools: Vec<Box<dyn Tool>>,
+    pub tools: Vec<ToolEntry<S>>,
 
     /// Whether to handle errors as tool result messages
     ///
@@ -38,7 +40,76 @@ pub struct ToolNodeConfig {
     pub interceptor: Option<Arc<dyn ToolInterceptor>>,
 }
 
-impl Default for ToolNodeConfig {
+/// A wrapper that can hold either a stateless or stateful tool.
+///
+/// This enum enables `ToolNode` to store and dispatch to both types of tools:
+/// - Stateless tools implement only `Tool` trait
+/// - Stateful tools implement `StatefulTool<S>` and can access graph state
+#[derive(Clone)]
+pub enum ToolEntry<S: State> {
+    /// A stateless tool that implements only `Tool`
+    Stateless(Arc<dyn Tool>),
+
+    /// A stateful tool that implements `StatefulTool<S>` with runtime access
+    Stateful(Arc<dyn StatefulTool<S>>),
+}
+
+impl<S: State> std::fmt::Debug for ToolEntry<S> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Stateless(_) => f.debug_tuple("Stateless").field(&self.name()).finish(),
+            Self::Stateful(_) => f.debug_tuple("Stateful").field(&self.name()).finish(),
+        }
+    }
+}
+
+impl<S: State> ToolEntry<S> {
+    /// Get the tool name
+    pub fn name(&self) -> &str {
+        match self {
+            Self::Stateless(tool) => tool.name(),
+            Self::Stateful(tool) => tool.name(),
+        }
+    }
+
+    /// Get the tool description
+    pub fn description(&self) -> &str {
+        match self {
+            Self::Stateless(tool) => tool.description(),
+            Self::Stateful(tool) => tool.description(),
+        }
+    }
+
+    /// Get the tool's JSON schema
+    pub fn schema(&self) -> serde_json::Value {
+        match self {
+            Self::Stateless(tool) => tool.schema(),
+            Self::Stateful(tool) => tool.schema(),
+        }
+    }
+
+    /// Get the tool definition
+    pub fn definition(&self) -> ToolDefinition {
+        match self {
+            Self::Stateless(tool) => tool.definition(),
+            Self::Stateful(tool) => tool.definition(),
+        }
+    }
+
+    /// Create a stateless tool entry from a boxed Tool
+    #[must_use]
+    pub fn from_stateless(tool: Box<dyn Tool>) -> Self {
+        Self::Stateless(Arc::from(tool))
+    }
+
+    /// Create a stateful tool entry from an Arc<StatefulTool>
+    #[must_use]
+    pub fn from_stateful(tool: Arc<dyn StatefulTool<S>>) -> Self {
+        Self::Stateful(tool)
+    }
+}
+
+impl<S: State> Default for ToolNodeConfig<S> {
     fn default() -> Self {
         Self {
             tools: Vec::new(),
@@ -50,7 +121,7 @@ impl Default for ToolNodeConfig {
     }
 }
 
-impl std::fmt::Debug for ToolNodeConfig {
+impl<S: State> std::fmt::Debug for ToolNodeConfig<S> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ToolNodeConfig")
             .field("tools_count", &self.tools.len())
@@ -146,13 +217,17 @@ impl ToolExecutionTrace {
 /// It extracts `tool_calls` from the last AI message, looks up the corresponding
 /// Tool implementations, executes them concurrently, and returns tool result messages.
 ///
+/// # Type Parameters
+///
+/// * `S` - The state type (must implement [`State`])
+///
 /// # Execution Flow
 ///
 /// 1. Extract `tool_calls` from the last AI message in the conversation
 /// 2. For each `tool_call`:
 ///    - Apply `pre_execute` interceptor hook
 ///    - Transform the tool call arguments
-///    - Execute the tool concurrently
+///    - Execute the tool concurrently (with state access for stateful tools)
 ///    - Apply `post_execute` interceptor hook
 /// 3. Return tool result messages
 ///
@@ -184,9 +259,9 @@ impl ToolExecutionTrace {
 /// let results = tool_node.execute(&messages).await?;
 /// // results contains tool result messages
 /// ```
-pub struct ToolNode {
+pub struct ToolNode<S: State> {
     /// Registered tools indexed by name
-    tools: HashMap<String, Arc<dyn Tool>>,
+    tools: HashMap<String, ToolEntry<S>>,
 
     /// Whether to handle errors as tool result messages
     handle_errors: bool,
@@ -208,7 +283,7 @@ pub struct ToolNode {
     tools_event_tx: Option<tokio::sync::mpsc::UnboundedSender<ToolsEvent>>,
 }
 
-impl std::fmt::Debug for ToolNode {
+impl<S: State> std::fmt::Debug for ToolNode<S> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ToolNode")
             .field("tools", &self.tools.len())
@@ -221,16 +296,42 @@ impl std::fmt::Debug for ToolNode {
     }
 }
 
-impl ToolNode {
-    /// Create a new `ToolNode` with the given tools
+// Generic implementation for any State type
+impl<S: State> ToolNode<S> {
+    /// Create a new `ToolNode` with stateless tools (backward compatible)
     ///
     /// Uses default configuration: error handling enabled, validation enabled.
+    ///
+    /// This method accepts stateless tools for backward compatibility.
+    /// For stateful tools, use [`ToolNode::with_stateful_tools`] instead.
     #[must_use]
     pub fn new(tools: Vec<Box<dyn Tool>>) -> Self {
         let mut tools_map = HashMap::new();
         for tool in tools {
             let tool_arc: Arc<dyn Tool> = Arc::from(tool);
-            tools_map.insert(tool_arc.name().to_string(), tool_arc);
+            tools_map.insert(tool_arc.name().to_string(), ToolEntry::Stateless(tool_arc));
+        }
+
+        Self {
+            tools: tools_map,
+            handle_errors: true,
+            validate_input: true,
+            call_transformer: None,
+            interceptor: None,
+            tools_event_tx: None,
+        }
+    }
+
+    /// Create a new `ToolNode` with stateful tools
+    ///
+    /// Uses default configuration: error handling enabled, validation enabled.
+    ///
+    /// This method accepts both stateless and stateful tools.
+    #[must_use]
+    pub fn with_stateful_tools(tools: Vec<ToolEntry<S>>) -> Self {
+        let mut tools_map = HashMap::new();
+        for tool in tools {
+            tools_map.insert(tool.name().to_string(), tool);
         }
 
         Self {
@@ -245,11 +346,10 @@ impl ToolNode {
 
     /// Create a `ToolNode` with custom configuration
     #[must_use]
-    pub fn with_config(config: ToolNodeConfig) -> Self {
+    pub fn with_config(config: ToolNodeConfig<S>) -> Self {
         let mut tools_map = HashMap::new();
         for tool in config.tools {
-            let tool_arc: Arc<dyn Tool> = Arc::from(tool);
-            tools_map.insert(tool_arc.name().to_string(), tool_arc);
+            tools_map.insert(tool.name().to_string(), tool);
         }
 
         Self {
@@ -322,13 +422,34 @@ impl ToolNode {
     /// - Tool execution fails and error handling is disabled
     /// - Required tool is not found and error handling is disabled
     pub async fn execute(&self, messages: &[Message]) -> Result<Vec<Message>, ToolError> {
+        self.execute_with_state(messages, None).await
+    }
+
+    /// Execute tools with state access for stateful tools
+    ///
+    /// This method provides the current state to stateful tools via `ToolRuntime`.
+    /// For stateless tools, the state parameter is ignored.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ToolError`] if:
+    /// - No AI message with tool calls is found
+    /// - Tool execution fails and error handling is disabled
+    /// - Required tool is not found and error handling is disabled
+    pub async fn execute_with_state(
+        &self,
+        messages: &[Message],
+        state: Option<&S>,
+    ) -> Result<Vec<Message>, ToolError> {
         // Find the last AI message with tool calls
         let last_ai = messages
             .iter()
             .rev()
             .find(|m| m.role == Role::Ai && m.has_tool_calls())
             .ok_or_else(|| {
-                ToolError::validation_failed(vec!["No AI message with tool calls found".to_string()])
+                ToolError::validation_failed(vec![
+                    "No AI message with tool calls found".to_string(),
+                ])
             })?;
 
         if last_ai.tool_calls.is_empty() {
@@ -346,7 +467,7 @@ impl ToolNode {
 
         for tool_call in &last_ai.tool_calls {
             let tool = if let Some(t) = self.tools.get(&tool_call.name) {
-                Arc::clone(t)
+                t.clone()
             } else {
                 let error = ToolError::tool_not_found(&tool_call.name);
                 if self.handle_errors {
@@ -393,9 +514,18 @@ impl ToolNode {
             let interceptor = Arc::clone(&interceptor);
             let tools_event_tx = self.tools_event_tx.clone();
 
+            // Clone state for stateful tool execution
+            let state_clone = state.cloned();
+
             results.spawn(async move {
-                Self::execute_single_tool(&tool_call, tool.as_ref(), &interceptor, tools_event_tx)
-                    .await
+                Self::execute_single_tool(
+                    &tool_call,
+                    &tool,
+                    &interceptor,
+                    tools_event_tx,
+                    state_clone,
+                )
+                .await
             });
         }
 
@@ -430,13 +560,15 @@ impl ToolNode {
     /// Execute a single tool call
     #[allow(
         clippy::cognitive_complexity,
-        reason = "execute_single_tool requires: span creation, interceptor hooks, tool invocation, error handling, metrics emission, result transformation, and streaming event emission. The complexity is justified by the comprehensive tool execution with observability."
+        clippy::too_many_lines,
+        reason = "execute_single_tool requires: span creation, interceptor hooks, tool invocation (stateless or stateful), error handling, metrics emission, result transformation, and streaming event emission. The complexity is justified by the comprehensive tool execution with observability."
     )]
     async fn execute_single_tool(
         tool_call: &ToolCall,
-        tool: &dyn Tool,
+        tool: &ToolEntry<S>,
         interceptor: &Arc<dyn ToolInterceptor>,
         tools_event_tx: Option<tokio::sync::mpsc::UnboundedSender<ToolsEvent>>,
+        state: Option<S>,
     ) -> Result<(String, String), ToolError> {
         let span = tracing::info_span!(
             "juncture.tool.call",
@@ -458,10 +590,10 @@ impl ToolNode {
             let _ = tx.send(event);
         }
 
-        let state = serde_json::Value::Null;
+        let state_json = serde_json::Value::Null;
 
         // Pre-execute hook
-        interceptor.pre_execute(tool_call, &state).await?;
+        interceptor.pre_execute(tool_call, &state_json).await?;
 
         // Create execution trace capturing the tool input at time of execution
         let mut trace = ToolExecutionTrace::new(
@@ -471,9 +603,34 @@ impl ToolNode {
             tool_call.arguments.clone(),
         );
 
-        // Execute the tool
+        // Execute the tool - dispatch based on tool type
         let start = std::time::Instant::now();
-        let result = tool.invoke(tool_call.arguments.clone()).await;
+        let result = match tool {
+            ToolEntry::Stateless(stateless_tool) => {
+                // Stateless tool execution
+                stateless_tool.invoke(tool_call.arguments.clone()).await
+            }
+            ToolEntry::Stateful(stateful_tool) => {
+                // Stateful tool execution with ToolRuntime
+                if let Some(ref state_data) = state {
+                    let runtime = ToolRuntime::new(
+                        state_data.clone(),
+                        tool_call.id.clone(),
+                        juncture_core::config::RunnableConfig::default(),
+                        None, // Store is not available in this context
+                    );
+                    stateful_tool
+                        .invoke_with_runtime(tool_call.arguments.clone(), &runtime)
+                        .await
+                } else {
+                    // Stateful tool called without state - this is an error
+                    return Err(ToolError::execution_failed(format!(
+                        "Stateful tool '{}' called without state context",
+                        tool.name()
+                    )));
+                }
+            }
+        };
         let duration_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
 
         // Record duration
@@ -761,6 +918,9 @@ mod tests {
     use async_trait::async_trait;
     use serde_json::json;
 
+    // Type alias for tests using a simple state type
+    type TestToolNode = ToolNode<juncture_core::state::messages::MessagesState>;
+
     /// Simple test tool that echoes its input
     struct EchoTool;
 
@@ -819,7 +979,7 @@ mod tests {
     #[tokio::test]
     async fn test_tool_node_new() {
         let tools = vec![Box::new(EchoTool) as Box<dyn Tool>];
-        let node = ToolNode::new(tools);
+        let node = TestToolNode::new(tools);
 
         assert_eq!(node.tool_count(), 1);
         assert!(node.has_tool("echo"));
@@ -828,14 +988,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_tool_node_with_config() {
-        let config = ToolNodeConfig {
-            tools: vec![Box::new(EchoTool) as Box<dyn Tool>],
+        let config = ToolNodeConfig::<juncture_core::state::messages::MessagesState> {
+            tools: vec![ToolEntry::from_stateless(Box::new(EchoTool))],
             handle_errors: false,
             validate_input: false,
             call_transformer: None,
             interceptor: None,
         };
-        let node = ToolNode::with_config(config);
+        let node = TestToolNode::with_config(config);
 
         assert_eq!(node.tool_count(), 1);
         assert!(node.has_tool("echo"));
@@ -843,7 +1003,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_tool_node_execute_single() {
-        let node = ToolNode::new(vec![Box::new(EchoTool) as Box<dyn Tool>]);
+        let node = TestToolNode::new(vec![Box::new(EchoTool) as Box<dyn Tool>]);
         let messages = vec![Message::ai_with_tool_calls(
             "Echo this",
             vec![ToolCall {
@@ -868,7 +1028,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_tool_node_execute_multiple() {
-        let node = ToolNode::new(vec![Box::new(EchoTool) as Box<dyn Tool>]);
+        let node = TestToolNode::new(vec![Box::new(EchoTool) as Box<dyn Tool>]);
         let messages = vec![Message::ai_with_tool_calls(
             "Echo these",
             vec![
@@ -895,7 +1055,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_tool_node_no_tool_calls() {
-        let node = ToolNode::new(vec![Box::new(EchoTool) as Box<dyn Tool>]);
+        let node = TestToolNode::new(vec![Box::new(EchoTool) as Box<dyn Tool>]);
         let messages = vec![Message::ai("No tools here")];
 
         let results = node.execute(&messages).await;
@@ -908,7 +1068,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_tool_node_tool_not_found_with_error_handling() {
-        let node = ToolNode::new(vec![Box::new(EchoTool) as Box<dyn Tool>]);
+        let node = TestToolNode::new(vec![Box::new(EchoTool) as Box<dyn Tool>]);
         let messages = vec![Message::ai_with_tool_calls(
             "Call nonexistent",
             vec![ToolCall {
@@ -934,7 +1094,7 @@ mod tests {
     #[tokio::test]
     async fn test_tool_node_tool_not_found_without_error_handling() {
         let node =
-            ToolNode::new(vec![Box::new(EchoTool) as Box<dyn Tool>]).with_error_handling(false);
+            TestToolNode::new(vec![Box::new(EchoTool) as Box<dyn Tool>]).with_error_handling(false);
         let messages = vec![Message::ai_with_tool_calls(
             "Call nonexistent",
             vec![ToolCall {
@@ -951,7 +1111,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_tool_node_tool_failure_with_error_handling() {
-        let node = ToolNode::new(vec![Box::new(FailTool) as Box<dyn Tool>]);
+        let node = TestToolNode::new(vec![Box::new(FailTool) as Box<dyn Tool>]);
         let messages = vec![Message::ai_with_tool_calls(
             "Fail",
             vec![ToolCall {
@@ -977,7 +1137,7 @@ mod tests {
     #[tokio::test]
     async fn test_tool_node_tool_failure_without_error_handling() {
         let node =
-            ToolNode::new(vec![Box::new(FailTool) as Box<dyn Tool>]).with_error_handling(false);
+            TestToolNode::new(vec![Box::new(FailTool) as Box<dyn Tool>]).with_error_handling(false);
         let messages = vec![Message::ai_with_tool_calls(
             "Fail",
             vec![ToolCall {
@@ -998,13 +1158,14 @@ mod tests {
     #[tokio::test]
     async fn test_tool_node_with_error_handling() {
         let node =
-            ToolNode::new(vec![Box::new(EchoTool) as Box<dyn Tool>]).with_error_handling(false);
+            TestToolNode::new(vec![Box::new(EchoTool) as Box<dyn Tool>]).with_error_handling(false);
         assert!(!node.handle_errors);
     }
 
     #[tokio::test]
     async fn test_tool_node_with_validation() {
-        let node = ToolNode::new(vec![Box::new(EchoTool) as Box<dyn Tool>]).with_validation(false);
+        let node =
+            TestToolNode::new(vec![Box::new(EchoTool) as Box<dyn Tool>]).with_validation(false);
         assert!(!node.validate_input);
     }
 
@@ -1038,6 +1199,138 @@ mod tests {
         let trace2 = ToolExecutionTrace::new("t".to_string(), "c".to_string(), 1, json!(null));
         // Both should have timestamps close to each other
         assert!(trace2.first_attempt_time >= trace1.first_attempt_time);
+    }
+
+    // --- StatefulTool integration tests ---
+
+    /// Test stateful tool that accesses runtime state
+    struct StatefulTestTool;
+
+    #[async_trait]
+    impl StatefulTool<juncture_core::state::messages::MessagesState> for StatefulTestTool {
+        async fn invoke_with_runtime(
+            &self,
+            _input: serde_json::Value,
+            runtime: &ToolRuntime<juncture_core::state::messages::MessagesState>,
+        ) -> Result<String, ToolError> {
+            let message_count = runtime.state.messages.len();
+            Ok(format!("Processed with {message_count} messages in state"))
+        }
+
+        fn name(&self) -> &'static str {
+            "stateful_test_tool"
+        }
+
+        fn description(&self) -> &'static str {
+            "A test stateful tool"
+        }
+
+        fn schema(&self) -> serde_json::Value {
+            json!({"type": "object"})
+        }
+    }
+
+    #[tokio::test]
+    async fn test_stateful_tool_execution() {
+        use juncture_core::state::messages::MessagesState;
+
+        // Create a tool node with a stateful tool
+        let stateful_entry = ToolEntry::from_stateful(Arc::new(StatefulTestTool));
+        let node = ToolNode::<MessagesState>::with_stateful_tools(vec![stateful_entry]);
+
+        // Create test state with messages
+        let state = MessagesState {
+            messages: vec![Message::human("Hello"), Message::ai("Hi there")],
+        };
+
+        // Create tool calls
+        let messages = vec![Message::ai_with_tool_calls(
+            "Execute stateful tool",
+            vec![ToolCall {
+                id: "call_1".to_string(),
+                name: "stateful_test_tool".to_string(),
+                arguments: json!({}),
+            }],
+        )];
+
+        // Execute tools with state
+        let results = node
+            .execute_with_state(&messages, Some(&state))
+            .await
+            .unwrap();
+        assert_eq!(results.len(), 1);
+
+        // Verify the stateful tool accessed the state correctly
+        match &results[0].content {
+            juncture_core::state::messages::Content::Text(text) => {
+                assert!(text.contains("2 messages in state"));
+            }
+            juncture_core::state::messages::Content::MultiPart(_) => {
+                panic!("Expected Text content")
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_mixed_stateless_and_stateful_tools() {
+        use juncture_core::state::messages::MessagesState;
+
+        // Create a tool node with both stateless and stateful tools
+        let stateless_entry = ToolEntry::from_stateless(Box::new(EchoTool));
+        let stateful_entry = ToolEntry::from_stateful(Arc::new(StatefulTestTool));
+        let node =
+            ToolNode::<MessagesState>::with_stateful_tools(vec![stateless_entry, stateful_entry]);
+
+        // Create test state
+        let state = MessagesState {
+            messages: vec![Message::human("Test")],
+        };
+
+        // Create tool calls for both tools
+        let messages = vec![Message::ai_with_tool_calls(
+            "Execute both tools",
+            vec![
+                ToolCall {
+                    id: "call_1".to_string(),
+                    name: "echo".to_string(),
+                    arguments: json!({"message": "test message"}),
+                },
+                ToolCall {
+                    id: "call_2".to_string(),
+                    name: "stateful_test_tool".to_string(),
+                    arguments: json!({}),
+                },
+            ],
+        )];
+
+        // Execute tools with state
+        let results = node
+            .execute_with_state(&messages, Some(&state))
+            .await
+            .unwrap();
+        assert_eq!(results.len(), 2);
+
+        // Verify both tools executed
+        let echo_result = &results[0];
+        let stateful_result = &results[1];
+
+        match &echo_result.content {
+            juncture_core::state::messages::Content::Text(text) => {
+                assert_eq!(text, "test message");
+            }
+            juncture_core::state::messages::Content::MultiPart(_) => {
+                panic!("Expected Text content")
+            }
+        }
+
+        match &stateful_result.content {
+            juncture_core::state::messages::Content::Text(text) => {
+                assert!(text.contains("1 messages in state"));
+            }
+            juncture_core::state::messages::Content::MultiPart(_) => {
+                panic!("Expected Text content")
+            }
+        }
     }
 
     /// Test tool that returns its input as a JSON string for verification
@@ -1076,7 +1369,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_tool_node_with_transformer() {
-        let node = ToolNode::new(vec![Box::new(JsonDumpTool) as Box<dyn Tool>])
+        let node = TestToolNode::new(vec![Box::new(JsonDumpTool) as Box<dyn Tool>])
             .with_transformer(Box::new(AddDefaultLimit));
 
         let messages = vec![Message::ai_with_tool_calls(
@@ -1117,7 +1410,7 @@ mod tests {
             }
         }
 
-        let node = ToolNode::new(vec![Box::new(EchoTool) as Box<dyn Tool>])
+        let node = TestToolNode::new(vec![Box::new(EchoTool) as Box<dyn Tool>])
             .with_transformer(Box::new(BlockingTransformer));
 
         let messages = vec![Message::ai_with_tool_calls(
@@ -1152,7 +1445,7 @@ mod tests {
             }
         }
 
-        let node = ToolNode::new(vec![Box::new(EchoTool) as Box<dyn Tool>])
+        let node = TestToolNode::new(vec![Box::new(EchoTool) as Box<dyn Tool>])
             .with_transformer(Box::new(FatalBlockingTransformer))
             .with_error_handling(false);
 
@@ -1234,7 +1527,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_validation_valid_input_passes() {
-        let node = ToolNode::new(vec![Box::new(SchemaTool) as Box<dyn Tool>]);
+        let node = TestToolNode::new(vec![Box::new(SchemaTool) as Box<dyn Tool>]);
         let messages = vec![Message::ai_with_tool_calls(
             "test",
             vec![ToolCall {
@@ -1258,7 +1551,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_validation_missing_required_field_rejected() {
-        let node = ToolNode::new(vec![Box::new(SchemaTool) as Box<dyn Tool>]);
+        let node = TestToolNode::new(vec![Box::new(SchemaTool) as Box<dyn Tool>]);
         let messages = vec![Message::ai_with_tool_calls(
             "test",
             vec![ToolCall {
@@ -1283,7 +1576,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_validation_wrong_type_rejected() {
-        let node = ToolNode::new(vec![Box::new(SchemaTool) as Box<dyn Tool>]);
+        let node = TestToolNode::new(vec![Box::new(SchemaTool) as Box<dyn Tool>]);
         let messages = vec![Message::ai_with_tool_calls(
             "test",
             vec![ToolCall {
@@ -1309,7 +1602,7 @@ mod tests {
     #[tokio::test]
     async fn test_validation_disabled_skips_checks() {
         let node =
-            ToolNode::new(vec![Box::new(SchemaTool) as Box<dyn Tool>]).with_validation(false);
+            TestToolNode::new(vec![Box::new(SchemaTool) as Box<dyn Tool>]).with_validation(false);
         let messages = vec![Message::ai_with_tool_calls(
             "test",
             vec![ToolCall {
@@ -1334,8 +1627,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_validation_propagates_error_when_not_handled() {
-        let node =
-            ToolNode::new(vec![Box::new(SchemaTool) as Box<dyn Tool>]).with_error_handling(false);
+        let node = TestToolNode::new(vec![Box::new(SchemaTool) as Box<dyn Tool>])
+            .with_error_handling(false);
         let messages = vec![Message::ai_with_tool_calls(
             "test",
             vec![ToolCall {
@@ -1359,7 +1652,8 @@ mod tests {
     async fn test_tool_node_emits_started_and_finished_events() {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         #[allow(clippy::redundant_clone, reason = "clarity in test setup")]
-        let node = ToolNode::new(vec![Box::new(EchoTool) as Box<dyn Tool>]).with_tools_event_tx(tx);
+        let node =
+            TestToolNode::new(vec![Box::new(EchoTool) as Box<dyn Tool>]).with_tools_event_tx(tx);
 
         let messages = vec![Message::ai_with_tool_calls(
             "test",
@@ -1405,7 +1699,8 @@ mod tests {
     async fn test_tool_node_emits_events_in_order() {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         #[allow(clippy::redundant_clone, reason = "clarity in test setup")]
-        let node = ToolNode::new(vec![Box::new(EchoTool) as Box<dyn Tool>]).with_tools_event_tx(tx);
+        let node =
+            TestToolNode::new(vec![Box::new(EchoTool) as Box<dyn Tool>]).with_tools_event_tx(tx);
 
         let messages = vec![Message::ai_with_tool_calls(
             "test",
@@ -1447,7 +1742,8 @@ mod tests {
     async fn test_tool_node_multiple_tools_emit_multiple_events() {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         #[allow(clippy::redundant_clone, reason = "clarity in test setup")]
-        let node = ToolNode::new(vec![Box::new(EchoTool) as Box<dyn Tool>]).with_tools_event_tx(tx);
+        let node =
+            TestToolNode::new(vec![Box::new(EchoTool) as Box<dyn Tool>]).with_tools_event_tx(tx);
 
         let messages = vec![Message::ai_with_tool_calls(
             "test",
