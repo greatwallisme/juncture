@@ -470,18 +470,18 @@ impl<S: State> PregelLoop<S> {
     ///     loop.after_tick(result)?;
     /// }
     /// ```
-    #[tracing::instrument(
-        name = "juncture.graph.invoke",
-        skip(self),
-        fields(
-            thread_id = ?std::thread::current().id(),
-            step = self.step,
-            recursion_limit = self.runnable_config.recursion_limit,
-            graph_name = ?self.runnable_config.graph_name,
-            run_id = %self.run_id,
-        )
-    )]
     pub fn tick(&mut self) -> Result<bool, JunctureError> {
+        // Create graph invocation span with proper attribute names
+        let span = tracing::info_span!(
+            "juncture.graph.invoke",
+            "juncture.thread.id" = ?std::thread::current().id(),
+            "juncture.step" = self.step,
+            "juncture.recursion.limit" = self.runnable_config.recursion_limit,
+            "juncture.graph.name" = ?self.runnable_config.graph_name,
+            "juncture.run.id" = %self.run_id,
+        );
+        let _enter = span.enter();
+
         // Check recursion limit
         if self.step >= self.runnable_config.recursion_limit {
             self.status = LoopStatus::OutOfSteps;
@@ -525,13 +525,25 @@ impl<S: State> PregelLoop<S> {
         // Emit budget gauges when a collector is configured
         if let Some(ref tracker) = self.budget_tracker {
             let usage = tracker.current_usage();
-            if let Some(ref budget) = self.runnable_config.budget
-                && let Some(max_tokens) = budget.max_tokens
-            {
-                self.emit_gauge(
-                    "juncture.budget.remaining_tokens",
-                    max_tokens.saturating_sub(usage.tokens_used),
-                );
+            if let Some(ref budget) = self.runnable_config.budget {
+                if let Some(max_tokens) = budget.max_tokens {
+                    self.emit_gauge(
+                        "juncture.budget.remaining_tokens",
+                        max_tokens.saturating_sub(usage.tokens_used),
+                    );
+                }
+                if let Some(max_cost) = budget.max_cost_usd {
+                    #[allow(
+                        clippy::cast_possible_truncation,
+                        clippy::cast_sign_loss,
+                        reason = "Gauge values are u64; cost is converted to micro-units (6 decimal places) for precision. Truncation is acceptable for gauge display."
+                    )]
+                    let remaining_micro_usd = ((max_cost - usage.cost_usd).max(0.0) * 1_000_000.0) as u64;
+                    self.emit_gauge(
+                        "juncture.budget.remaining_cost_usd",
+                        remaining_micro_usd,
+                    );
+                }
             }
         }
 
@@ -539,6 +551,9 @@ impl<S: State> PregelLoop<S> {
         if self.pending_tasks.is_empty() {
             // Check if drain is requested - if so, we're done
             if self.run_control.is_drain_requested() {
+                // Call finish_all_channels() since no more tasks will be scheduled
+                // This ensures LastValueAfterFinishChannel values are made available
+                self.finish_all_channels();
                 self.status = LoopStatus::Done;
                 self.on_graph_end(&Ok(()));
                 return Ok(false);
@@ -547,6 +562,8 @@ impl<S: State> PregelLoop<S> {
             // Try to compute tasks from trigger table
             // This is a no-op in the current implementation since
             // compute_next_tasks requires completed tasks
+            // Call finish_all_channels() since compute_next_tasks() would return empty
+            self.finish_all_channels();
             self.status = LoopStatus::Done;
             self.on_graph_end(&Ok(()));
             return Ok(false);
@@ -1246,6 +1263,7 @@ impl<S: State> PregelLoop<S> {
         let (channel_versions, new_versions, versions_seen) = self.build_checkpoint_versions();
 
         let checkpoint_id = generate_checkpoint_id();
+        let cp_id_for_event = checkpoint_id.clone();
         let created_at = chrono::Utc::now().to_rfc3339();
 
         let checkpoint = Checkpoint {
@@ -1274,11 +1292,13 @@ impl<S: State> PregelLoop<S> {
         };
 
         let cp_config = self.runnable_config.clone();
+        let stream_tx_clone = self.stream_tx.clone();
         match self.effective_durability() {
             Durability::Async => {
                 let step = self.step;
                 let node_label = node.to_string();
                 let checkpointer_arc = Arc::clone(checkpointer);
+                let metadata_for_event = metadata.clone();
                 tokio::spawn(async move {
                     match checkpointer_arc.put(&cp_config, checkpoint, metadata).await {
                         Ok(_updated_config) => {
@@ -1288,6 +1308,17 @@ impl<S: State> PregelLoop<S> {
                                 checkpoint_source = "Interrupt",
                                 "Interrupt checkpoint persisted (async)"
                             );
+                            // Emit checkpoint write metric
+                            if let Some(ref collector) = cp_config.metrics_collector {
+                                collector.inc_counter("juncture.checkpoint.writes", 1);
+                            }
+                            // Emit CheckpointSaved event to stream
+                            Self::emit_checkpoint_saved_event(
+                                stream_tx_clone.as_ref(),
+                                cp_id_for_event,
+                                metadata_for_event,
+                                step,
+                            );
                         }
                         Err(err) => {
                             tracing::warn!(
@@ -1296,12 +1327,17 @@ impl<S: State> PregelLoop<S> {
                                 error = %err,
                                 "Failed to save interrupt checkpoint (async)"
                             );
+                            // Emit checkpoint error metric
+                            if let Some(ref collector) = cp_config.metrics_collector {
+                                collector.inc_counter("juncture.checkpoint.errors", 1);
+                            }
                         }
                     }
                 });
                 self.reset_delta_counters();
             }
             Durability::Sync | Durability::Exit => {
+                let metadata_for_event = metadata.clone();
                 match checkpointer
                     .put(&self.runnable_config, checkpoint, metadata)
                     .await
@@ -1309,6 +1345,8 @@ impl<S: State> PregelLoop<S> {
                     Ok(updated_config) => {
                         self.runnable_config.checkpoint_id = updated_config.checkpoint_id;
                         self.reset_delta_counters();
+                        // Emit checkpoint write metric
+                        self.emit_counter("juncture.checkpoint.writes", 1);
                         tracing::info!(
                             name: "juncture.checkpoint.put",
                             checkpoint_id = %self.runnable_config.checkpoint_id.as_deref().unwrap_or("unknown"),
@@ -1318,6 +1356,13 @@ impl<S: State> PregelLoop<S> {
                         );
                         if let Some(ref cp_id) = self.runnable_config.checkpoint_id {
                             self.on_checkpoint_saved(cp_id, self.step);
+                            // Emit CheckpointSaved event to stream
+                            Self::emit_checkpoint_saved_event(
+                                self.stream_tx.as_ref(),
+                                cp_id.clone(),
+                                metadata_for_event,
+                                self.step,
+                            );
                         }
                     }
                     Err(err) => {
@@ -1327,6 +1372,8 @@ impl<S: State> PregelLoop<S> {
                             error = %err,
                             "Failed to save interrupt checkpoint"
                         );
+                        // Emit checkpoint error metric
+                        self.emit_counter("juncture.checkpoint.errors", 1);
                     }
                 }
             }
@@ -1409,6 +1456,7 @@ impl<S: State> PregelLoop<S> {
             .collect();
 
         let checkpoint_id = generate_checkpoint_id();
+        let cp_id_for_event = checkpoint_id.clone();
         let created_at = chrono::Utc::now().to_rfc3339();
 
         let checkpoint = Checkpoint {
@@ -1435,10 +1483,12 @@ impl<S: State> PregelLoop<S> {
         };
 
         let cp_config = self.runnable_config.clone();
+        let stream_tx_clone = self.stream_tx.clone();
         match self.effective_durability() {
             Durability::Async => {
                 let step = self.step;
                 let checkpointer_arc = Arc::clone(checkpointer);
+                let metadata_for_event = metadata.clone();
                 tokio::spawn(async move {
                     match checkpointer_arc.put(&cp_config, checkpoint, metadata).await {
                         Ok(_updated_config) => {
@@ -1448,6 +1498,17 @@ impl<S: State> PregelLoop<S> {
                                 checkpoint_source = "Loop",
                                 "Superstep checkpoint persisted (async)"
                             );
+                            // Emit checkpoint write metric
+                            if let Some(ref collector) = cp_config.metrics_collector {
+                                collector.inc_counter("juncture.checkpoint.writes", 1);
+                            }
+                            // Emit CheckpointSaved event to stream
+                            Self::emit_checkpoint_saved_event(
+                                stream_tx_clone.as_ref(),
+                                cp_id_for_event,
+                                metadata_for_event,
+                                step,
+                            );
                         }
                         Err(err) => {
                             tracing::warn!(
@@ -1456,12 +1517,17 @@ impl<S: State> PregelLoop<S> {
                                 error = %err,
                                 "Failed to save superstep checkpoint (async)"
                             );
+                            // Emit checkpoint error metric
+                            if let Some(ref collector) = cp_config.metrics_collector {
+                                collector.inc_counter("juncture.checkpoint.errors", 1);
+                            }
                         }
                     }
                 });
                 self.reset_delta_counters();
             }
             Durability::Sync | Durability::Exit => {
+                let metadata_for_event = metadata.clone();
                 match checkpointer
                     .put(&self.runnable_config, checkpoint, metadata)
                     .await
@@ -1472,6 +1538,8 @@ impl<S: State> PregelLoop<S> {
                         // The checkpoint now carries the cumulative counters, and a
                         // fresh counting window starts for the next checkpoint cycle.
                         self.reset_delta_counters();
+                        // Emit checkpoint write metric
+                        self.emit_counter("juncture.checkpoint.writes", 1);
                         tracing::info!(
                             name: "juncture.checkpoint.put",
                             checkpoint_id = %self.runnable_config.checkpoint_id.as_deref().unwrap_or("unknown"),
@@ -1481,6 +1549,13 @@ impl<S: State> PregelLoop<S> {
                         );
                         if let Some(ref cp_id) = self.runnable_config.checkpoint_id {
                             self.on_checkpoint_saved(cp_id, self.step);
+                            // Emit CheckpointSaved event to stream
+                            Self::emit_checkpoint_saved_event(
+                                self.stream_tx.as_ref(),
+                                cp_id.clone(),
+                                metadata_for_event,
+                                self.step,
+                            );
                         }
                     }
                     Err(err) => {
@@ -1490,6 +1565,8 @@ impl<S: State> PregelLoop<S> {
                             error = %err,
                             "Failed to save superstep checkpoint"
                         );
+                        // Emit checkpoint error metric
+                        self.emit_counter("juncture.checkpoint.errors", 1);
                     }
                 }
             }
@@ -1625,11 +1702,12 @@ impl<S: State> PregelLoop<S> {
     /// the consumed flag. Other channel types (`UntrackedChannel`,
     /// `LastValueAfterFinishChannel`, `DeltaChannel`) have no-op consume semantics.
     ///
-    /// Only calls `consume_field()` for fields that actually changed, as indicated
-    /// by the `FieldsChanged` bitmask. This matches the design spec where all
-    /// triggered channels call `consume()` after `apply_writes()`.
+    /// Iterates over all field indices and calls `consume_field()` only for fields
+    /// that changed in the current superstep, as indicated by the `FieldsChanged`
+    /// bitmask. This matches the design spec where all triggered channels call
+    /// `consume()` after `apply_writes()`.
     fn consume_triggered_channels(&mut self, changed: &crate::FieldsChanged) {
-        for &field_idx in S::consume_field_indices() {
+        for field_idx in 0..S::field_count() {
             if changed.has_field(field_idx) {
                 self.state.consume_field(field_idx);
             }
@@ -1763,12 +1841,15 @@ impl<S: State> PregelLoop<S> {
             run_id: self.run_id.clone(),
         };
 
+        let metadata_for_event = metadata.clone();
         match checkpointer
             .put(&self.runnable_config, checkpoint, metadata)
             .await
         {
             Ok(updated_config) => {
                 self.runnable_config.checkpoint_id = updated_config.checkpoint_id;
+                // Emit checkpoint write metric
+                self.emit_counter("juncture.checkpoint.writes", 1);
                 tracing::info!(
                     name: "juncture.checkpoint.put",
                     checkpoint_id = %self.runnable_config.checkpoint_id.as_deref().unwrap_or("unknown"),
@@ -1778,6 +1859,13 @@ impl<S: State> PregelLoop<S> {
                 );
                 if let Some(ref cp_id) = self.runnable_config.checkpoint_id {
                     self.on_checkpoint_saved(cp_id, self.step);
+                    // Emit CheckpointSaved event to stream
+                    Self::emit_checkpoint_saved_event(
+                        self.stream_tx.as_ref(),
+                        cp_id.clone(),
+                        metadata_for_event,
+                        self.step,
+                    );
                 }
             }
             Err(err) => {
@@ -1787,6 +1875,8 @@ impl<S: State> PregelLoop<S> {
                     error = %err,
                     "Failed to save exit checkpoint"
                 );
+                // Emit checkpoint error metric
+                self.emit_counter("juncture.checkpoint.errors", 1);
             }
         }
     }
@@ -1922,18 +2012,35 @@ impl<S: State> PregelLoop<S> {
             handler.on_checkpoint_saved(checkpoint_id, step);
         }
     }
+
+    /// Emit `CheckpointSaved` event to stream if a stream sender is configured.
+    #[inline]
+    fn emit_checkpoint_saved_event(
+        stream_tx: Option<&mpsc::UnboundedSender<StreamEvent<S>>>,
+        checkpoint_id: String,
+        metadata: CheckpointMetadata,
+        step: usize,
+    ) {
+        if let Some(tx) = stream_tx {
+            let _ = tx.send(StreamEvent::CheckpointSaved {
+                checkpoint_id,
+                metadata,
+                step,
+            });
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::FieldVersions;
     use crate::{
         Command,
         node::IntoNode,
         node::NodeFnCommand,
         pregel::types::{TaskOutput, TaskTrigger},
     };
-    use crate::state::FieldVersions;
 
     #[test]
     fn test_pregel_loop_creation() {

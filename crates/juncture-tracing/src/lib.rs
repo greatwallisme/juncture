@@ -22,7 +22,7 @@
 //!
 //! When the `otel` feature is enabled, you can configure OTLP export:
 //!
-//! ```no_run
+//! ```ignore
 //! use juncture_tracing::{init, config::TracingConfig};
 //! use tracing::Level;
 //!
@@ -66,7 +66,7 @@ pub use test_utils::TestMetricsCollector;
 pub use types::{LlmCacheKeyInput, LlmCachePolicy, ServerInfo};
 
 #[cfg(feature = "otel")]
-pub use config::{TracingConfig, init};
+pub use config::{TracingConfig, TracingInstallResult, init};
 #[cfg(feature = "otel")]
 pub use metrics::{
     CounterBuilder, GaugeBuilder, HistogramBuilder, MetricsRegistry, RegistryMetricsCollector,

@@ -350,6 +350,8 @@ while let Some(event) = stream.next().await {
 }
 ```
 
+> **Implementation Note (C-09-001)**: Beyond debug-only events, implementation provides a comprehensive `GraphCallbackHandler` trait with full lifecycle hooks: `on_interrupt()`, `on_resume()`, `on_checkpoint_saved()`, `on_node_start()`, `on_node_end()`, `on_node_error()`, and `on_graph_end()`. This enables production-grade callback orchestration beyond the design's debug-focused scope.
+
 ---
 
 ## 6. 实现细节
@@ -495,6 +497,8 @@ async fn test_token_metrics_reported() {
 > `get_counter_with_labels("juncture.llm.calls", &[("model", "gpt-4")])`). The collector uses
 > `Arc<Mutex<HashMap>>` internally for thread-safe metric accumulation during async tests.
 
+> **Implementation Note (C-09-002)**: `TestMetricsCollector` further exceeds design with `increment_counter_with_labels()` method for multi-dimensional metric breakdown. Enables granular test assertions like `metrics.increment_counter_with_labels("juncture.llm.calls", &[("model", "claude-3"), ("region", "us-east")])` for detailed metrics verification across multiple label dimensions.
+
 ---
 
 ## 8. 与 Budget 系统的协同
@@ -578,4 +582,6 @@ juncture::tracing::init()
     .with_metrics_endpoint("http://prometheus-pushgateway:9091")
     .install()?;
 ```
+
+---
 

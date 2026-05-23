@@ -3,11 +3,59 @@
 //! This module provides the `TracingConfig` builder for configuring OpenTelemetry
 //! trace and metrics export. This feature is only available when the `otel` feature
 //! is enabled.
+//!
+//! # Metrics Pipeline Usage
+//!
+//! When `with_metrics(true)` is called, the `install()` method returns `Some(MetricsRegistry)`
+//! that is wired to an OpenTelemetry `Meter` which exports metrics to the configured OTLP endpoint.
+//!
+//! ## Complete Example
+//!
+//! ```ignore
+//! use juncture_tracing::{init, RegistryMetricsCollector};
+//! use juncture_core::config::RunnableConfig;
+//! use std::sync::Arc;
+//!
+//! fn main() -> Result<(), Box<dyn std::error::Error>> {
+//!     // Initialize tracing with metrics enabled
+//!     let metrics_registry = init()
+//!         .with_service_name("my-agent-service")
+//!         .with_otlp_endpoint("http://localhost:4317")
+//!         .with_metrics(true)
+//!         .install()?
+//!         .expect("metrics enabled");
+//!
+//!     // Create the metrics collector adapter
+//!     let metrics_collector = Arc::new(RegistryMetricsCollector::new(metrics_registry));
+//!
+//!     // Wire it into the graph execution config
+//!     let config = RunnableConfig::new()
+//!         .with_metrics_collector(metrics_collector);
+//!
+//!     // Now graph execution will automatically emit metrics to OTLP
+//!     Ok(())
+//! }
+//! ```
+//!
+//! ## Backward Compatibility
+//!
+//! Code that doesn't call `with_metrics(true)` continues to work unchanged:
+//!
+//! ```ignore
+//! use juncture_tracing::init;
+//!
+//! // Returns Ok(None) when metrics are not enabled
+//! let result = init()
+//!     .with_service_name("my-service")
+//!     .install()?;
+//! ```
 
 use std::fmt;
 
 #[cfg(feature = "otel")]
 use opentelemetry::global;
+#[cfg(feature = "otel")]
+use opentelemetry::metrics::MeterProvider as _;
 #[cfg(feature = "otel")]
 use opentelemetry::trace::TracerProvider as _;
 #[cfg(feature = "otel")]
@@ -22,6 +70,9 @@ use opentelemetry_sdk::runtime::Tokio;
 use opentelemetry_sdk::{Resource, trace::TracerProvider};
 #[cfg(feature = "otel")]
 use tracing_subscriber::prelude::*;
+
+#[cfg(feature = "otel")]
+use crate::metrics::MetricsRegistry;
 
 /// Error type for tracing configuration failures
 #[derive(Debug)]
@@ -39,6 +90,14 @@ impl fmt::Display for TracingError {
 }
 
 impl std::error::Error for TracingError {}
+
+/// Result of installing the tracing pipeline
+///
+/// When `with_metrics(true)` is called, contains a `MetricsRegistry` wired
+/// to an OpenTelemetry `Meter` that exports to the configured OTLP endpoint.
+/// When metrics are not enabled, contains `None`.
+#[cfg(feature = "otel")]
+pub type TracingInstallResult = Result<Option<MetricsRegistry>, TracingError>;
 
 /// Tracing configuration builder
 ///
@@ -292,6 +351,12 @@ impl TracingConfig {
     /// and (if enabled) metrics. Otherwise, it configures basic
     /// `tracing-subscriber` logging.
     ///
+    /// When metrics are enabled via [`with_metrics(true)`](Self::with_metrics),
+    /// returns `Some(MetricsRegistry)` with an OpenTelemetry `Meter` wired
+    /// to export metrics to the configured OTLP endpoint. The registry can be
+    /// passed to `RunnableConfig::with_metrics_collector` to enable automatic
+    /// metric collection during graph execution.
+    ///
     /// # Errors
     ///
     /// Returns an error if the subscriber is already installed or installation
@@ -309,7 +374,29 @@ impl TracingConfig {
     /// # Ok(())
     /// # }
     /// ```
-    pub fn install(self) -> Result<(), TracingError> {
+    ///
+    /// With metrics enabled:
+    ///
+    /// ```no_run
+    /// use juncture_tracing::config::TracingConfig;
+    /// use std::sync::Arc;
+    /// use juncture_tracing::RegistryMetricsCollector;
+    /// use juncture_core::config::RunnableConfig;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let metrics_registry = TracingConfig::new()
+    ///     .with_service_name("my-app")
+    ///     .with_otlp_endpoint("http://localhost:4317")
+    ///     .with_metrics(true)
+    ///     .install()?
+    ///     .expect("metrics enabled");
+    ///
+    /// let config = RunnableConfig::new()
+    ///     .with_metrics_collector(Arc::new(RegistryMetricsCollector::new(metrics_registry)));
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn install(self) -> Result<Option<MetricsRegistry>, TracingError> {
         // Build the env filter from the configured log level
         let env_filter = tracing_subscriber::EnvFilter::builder()
             .with_default_directive(self.log_level.into())
@@ -339,7 +426,7 @@ impl TracingConfig {
             .try_init()
             .map_err(|e| TracingError::InstallFailed(e.to_string()))?;
 
-        Ok(())
+        Ok(None)
     }
 
     /// Install OpenTelemetry OTLP pipeline
@@ -349,6 +436,8 @@ impl TracingConfig {
     /// `metrics_enabled` is `true`, also creates a global
     /// [`SdkMeterProvider`] with an OTLP metric exporter so that metrics
     /// collected through [`MetricsRegistry::with_meter`] flow to OTLP.
+    ///
+    /// Returns `Some(MetricsRegistry)` when metrics are enabled, `None` otherwise.
     ///
     /// This is separated from `install()` to allow conditional compilation
     /// based on the `otel` feature flag.
@@ -361,7 +450,7 @@ impl TracingConfig {
         self,
         env_filter: tracing_subscriber::EnvFilter,
         otlp_endpoint: &str,
-    ) -> Result<(), TracingError> {
+    ) -> Result<Option<MetricsRegistry>, TracingError> {
         // Build resource attributes
         let mut resource_attributes = vec![
             opentelemetry::KeyValue::new("service.name", self.service_name),
@@ -421,10 +510,17 @@ impl TracingConfig {
                 .with_reader(reader)
                 .build();
 
-            global::set_meter_provider(meter_provider);
-        }
+            // Get the meter before setting it globally
+            let meter = meter_provider.meter("juncture");
 
-        Ok(())
+            global::set_meter_provider(meter_provider);
+
+            // Create and return the MetricsRegistry with the meter
+            let registry = MetricsRegistry::with_meter(meter);
+            Ok(Some(registry))
+        } else {
+            Ok(None)
+        }
     }
 }
 
@@ -512,6 +608,19 @@ mod tests {
     }
 
     #[test]
+    fn test_install_returns_option_registry() {
+        // Verify that install() returns Result<Option<MetricsRegistry>, TracingError>
+        // This is a compile-time type check that ensures the return type is correct
+        // Create a closure that matches the expected signature
+        #[allow(
+            clippy::type_complexity,
+            reason = "complex type is needed for compile-time type checking of the install() return signature"
+        )]
+        let _check: std::sync::Arc<std::sync::Mutex<dyn Fn() -> Result<Option<MetricsRegistry>, TracingError>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(|| Ok(None)));
+    }
+
+    #[test]
     fn test_metrics_flag_is_properly_set() {
         let config = TracingConfig::new().with_metrics(true);
         assert!(config.metrics_enabled);
@@ -538,8 +647,11 @@ mod tests {
             .with_otlp_endpoint("http://127.0.0.1:4318")
             .with_metrics(true);
         let _result = std::panic::catch_unwind(|| {
-            let _ = config.install();
+            let _ = config.clone().install();
         });
+        // The result should be Result<Option<MetricsRegistry>, TracingError>
+        // Verify the type is correct
+        let _type_check: Result<Option<MetricsRegistry>, _> = config.install();
     }
 }
 

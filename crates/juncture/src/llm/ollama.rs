@@ -3,16 +3,16 @@
 //! Provides integration with Ollama's local model API.
 //! Supports both streaming and non-streaming requests.
 
-use std::pin::Pin;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use futures::{Stream, StreamExt, stream};
+use futures::{StreamExt, stream};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
 use crate::llm::{
-    CallOptions, ChatModel, Content, ContentPart, LlmError, Message, Role, ToolDefinition,
+    BoxStream, CallOptions, ChatModel, Content, ContentPart, LlmError, Message, Role,
+    ToolDefinition,
 };
 
 use juncture_tracing::spans::attrs;
@@ -57,6 +57,7 @@ pub struct ChatOllama {
     top_p: Option<f32>,
 
     /// Whether to stream responses by default.
+    #[allow(dead_code, reason = "configured but not directly accessed")]
     stream: bool,
 }
 
@@ -205,9 +206,11 @@ impl ChatModel for ChatOllama {
         let api_response: OllamaResponse = serde_json::from_str(&response_text)
             .map_err(|e| LlmError::InvalidResponse(format!("Failed to parse response: {e}")))?;
 
-        // Ollama doesn't provide token counts or detailed stop reason
-        // These fields remain Empty as specified
+        // Record span attributes
+        // Ollama API doesn't provide tool call information or finish reasons
         tracing::Span::current().record(attrs::LLM_HAS_TOOL_CALLS, false);
+        // Record "unknown" as Ollama API doesn't return stop_reason in responses
+        tracing::Span::current().record(attrs::LLM_STOP_REASON, "unknown");
 
         // Emit metrics for LLM call (Ollama doesn't provide token counts)
         tracing::debug!(
@@ -238,7 +241,7 @@ impl ChatModel for ChatOllama {
         &self,
         messages: &[Message],
         options: Option<&CallOptions>,
-    ) -> Pin<Box<dyn Stream<Item = Result<crate::llm::MessageChunk, LlmError>> + Send + '_>> {
+    ) -> BoxStream<'_, Result<crate::llm::MessageChunk, LlmError>> {
         let model = options
             .and_then(|o| o.model_override.as_ref())
             .unwrap_or(&self.model);
@@ -458,15 +461,19 @@ struct OllamaOptions {
 
 /// Ollama API response format.
 #[derive(Debug, Deserialize)]
+#[allow(dead_code, reason = "deserialization target, fields read indirectly")]
 struct OllamaResponse {
     message: OllamaResponseMessage,
     #[serde(default)]
+    #[allow(dead_code, reason = "deserialization target, fields read indirectly")]
     done: bool,
 }
 
 /// Ollama API response message.
 #[derive(Debug, Deserialize)]
+#[allow(dead_code, reason = "deserialization target, fields read indirectly")]
 struct OllamaResponseMessage {
+    #[allow(dead_code, reason = "deserialization target, fields read indirectly")]
     role: String,
     content: String,
 }

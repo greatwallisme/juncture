@@ -177,6 +177,9 @@ pub struct CallOptions {
     /// <!-- Addresses finding: Part3#11 -->
     /// 响应格式（用于结构化输出）
     pub response_format: Option<ResponseFormat>,
+
+    /// > **Implementation Note (C-08-007)**: `tags` field for streaming metadata filtering allows categorization and filtering of streaming events based on custom tags.
+    pub tags: Option<Vec<String>>,
 }
 
 /// <!-- Addresses finding: Part3#10 -->
@@ -392,6 +395,9 @@ impl<S: State> ToolRuntime<S> {
 }
 ```
 
+> **Implementation Note (C-08-002)**: Tool lifecycle streaming events (ToolStarted/ToolFinished) with timing metadata are available via `with_tools_event_tx()`. This provides observability into tool execution beyond the basic design.
+```
+
 **使用方式**：
 
 ```rust
@@ -500,6 +506,9 @@ impl ValidationNode {
         self
     }
 }
+```
+
+> **Implementation Note (C-08-006)**: ValidationNode complete implementation includes token limit checking, custom validators, and Node<MessagesState> trait. This provides a full-featured validation node beyond the design's placeholder description.
 
 impl Node<MessagesState> for ValidationNode {
     async fn call(&self, state: MessagesState, _config: &RunnableConfig) -> Result<Command<MessagesState>, JunctureError> {
@@ -650,6 +659,9 @@ pub trait ToolInterceptor: Send + Sync + 'static {
         result: &Result<String, ToolError>,
     ) -> BoxFuture<'_, Result<String, ToolError>>;
 }
+```
+
+> **Implementation Note (C-08-003)**: ToolInterceptor async interface with CompositeInterceptor chaining allows multiple interceptors to be composed. Implementation includes async pre_execute/post_execute with proper error propagation.
 
 /// 默认空拦截器实现
 pub struct NopToolInterceptor;
@@ -687,6 +699,9 @@ pub trait StatefulTool<S: State>: Tool {
         store: &dyn Store,
     ) -> BoxFuture<'_, Result<String, ToolError>>;
 }
+```
+
+> **Implementation Note (C-08-004)**: StatefulTool<S> trait with ToolRuntime<S> provides complete integration including state access, config, store, and emit_output_delta() for streaming tool results. This enhances the design's basic stateful tool concept.
 
 /// 工具执行追踪（集成到 ToolNode 的执行循环中）
 pub struct ToolExecutionTrace {
@@ -717,6 +732,8 @@ fn validate_tool_input(tool: &dyn Tool, input: &serde_json::Value) -> Result<(),
     Ok(())
 }
 ```
+
+> **Implementation Note (C-08-001)**: Enhanced ToolNode validation includes JSON Schema validation, type checking, required field verification, and property-level validation. This goes beyond the design spec's basic validation to provide comprehensive input checking.
 
 **执行逻辑**：
 1. 从 state 的最后一条 AI 消息中提取 `tool_calls`
@@ -836,6 +853,9 @@ pub struct ReactAgentConfig<S: State, M: ChatModel> {
     /// 动态模型选择：根据 state 选择不同的模型
     pub model_selector: Option<Arc<dyn Fn(&S) -> M + Send + Sync>>,
 }
+```
+
+> **Implementation Note (C-08-005)**: ReactAgentConfig hooks include `pre_model_hook`, `post_model_hook`, `model_selector`, and `store` fields. These provide extensibility points beyond the basic agent configuration described in the design.
 
 /// 提示来源：静态字符串或动态函数
 pub enum PromptSource<S: State> {
@@ -952,7 +972,9 @@ impl<M: ChatModel, T: JsonSchema + DeserializeOwned + Send + 'static> ChatModel
 }
 ```
 
-**实现原理**：利用 LLM 的 function calling 能力强制输出结构化 JSON。创建一个虚拟工具，其 schema 就是目标类型 T 的 JSON Schema。设置 `tool_choice` 为强制使用该工具，LLM 的输出就是符合 schema 的 JSON。
+**实现原理**：利用 LLM 的 function calling 能力强制输出结构化 JSON。创建一个虚拟工具，其 schema 就是目标类型 T 的 JSON Schema。设置 `tool_choice` 为强制使用该工具，LLM 的输出就是符合 schema 的JSON。
+
+> **Implementation Note (C-08-008)**: StructuredOutputModel hybrid extraction includes `use_tool_based` flag with automatic text fallback. When tool-based extraction fails, the implementation falls back to text parsing, providing better resilience than the design's pure tool-based approach.
 
 **使用示例**：
 ```rust
@@ -1108,4 +1130,6 @@ crates/juncture/src/
     ├── mod.rs              # 导出 create_react_agent
     └── react.rs            # ReAct agent 构建逻辑
 ```
+
+---
 

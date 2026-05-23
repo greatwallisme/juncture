@@ -3,13 +3,11 @@
 //! Provides a mock implementation of [`ChatModel`] that returns pre-configured
 //! responses. Useful for testing agent workflows without making actual API calls.
 
-use std::pin::Pin;
-
 use async_trait::async_trait;
-use futures::{Stream, stream};
+use futures::stream;
 
 use crate::llm::{
-    CallOptions, ChatModel, LlmError, Message, MessageChunk, ToolCall, ToolCallChunk,
+    BoxStream, CallOptions, ChatModel, LlmError, Message, MessageChunk, ToolCall, ToolCallChunk,
     ToolDefinition,
 };
 
@@ -168,7 +166,7 @@ impl ChatModel for MockChatModel {
         &self,
         _messages: &[Message],
         _options: Option<&CallOptions>,
-    ) -> Pin<Box<dyn Stream<Item = Result<MessageChunk, LlmError>> + Send + '_>> {
+    ) -> BoxStream<'_, Result<MessageChunk, LlmError>> {
         if self.should_error {
             let error = LlmError::Other("Mock error".to_string());
             return Box::pin(stream::once(async move { Err(error) }));

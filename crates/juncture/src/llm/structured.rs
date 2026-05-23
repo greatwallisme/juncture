@@ -7,15 +7,14 @@
 //! text-based JSON parsing if the model does not return tool calls.
 
 use std::marker::PhantomData;
-use std::pin::Pin;
 
 use async_trait::async_trait;
-use futures::{Stream, stream};
 use schemars::JsonSchema;
 use serde::de::DeserializeOwned;
 
 use crate::llm::{
-    CallOptions, ChatModel, Content, LlmError, Message, MessageChunk, ToolChoice, ToolDefinition,
+    BoxStream, CallOptions, ChatModel, Content, LlmError, Message, MessageChunk, ToolChoice,
+    ToolDefinition,
 };
 
 /// Wrapper for extracting structured output from LLM responses.
@@ -256,16 +255,28 @@ impl<M: ChatModel, T: DeserializeOwned + JsonSchema + Clone + Send + Sync + 'sta
 
     fn stream(
         &self,
-        _messages: &[Message],
-        _options: Option<&CallOptions>,
-    ) -> Pin<Box<dyn Stream<Item = Result<MessageChunk, LlmError>> + Send + '_>> {
-        // Streaming not supported for structured output
-        // since we need to validate the complete response
-        Box::pin(stream::once(async {
-            Err(LlmError::Other(
-                "Streaming not supported for structured output".to_string(),
-            ))
-        }))
+        messages: &[Message],
+        options: Option<&CallOptions>,
+    ) -> BoxStream<'_, Result<MessageChunk, LlmError>> {
+        // Streaming support for structured output.
+        //
+        // Streams directly from the inner model without binding the extraction tool.
+        // This provides real-time streaming capability for progress monitoring,
+        // but unlike `invoke()`, does NOT validate the structured output.
+        //
+        // Consumers should use `invoke()` for validated structured output,
+        // or collect all chunks from the stream and call `extract()` on the
+        // accumulated result.
+        //
+        // Note: If you need tool-based extraction with streaming, bind the
+        // StructuredOutputModel to the inner model first:
+        // ```ignore
+        // let model = base_model
+        //     .bind_tools(vec![extraction_tool])
+        //     .with_structured_output::<MyType>();
+        // ```
+
+        self.inner.stream(messages, options)
     }
 
     fn bind_tools(&self, tools: Vec<ToolDefinition>) -> Self {
@@ -288,6 +299,7 @@ impl<M: ChatModel, T: DeserializeOwned + JsonSchema + Clone + Send + Sync + 'sta
 mod tests {
     use super::*;
     use crate::llm::{MockChatModel, ToolCall};
+    use futures::stream::StreamExt;
     use serde::Deserialize;
     use serde_json::json;
 
@@ -376,5 +388,51 @@ mod tests {
         let extracted: WeatherReport = model.extract(&response).unwrap();
         assert!((extracted.temperature - 30.0).abs() < f64::EPSILON);
         assert_eq!(extracted.conditions, "warm");
+    }
+
+    #[tokio::test]
+    async fn test_stream_returns_chunks() {
+        // Test that streaming returns chunks from the inner model
+        let base = MockChatModel::new("gpt-4")
+            .with_response(r#"{"temperature": 21.0, "conditions": "rainy"}"#);
+
+        let model = StructuredOutputModel::<_, WeatherReport>::new(base);
+
+        let messages = vec![Message::human("What's the weather?")];
+        let mut stream = model.stream(&messages, None);
+
+        // Should receive at least one chunk
+        let chunk_result = stream.next().await;
+        assert!(chunk_result.is_some());
+
+        let chunk = chunk_result.unwrap().unwrap();
+        assert!(!chunk.content.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_stream_with_tool_based_extraction() {
+        // Test that streaming works with tool-based extraction enabled
+        let tool_calls = vec![ToolCall {
+            id: "call_stream".to_string(),
+            name: "weather_tool".to_string(),
+            arguments: json!({"temperature": 19.5, "conditions": "windy"}),
+        }];
+
+        let base = MockChatModel::new("gpt-4")
+            .with_response("")
+            .with_tool_calls(tool_calls);
+
+        let model = StructuredOutputModel::<_, WeatherReport>::new(base);
+
+        let messages = vec![Message::human("What's the weather?")];
+        let mut stream = model.stream(&messages, None);
+
+        // Should receive at least one chunk
+        let chunk_result = stream.next().await;
+        assert!(chunk_result.is_some());
+
+        let chunk = chunk_result.unwrap().unwrap();
+        // Chunk may be empty if using tool-based extraction
+        assert!(chunk.content.is_empty() || !chunk.tool_call_chunks.is_empty());
     }
 }

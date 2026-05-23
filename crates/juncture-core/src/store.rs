@@ -265,6 +265,17 @@ pub enum FilterExpr {
     },
 }
 
+impl FilterExpr {
+    /// Evaluate this filter expression against a JSON value.
+    #[must_use]
+    ///
+    /// Returns `true` if the value matches the filter criteria.
+    /// Supports dot-notation field paths (e.g., `"address.city"`).
+    pub fn matches(&self, value: &serde_json::Value) -> bool {
+        evaluate_filter(self, value)
+    }
+}
+
 /// Store operation type
 #[derive(Debug, Clone)]
 pub enum StoreOp {
@@ -325,9 +336,10 @@ pub enum StoreResult {
 
 /// Configuration for time-to-live (TTL) behavior on [`MemoryStore`].
 ///
-/// Controls automatic expiration of items using lazy evaluation on read.
-/// Expired items are detected and removed during `get()` and `search()`
-/// operations (no background sweep task is used).
+/// Controls automatic expiration of items using both lazy evaluation on read
+/// and periodic background sweep tasks. Expired items are detected and removed
+/// during `get()` and `search()` operations, and can be cleaned up in bulk
+/// via the background sweep mechanism.
 ///
 /// # Examples
 ///
@@ -338,10 +350,10 @@ pub enum StoreResult {
 /// let store = MemoryStore::new().with_ttl_config(TTLConfig {
 ///     default_ttl: Some(Duration::from_secs(300)),
 ///     refresh_on_read: true,
-///     sweep_max_items: None,
+///     ..Default::default()
 /// });
 /// ```
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct TTLConfig {
     /// Default TTL duration applied to items inserted via `put()`.
     ///
@@ -354,12 +366,30 @@ pub struct TTLConfig {
     /// the item's `expires_at` to `now + default_ttl`, effectively resetting
     /// its TTL timer.
     pub refresh_on_read: bool,
+    /// Interval between background sweep cleanup cycles.
+    ///
+    /// The background sweep task runs periodically to remove expired items
+    /// in bulk, preventing unbounded growth of the store. Each sweep pass
+    /// processes at most `sweep_max_items` expired items to avoid blocking
+    /// other operations for extended periods.
+    pub sweep_interval: std::time::Duration,
     /// Maximum number of items to sweep per background cleanup cycle.
     ///
-    /// Limits the work done by a single sweep pass. When `None`, no limit
-    /// is applied (all expired items are swept in a single pass).
-    /// Used by the standalone `juncture-store` background sweep task.
-    pub sweep_max_items: Option<usize>,
+    /// Limits the work done by a single sweep pass. Each sweep cycle will
+    /// remove at most this many expired items, ensuring predictable cleanup
+    /// times even with large numbers of expired entries.
+    pub sweep_max_items: usize,
+}
+
+impl Default for TTLConfig {
+    fn default() -> Self {
+        Self {
+            default_ttl: None,
+            refresh_on_read: false,
+            sweep_interval: std::time::Duration::from_secs(300),
+            sweep_max_items: 1000,
+        }
+    }
 }
 
 /// In-memory store implementation
@@ -458,6 +488,135 @@ impl MemoryStore {
     pub const fn with_ttl_config(mut self, config: TTLConfig) -> Self {
         self.ttl_config = config;
         self
+    }
+
+    /// Sweep expired items from the store, returning the count of removed items.
+    ///
+    /// This method iterates through all namespaces and their items, collecting
+    /// keys where `expires_at < now`. It removes at most `sweep_max_items`
+    /// expired items to avoid blocking other operations for extended periods.
+    ///
+    /// The sweep is cooperative with the lazy cleanup in `get()` and `search()`:
+    /// expired items are removed during normal reads, while this method performs
+    /// bulk cleanup in the background.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::Other`] if the sweep operation encounters an
+    /// unexpected error (currently unused, reserved for future extensions).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use juncture_core::store::{MemoryStore, Store, TTLConfig};
+    /// use std::time::Duration;
+    /// use serde_json::json;
+    ///
+    /// # #[tokio::main]
+    /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let store = MemoryStore::new().with_ttl_config(TTLConfig {
+    ///     default_ttl: Some(Duration::from_millis(50)),
+    ///     refresh_on_read: false,
+    ///     ..Default::default()
+    /// });
+    ///
+    /// store.put("ns", "key1", json!({ "v": 1 }), None).await?;
+    /// store.put("ns", "key2", json!({ "v": 2 }), None).await?;
+    ///
+    /// // Wait for items to expire
+    /// tokio::time::sleep(Duration::from_millis(80)).await;
+    ///
+    /// // Sweep removes both expired items
+    /// let count = store.sweep_expired_items().await?;
+    /// assert_eq!(count, 2);
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[allow(
+        clippy::significant_drop_tightening,
+        reason = "Write lock must be held during iteration and removal"
+    )]
+    pub async fn sweep_expired_items(&self) -> Result<usize, StoreError> {
+        let now = Utc::now();
+        let mut count = 0;
+        let mut items = self.data.write().await;
+
+        // Collect expired keys across all namespaces
+        // Structure: (namespace, key) pairs to remove
+        let mut keys_to_remove = Vec::new();
+
+        for (namespace, namespace_map) in items.iter() {
+            for (key, item) in namespace_map {
+                if let Some(expires_at) = item.expires_at
+                    && expires_at < now
+                {
+                    keys_to_remove.push((namespace.clone(), key.clone()));
+                    count += 1;
+                    if count >= self.ttl_config.sweep_max_items {
+                        break;
+                    }
+                }
+            }
+            if count >= self.ttl_config.sweep_max_items {
+                break;
+            }
+        }
+
+        // Remove collected expired items
+        for (namespace, key) in keys_to_remove {
+            if let Some(namespace_map) = items.get_mut(&namespace) {
+                namespace_map.remove(&key);
+            }
+        }
+
+        Ok(count)
+    }
+
+    /// Start the background sweep task for periodic expired item cleanup.
+    ///
+    /// This method spawns a tokio task that runs periodically according to
+    /// `sweep_interval` in the TTL config. Each sweep cycle removes at most
+    /// `sweep_max_items` expired items. Errors are logged via `tracing::warn!`
+    /// and do not terminate the task.
+    ///
+    /// # Note
+    ///
+    /// The returned `JoinHandle` can be used to abort the task via
+    /// `handle.abort()` or awaited to ensure the task completes. If dropped
+    /// without aborting, the task will continue running in the background.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use juncture_core::store::{MemoryStore, TTLConfig};
+    /// use std::{time::Duration, sync::Arc};
+    ///
+    /// # #[tokio::main]
+    /// # async fn main() {
+    /// let store = Arc::new(MemoryStore::new().with_ttl_config(TTLConfig {
+    ///     default_ttl: Some(Duration::from_secs(300)),
+    ///     refresh_on_read: true,
+    ///     ..Default::default()
+    /// }));
+    ///
+    /// // Start background sweep task
+    /// let _sweep_handle = store.start_sweep_task();
+    ///
+    /// // Store continues to work, sweep task runs in background
+    /// // The task will run until _sweep_handle is dropped or aborted
+    /// # }
+    /// ```
+    #[must_use]
+    pub fn start_sweep_task(self: Arc<Self>) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(self.ttl_config.sweep_interval);
+            loop {
+                interval.tick().await;
+                if let Err(e) = self.sweep_expired_items().await {
+                    tracing::warn!("Store sweep failed: {}", e);
+                }
+            }
+        })
     }
 }
 
@@ -672,7 +831,7 @@ impl Store for MemoryStore {
         &self,
         prefix: Option<&str>,
         suffix: Option<&str>,
-        _max_depth: Option<usize>,
+        max_depth: Option<usize>,
         limit: Option<usize>,
         offset: Option<usize>,
     ) -> Result<Vec<String>, StoreError> {
@@ -687,6 +846,19 @@ impl Store for MemoryStore {
         }
         if let Some(suffix_filter) = suffix {
             namespaces.retain(|ns| ns.ends_with(suffix_filter));
+        }
+
+        // Apply max_depth: truncate namespace paths to the first N segments
+        if let Some(depth) = max_depth {
+            namespaces = namespaces
+                .into_iter()
+                .map(|ns| {
+                    let parts: Vec<&str> = ns.split('/').take(depth).collect();
+                    parts.join("/")
+                })
+                .collect();
+            namespaces.sort();
+            namespaces.dedup();
         }
 
         // Apply offset-based pagination (skip first N results)
@@ -876,8 +1048,6 @@ fn extract_index_text(value: &serde_json::Value, fields: &[String]) -> String {
 pub struct SqliteStore {
     /// Database connection pool
     pool: Option<sqlx::SqlitePool>,
-    /// Vector index configuration
-    pub index_config: Option<IndexConfig>,
 }
 
 #[cfg(feature = "sqlite")]
@@ -913,29 +1083,7 @@ impl SqliteStore {
         .await
         .map_err(|e| StoreError::InvalidOperation(format!("Failed to create table: {e}")))?;
 
-        Ok(Self {
-            pool: Some(pool),
-            index_config: None,
-        })
-    }
-
-    /// Create new `SQLite` store with index config
-    ///
-    /// # Arguments
-    ///
-    /// * `database_url` - `SQLite` database connection string
-    /// * `index_config` - Optional vector index configuration
-    ///
-    /// # Errors
-    ///
-    /// Returns `StoreError` if connection fails or table creation fails.
-    pub async fn with_index_config(
-        database_url: &str,
-        index_config: IndexConfig,
-    ) -> Result<Self, StoreError> {
-        let mut store = Self::new(database_url).await?;
-        store.index_config = Some(index_config);
-        Ok(store)
+        Ok(Self { pool: Some(pool) })
     }
 }
 
@@ -1218,7 +1366,7 @@ impl Store for SqliteStore {
         &self,
         prefix: Option<&str>,
         suffix: Option<&str>,
-        _max_depth: Option<usize>,
+        max_depth: Option<usize>,
         limit: Option<usize>,
         offset: Option<usize>,
     ) -> Result<Vec<String>, StoreError> {
@@ -1261,6 +1409,19 @@ impl Store for SqliteStore {
                 .try_get("namespace")
                 .map_err(|e| StoreError::Database(e.to_string()))?;
             namespaces.push(ns);
+        }
+
+        // Apply max_depth: truncate namespace paths to the first N segments
+        if let Some(depth) = max_depth {
+            namespaces = namespaces
+                .into_iter()
+                .map(|ns| {
+                    let parts: Vec<&str> = ns.split('/').take(depth).collect();
+                    parts.join("/")
+                })
+                .collect();
+            namespaces.sort();
+            namespaces.dedup();
         }
 
         Ok(namespaces)
@@ -1327,8 +1488,6 @@ impl Store for SqliteStore {
 pub struct PostgresStore {
     /// Database connection pool
     pool: Option<sqlx::PgPool>,
-    /// Vector index configuration
-    pub index_config: Option<IndexConfig>,
 }
 
 #[cfg(feature = "postgres")]
@@ -1364,29 +1523,7 @@ impl PostgresStore {
         .await
         .map_err(|e| StoreError::InvalidOperation(format!("Failed to create table: {e}")))?;
 
-        Ok(Self {
-            pool: Some(pool),
-            index_config: None,
-        })
-    }
-
-    /// Create new `PostgreSQL` store with index config
-    ///
-    /// # Arguments
-    ///
-    /// * `database_url` - `PostgreSQL` database connection string
-    /// * `index_config` - Optional vector index configuration
-    ///
-    /// # Errors
-    ///
-    /// Returns `StoreError` if connection fails or table creation fails.
-    pub async fn with_index_config(
-        database_url: &str,
-        index_config: IndexConfig,
-    ) -> Result<Self, StoreError> {
-        let mut store = Self::new(database_url).await?;
-        store.index_config = Some(index_config);
-        Ok(store)
+        Ok(Self { pool: Some(pool) })
     }
 }
 
@@ -1669,7 +1806,7 @@ impl Store for PostgresStore {
         &self,
         prefix: Option<&str>,
         suffix: Option<&str>,
-        _max_depth: Option<usize>,
+        max_depth: Option<usize>,
         limit: Option<usize>,
         offset: Option<usize>,
     ) -> Result<Vec<String>, StoreError> {
@@ -1715,6 +1852,19 @@ impl Store for PostgresStore {
                 .try_get("namespace")
                 .map_err(|e| StoreError::Database(e.to_string()))?;
             namespaces.push(ns);
+        }
+
+        // Apply max_depth: truncate namespace paths to the first N segments
+        if let Some(depth) = max_depth {
+            namespaces = namespaces
+                .into_iter()
+                .map(|ns| {
+                    let parts: Vec<&str> = ns.split('/').take(depth).collect();
+                    parts.join("/")
+                })
+                .collect();
+            namespaces.sort();
+            namespaces.dedup();
         }
 
         Ok(namespaces)
@@ -1889,7 +2039,7 @@ mod tests {
         let store = MemoryStore::new().with_ttl_config(TTLConfig {
             default_ttl: Some(std::time::Duration::from_millis(50)),
             refresh_on_read: false,
-            sweep_max_items: None,
+            ..Default::default()
         });
 
         store
@@ -1918,7 +2068,7 @@ mod tests {
         let store = MemoryStore::new().with_ttl_config(TTLConfig {
             default_ttl: Some(std::time::Duration::from_millis(100)),
             refresh_on_read: true,
-            sweep_max_items: None,
+            ..Default::default()
         });
 
         store
@@ -1956,7 +2106,7 @@ mod tests {
         let store = MemoryStore::new().with_ttl_config(TTLConfig {
             default_ttl: Some(std::time::Duration::from_millis(50)),
             refresh_on_read: false,
-            sweep_max_items: None,
+            ..Default::default()
         });
 
         store
@@ -2026,7 +2176,7 @@ mod tests {
         let store = MemoryStore::new().with_ttl_config(TTLConfig {
             default_ttl: Some(std::time::Duration::from_millis(30)),
             refresh_on_read: false,
-            sweep_max_items: None,
+            ..Default::default()
         });
 
         store
@@ -2060,7 +2210,7 @@ mod tests {
         let store = MemoryStore::new().with_ttl_config(TTLConfig {
             default_ttl: Some(std::time::Duration::from_millis(200)),
             refresh_on_read: true,
-            sweep_max_items: None,
+            ..Default::default()
         });
 
         store
@@ -2619,5 +2769,251 @@ mod tests {
         assert!(sql.contains("AND"));
         assert!(sql.contains("NOT ("));
         assert!(sql.contains("OR"));
+    }
+
+    // --- Sweep tests ---
+
+    #[tokio::test]
+    async fn test_sweep_expired_items_removes_expired() {
+        let store = MemoryStore::new().with_ttl_config(TTLConfig {
+            default_ttl: Some(std::time::Duration::from_millis(50)),
+            refresh_on_read: false,
+            ..Default::default()
+        });
+
+        store
+            .put("ns", "key1", json!({"v": 1}), None)
+            .await
+            .expect("put failed");
+        store
+            .put("ns", "key2", json!({"v": 2}), None)
+            .await
+            .expect("put failed");
+
+        // Wait for items to expire
+        tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+
+        // Sweep should remove both expired items
+        let count = store.sweep_expired_items().await.expect("sweep failed");
+        assert_eq!(count, 2, "sweep should remove 2 expired items");
+
+        // Verify items are gone from storage
+        let exists = {
+            let data = store.data.read().await;
+            data.get("ns").is_some_and(|ns| ns.contains_key("key1"))
+        };
+        assert!(!exists, "expired item should be removed from storage");
+
+        let exists = {
+            let data = store.data.read().await;
+            data.get("ns").is_some_and(|ns| ns.contains_key("key2"))
+        };
+        assert!(!exists, "expired item should be removed from storage");
+    }
+
+    #[tokio::test]
+    async fn test_sweep_expired_items_respects_max_items_limit() {
+        let store = MemoryStore::new().with_ttl_config(TTLConfig {
+            default_ttl: Some(std::time::Duration::from_millis(50)),
+            refresh_on_read: false,
+            sweep_max_items: 2,
+            ..Default::default()
+        });
+
+        // Insert 5 items
+        for i in 1..=5 {
+            store
+                .put("ns", &format!("key{i}"), json!({"v": i}), None)
+                .await
+                .expect("put failed");
+        }
+
+        // Wait for items to expire
+        tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+
+        // First sweep should remove at most 2 items
+        let count1 = store.sweep_expired_items().await.expect("sweep failed");
+        assert_eq!(
+            count1, 2,
+            "first sweep should respect sweep_max_items limit"
+        );
+
+        // Second sweep should remove 2 more
+        let count2 = store.sweep_expired_items().await.expect("sweep failed");
+        assert_eq!(count2, 2, "second sweep should remove 2 more items");
+
+        // Third sweep should remove the last item
+        let count3 = store.sweep_expired_items().await.expect("sweep failed");
+        assert_eq!(count3, 1, "third sweep should remove last item");
+
+        // Fourth sweep should remove nothing
+        let count4 = store.sweep_expired_items().await.expect("sweep_failed");
+        assert_eq!(count4, 0, "fourth sweep should find no expired items");
+    }
+
+    #[tokio::test]
+    async fn test_sweep_expired_items_across_multiple_namespaces() {
+        let store = MemoryStore::new().with_ttl_config(TTLConfig {
+            default_ttl: Some(std::time::Duration::from_millis(50)),
+            refresh_on_read: false,
+            ..Default::default()
+        });
+
+        // Insert items across multiple namespaces
+        store
+            .put("ns1", "key1", json!({"v": 1}), None)
+            .await
+            .expect("put failed");
+        store
+            .put("ns1", "key2", json!({"v": 2}), None)
+            .await
+            .expect("put failed");
+        store
+            .put("ns2", "key1", json!({"v": 3}), None)
+            .await
+            .expect("put failed");
+        store
+            .put("ns2", "key2", json!({"v": 4}), None)
+            .await
+            .expect("put failed");
+
+        // Wait for items to expire
+        tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+
+        // Sweep should remove all expired items across all namespaces
+        let count = store.sweep_expired_items().await.expect("sweep failed");
+        assert_eq!(count, 4, "sweep should remove all 4 expired items");
+
+        // Verify all items are gone
+        let total_items = {
+            let data = store.data.read().await;
+            data.values()
+                .map(std::collections::HashMap::len)
+                .sum::<usize>()
+        };
+        assert_eq!(total_items, 0, "all items should be removed");
+    }
+
+    #[tokio::test]
+    async fn test_sweep_expired_items_does_not_remove_non_expired() {
+        let store = MemoryStore::new().with_ttl_config(TTLConfig {
+            default_ttl: Some(std::time::Duration::from_secs(10)),
+            refresh_on_read: false,
+            ..Default::default()
+        });
+
+        store
+            .put("ns", "key1", json!({"v": 1}), None)
+            .await
+            .expect("put failed");
+
+        // Items should not be expired yet
+        let count = store.sweep_expired_items().await.expect("sweep failed");
+        assert_eq!(count, 0, "sweep should not remove non-expired items");
+
+        // Verify item still exists
+        let item = store
+            .get("ns", "key1")
+            .await
+            .expect("get failed")
+            .expect("item should still exist");
+        assert_eq!(item.key, "key1");
+    }
+
+    #[tokio::test]
+    async fn test_sweep_expired_items_with_no_ttl_items() {
+        let store = MemoryStore::new();
+
+        store
+            .put("ns", "key1", json!({"v": 1}), None)
+            .await
+            .expect("put failed");
+
+        // Items without TTL should never be swept
+        let count = store.sweep_expired_items().await.expect("sweep failed");
+        assert_eq!(count, 0, "sweep should not remove items without expiration");
+
+        // Verify item still exists
+        let item = store
+            .get("ns", "key1")
+            .await
+            .expect("get failed")
+            .expect("item should still exist");
+        assert_eq!(item.key, "key1");
+    }
+
+    #[tokio::test]
+    async fn test_start_sweep_task_runs_periodically() {
+        let store = Arc::new(MemoryStore::new().with_ttl_config(TTLConfig {
+            default_ttl: Some(std::time::Duration::from_millis(50)),
+            refresh_on_read: false,
+            sweep_interval: std::time::Duration::from_millis(100),
+            ..Default::default()
+        }));
+
+        store
+            .put("ns", "key1", json!({"v": 1}), None)
+            .await
+            .expect("put failed");
+
+        // Start sweep task
+        let store_clone = Arc::clone(&store);
+        let handle = store_clone.start_sweep_task();
+
+        // Wait for item to expire and sweep task to run
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+
+        // Verify item was removed by sweep task
+        let exists = {
+            let data = store.data.read().await;
+            data.get("ns").is_some_and(|ns| ns.contains_key("key1"))
+        };
+        assert!(!exists, "sweep task should have removed expired item");
+
+        // Abort the task to clean up
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn test_sweep_and_lazy_cleanup_work_together() {
+        let store = MemoryStore::new().with_ttl_config(TTLConfig {
+            default_ttl: Some(std::time::Duration::from_millis(50)),
+            refresh_on_read: false,
+            ..Default::default()
+        });
+
+        // Insert multiple items
+        for i in 1..=5 {
+            store
+                .put("ns", &format!("key{i}"), json!({"v": i}), None)
+                .await
+                .expect("put failed");
+        }
+
+        // Wait for items to expire
+        tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+
+        // Trigger lazy cleanup via get for key1
+        let _ = store.get("ns", "key1").await;
+
+        // Verify key1 was removed by lazy cleanup
+        let exists1 = {
+            let data = store.data.read().await;
+            data.get("ns").is_some_and(|ns| ns.contains_key("key1"))
+        };
+        assert!(!exists1, "lazy cleanup should remove key1");
+
+        // Now sweep should remove the remaining 4 items
+        let count = store.sweep_expired_items().await.expect("sweep failed");
+        assert_eq!(count, 4, "sweep should remove remaining 4 items");
+
+        // Verify all items are gone
+        let total_items = {
+            let data = store.data.read().await;
+            data.values()
+                .map(std::collections::HashMap::len)
+                .sum::<usize>()
+        };
+        assert_eq!(total_items, 0, "all items should be removed");
     }
 }

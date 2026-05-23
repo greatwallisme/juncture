@@ -122,9 +122,9 @@ fn test_validation_node_integration() {
         .with_max_tokens(1000)
         .with_validator(|messages| {
             if messages.len() > 100 {
-                return Err(ToolError::validation_failed(
+                return Err(ToolError::validation_failed(vec![
                     "Too many messages".to_string(),
-                ));
+                ]));
             }
             Ok(())
         });

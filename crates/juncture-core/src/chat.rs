@@ -936,20 +936,21 @@ impl ChatOllama {
         }
 
         if !self.tools.is_empty() {
-            body["tools"] = serde_json::json!(self
-                .tools
-                .iter()
-                .map(|t| {
-                    serde_json::json!({
-                        "type": "function",
-                        "function": {
-                            "name": t.name,
-                            "description": t.description,
-                            "parameters": t.parameters,
-                        }
+            body["tools"] = serde_json::json!(
+                self.tools
+                    .iter()
+                    .map(|t| {
+                        serde_json::json!({
+                            "type": "function",
+                            "function": {
+                                "name": t.name,
+                                "description": t.description,
+                                "parameters": t.parameters,
+                            }
+                        })
                     })
-                })
-                .collect::<Vec<_>>());
+                    .collect::<Vec<_>>()
+            );
         }
 
         body

@@ -4,17 +4,16 @@
 //! Supports both streaming and non-streaming requests, tool use, and
 //! multimodal inputs.
 
-use std::pin::Pin;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use futures::{Stream, StreamExt, stream};
+use futures::{StreamExt, stream};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
 use crate::llm::{
-    CallOptions, ChatModel, Content, ContentPart, LlmError, Message, Role, TokenUsage, ToolCall,
-    ToolChoice, ToolDefinition,
+    BoxStream, CallOptions, ChatModel, Content, ContentPart, LlmError, Message, Role, TokenUsage,
+    ToolCall, ToolChoice, ToolDefinition,
 };
 
 use juncture_tracing::spans::attrs;
@@ -383,7 +382,7 @@ impl ChatModel for ChatAnthropic {
         &self,
         messages: &[Message],
         options: Option<&CallOptions>,
-    ) -> Pin<Box<dyn Stream<Item = Result<crate::llm::MessageChunk, LlmError>> + Send + '_>> {
+    ) -> BoxStream<'_, Result<crate::llm::MessageChunk, LlmError>> {
         let model = options
             .and_then(|o| o.model_override.as_ref())
             .unwrap_or(&self.model);
@@ -633,6 +632,7 @@ enum AnthropicContent {
 /// Anthropic API content block.
 #[derive(Debug, Serialize)]
 #[serde(tag = "type")]
+#[allow(dead_code, reason = "deserialization target, fields read indirectly")]
 enum ContentBlock {
     #[serde(rename = "text")]
     Text { text: String },
@@ -683,8 +683,11 @@ enum AnthropicToolChoice {
 
 /// Anthropic API response format.
 #[derive(Debug, Deserialize)]
+#[allow(dead_code, reason = "deserialization target, fields read indirectly")]
 struct AnthropicResponse {
+    #[allow(dead_code, reason = "deserialization target, fields read indirectly")]
     id: String,
+    #[allow(dead_code, reason = "deserialization target, fields read indirectly")]
     role: String,
     content: Vec<ResponseContentBlock>,
     usage: Option<TokenUsage>,
@@ -840,6 +843,7 @@ fn convert_role_to_anthropic(role: &Role) -> &'static str {
 /// Anthropic SSE event type during streaming.
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type")]
+#[allow(dead_code, reason = "deserialization target, fields read indirectly")]
 enum AnthropicSSEEvent {
     #[serde(rename = "message_start")]
     MessageStart,
@@ -851,7 +855,10 @@ enum AnthropicSSEEvent {
     #[serde(rename = "content_block_delta")]
     ContentBlockDelta { index: usize, delta: DeltaContent },
     #[serde(rename = "content_block_stop")]
-    ContentBlockStop { index: usize },
+    ContentBlockStop {
+        #[allow(dead_code, reason = "deserialization target, fields read indirectly")]
+        index: usize
+    },
     #[serde(rename = "message_delta")]
     MessageDelta {
         delta: DeltaMessage,
@@ -873,8 +880,11 @@ struct DeltaContent {
 
 /// Delta message in SSE events.
 #[derive(Debug, Deserialize)]
+#[allow(dead_code, reason = "deserialization target, fields read indirectly")]
 struct DeltaMessage {
+    #[allow(dead_code, reason = "deserialization target, fields read indirectly")]
     stop_reason: Option<String>,
+    #[allow(dead_code, reason = "deserialization target, fields read indirectly")]
     stop_sequence: Option<String>,
 }
 

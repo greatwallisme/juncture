@@ -4,17 +4,16 @@
 //! Supports both streaming and non-streaming requests, function calling, and
 //! multimodal inputs.
 
-use std::pin::Pin;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use futures::{Stream, StreamExt, stream};
+use futures::{StreamExt, stream};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
 use crate::llm::{
-    CallOptions, ChatModel, Content, ContentPart, LlmError, Message, Role, TokenUsage, ToolCall,
-    ToolChoice, ToolDefinition,
+    BoxStream, CallOptions, ChatModel, Content, ContentPart, LlmError, Message, Role, TokenUsage,
+    ToolCall, ToolChoice, ToolDefinition,
 };
 
 use juncture_tracing::spans::attrs;
@@ -308,6 +307,14 @@ impl ChatModel for ChatOpenAI {
             .is_some_and(|calls| !calls.is_empty());
         tracing::Span::current().record(attrs::LLM_HAS_TOOL_CALLS, has_tool_calls);
 
+        if let Some(finish_reason) = api_response
+            .choices
+            .first()
+            .and_then(|choice| choice.finish_reason.as_deref())
+        {
+            tracing::Span::current().record(attrs::LLM_STOP_REASON, finish_reason);
+        }
+
         // Emit metrics for LLM call
         tracing::debug!(
             name: "juncture.llm.calls",
@@ -347,7 +354,7 @@ impl ChatModel for ChatOpenAI {
         &self,
         messages: &[Message],
         options: Option<&CallOptions>,
-    ) -> Pin<Box<dyn Stream<Item = Result<crate::llm::MessageChunk, LlmError>> + Send + '_>> {
+    ) -> BoxStream<'_, Result<crate::llm::MessageChunk, LlmError>> {
         let model = options
             .and_then(|o| o.model_override.as_ref())
             .unwrap_or(&self.model);
@@ -635,11 +642,14 @@ struct OpenAIResponse {
 #[derive(Debug, Deserialize)]
 struct OpenAIChoice {
     message: OpenAIResponseMessage,
+    finish_reason: Option<String>,
 }
 
 /// `OpenAI` API response message.
 #[derive(Debug, Deserialize)]
+#[allow(dead_code, reason = "deserialization target, fields read indirectly")]
 struct OpenAIResponseMessage {
+    #[allow(dead_code, reason = "deserialization target, fields read indirectly")]
     role: String,
     content: Option<String>,
     tool_calls: Option<Vec<OpenAIResponseToolCall>>,
@@ -799,10 +809,15 @@ fn convert_api_response(response: &OpenAIResponse) -> Result<Message, LlmError> 
 
 /// `OpenAI` SSE chunk format.
 #[derive(Debug, Deserialize)]
+#[allow(dead_code, reason = "deserialization target, fields read indirectly")]
 struct OpenAISSEChunk {
+    #[allow(dead_code, reason = "deserialization target, fields read indirectly")]
     id: String,
+    #[allow(dead_code, reason = "deserialization target, fields read indirectly")]
     object: String,
+    #[allow(dead_code, reason = "deserialization target, fields read indirectly")]
     created: u64,
+    #[allow(dead_code, reason = "deserialization target, fields read indirectly")]
     model: String,
     choices: Vec<OpenAIChoiceChunk>,
     usage: Option<TokenUsage>,
@@ -810,15 +825,20 @@ struct OpenAISSEChunk {
 
 /// `OpenAI` SSE choice chunk.
 #[derive(Debug, Deserialize)]
+#[allow(dead_code, reason = "deserialization target, fields read indirectly")]
 struct OpenAIChoiceChunk {
+    #[allow(dead_code, reason = "deserialization target, fields read indirectly")]
     index: usize,
     delta: OpenAIDelta,
+    #[allow(dead_code, reason = "deserialization target, fields read indirectly")]
     finish_reason: Option<String>,
 }
 
 /// `OpenAI` SSE delta.
 #[derive(Debug, Deserialize)]
+#[allow(dead_code, reason = "deserialization target, fields read indirectly")]
 struct OpenAIDelta {
+    #[allow(dead_code, reason = "deserialization target, fields read indirectly")]
     role: Option<String>,
     content: Option<String>,
     tool_calls: Option<Vec<OpenAIToolCallChunk>>,
@@ -826,9 +846,11 @@ struct OpenAIDelta {
 
 /// `OpenAI` SSE tool call chunk.
 #[derive(Debug, Deserialize)]
+#[allow(dead_code, reason = "deserialization target, fields read indirectly")]
 struct OpenAIToolCallChunk {
     index: usize,
     id: Option<String>,
+    #[allow(dead_code, reason = "deserialization target, fields read indirectly")]
     r#type: Option<String>,
     function: Option<OpenAIFunctionChunk>,
 }

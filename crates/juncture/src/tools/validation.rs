@@ -28,7 +28,7 @@ use crate::tools::error::ToolError;
 ///     .with_validator(|messages| {
 ///         // Custom validation logic
 ///         if messages.len() > 1000 {
-///             return Err(ToolError::validation_failed("Too many messages".to_string()));
+///             return Err(ToolError::validation_failed(vec!["Too many messages".to_string()]));
 ///         }
 ///         Ok(())
 ///     });
@@ -105,9 +105,9 @@ impl ValidationNode {
                 .sum();
 
             if total_tokens > max_tokens {
-                return Err(ToolError::validation_failed(format!(
+                return Err(ToolError::validation_failed(vec![format!(
                     "Token limit exceeded: {total_tokens} > {max_tokens}"
-                )));
+                )]));
             }
         }
 
@@ -271,9 +271,9 @@ mod tests {
             if messages.len() <= 10 {
                 Ok(())
             } else {
-                Err(ToolError::validation_failed(
+                Err(ToolError::validation_failed(vec![
                     "Too many messages".to_string(),
-                ))
+                ]))
             }
         });
 
@@ -287,9 +287,9 @@ mod tests {
             if messages.len() <= 10 {
                 Ok(())
             } else {
-                Err(ToolError::validation_failed(
+                Err(ToolError::validation_failed(vec![
                     "Too many messages".to_string(),
-                ))
+                ]))
             }
         });
 
@@ -306,9 +306,9 @@ mod tests {
                 if messages.len() <= 10 {
                     Ok(())
                 } else {
-                    Err(ToolError::validation_failed(
+                    Err(ToolError::validation_failed(vec![
                         "Too many messages".to_string(),
-                    ))
+                    ]))
                 }
             });
 
@@ -383,9 +383,9 @@ mod tests {
             if messages.len() <= 2 {
                 Ok(())
             } else {
-                Err(ToolError::validation_failed(
+                Err(ToolError::validation_failed(vec![
                     "Too many messages".to_string(),
-                ))
+                ]))
             }
         });
 

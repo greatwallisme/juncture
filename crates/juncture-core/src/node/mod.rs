@@ -8,6 +8,8 @@ mod r#trait;
 
 pub use into_node::{
     IntoNode, NodeFnCommand, NodeFnCommandWithConfig, NodeFnUpdate, NodeFnUpdateWithConfig,
+    NodeFnUpdateWithRuntime, NodeFnUpdateWithConfigAndRuntime, NodeFnCommandWithRuntime,
+    NodeFnCommandWithConfigAndRuntime,
 };
 pub use r#trait::Node;
 

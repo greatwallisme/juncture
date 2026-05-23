@@ -328,7 +328,7 @@ impl ToolNode {
             .rev()
             .find(|m| m.role == Role::Ai && m.has_tool_calls())
             .ok_or_else(|| {
-                ToolError::validation_failed("No AI message with tool calls found".to_string())
+                ToolError::validation_failed(vec!["No AI message with tool calls found".to_string()])
             })?;
 
         if last_ai.tool_calls.is_empty() {
@@ -589,10 +589,10 @@ impl ToolNode {
     /// - The arguments do not match the tool's JSON schema
     fn validate_tool_call(&self, tool_call: &ToolCall) -> Result<(), ToolError> {
         let tool = self.tools.get(&tool_call.name).ok_or_else(|| {
-            ToolError::validation_failed(format!(
+            ToolError::validation_failed(vec![format!(
                 "Tool '{}' not found in registered tools",
                 tool_call.name
-            ))
+            )])
         })?;
         Self::validate_arguments_against_schema(&tool_call.arguments, &tool.schema())
     }
@@ -624,34 +624,34 @@ impl ToolNode {
             "object" => Self::validate_object_arguments(arguments, schema)?,
             "array" => {
                 if !arguments.is_array() {
-                    return Err(ToolError::validation_failed(format!(
+                    return Err(ToolError::validation_failed(vec![format!(
                         "Expected array arguments, got '{}'",
                         Self::value_type_name(arguments)
-                    )));
+                    )]));
                 }
             }
             "string" => {
                 if !arguments.is_string() {
-                    return Err(ToolError::validation_failed(format!(
+                    return Err(ToolError::validation_failed(vec![format!(
                         "Expected string arguments, got '{}'",
                         Self::value_type_name(arguments)
-                    )));
+                    )]));
                 }
             }
             "number" | "integer" => {
                 if !arguments.is_number() {
-                    return Err(ToolError::validation_failed(format!(
+                    return Err(ToolError::validation_failed(vec![format!(
                         "Expected number arguments, got '{}'",
                         Self::value_type_name(arguments)
-                    )));
+                    )]));
                 }
             }
             "boolean" => {
                 if !arguments.is_boolean() {
-                    return Err(ToolError::validation_failed(format!(
+                    return Err(ToolError::validation_failed(vec![format!(
                         "Expected boolean arguments, got '{}'",
                         Self::value_type_name(arguments)
-                    )));
+                    )]));
                 }
             }
             _ => {} // Unknown type, skip validation
@@ -666,10 +666,10 @@ impl ToolNode {
         schema: &serde_json::Value,
     ) -> Result<(), ToolError> {
         if !arguments.is_object() {
-            return Err(ToolError::validation_failed(format!(
+            return Err(ToolError::validation_failed(vec![format!(
                 "Expected object arguments, got '{}'",
                 Self::value_type_name(arguments)
-            )));
+            )]));
         }
 
         // Check required fields exist
@@ -677,14 +677,14 @@ impl ToolNode {
             let obj = arguments.as_object().expect("already checked is_object");
             for field in required {
                 let field_name = field.as_str().ok_or_else(|| {
-                    ToolError::validation_failed(
+                    ToolError::validation_failed(vec![
                         "Invalid schema: required field name is not a string".to_string(),
-                    )
+                    ])
                 })?;
                 if !obj.contains_key(field_name) {
-                    return Err(ToolError::validation_failed(format!(
+                    return Err(ToolError::validation_failed(vec![format!(
                         "Missing required field: '{field_name}'"
-                    )));
+                    )]));
                 }
             }
         }
@@ -725,10 +725,10 @@ impl ToolNode {
         };
 
         if !matches {
-            return Err(ToolError::validation_failed(format!(
+            return Err(ToolError::validation_failed(vec![format!(
                 "Field '{prop_name}' expected type '{expected_type}', got '{}'",
                 Self::value_type_name(value)
-            )));
+            )]));
         }
 
         Ok(())

@@ -300,6 +300,13 @@ pub struct CheckpointMetadata {
     pub run_id: String,
 }
 
+// > **实现备注 (C-04-003)**: 实际实现使用了双错误类型系统以支持更精细的错误处理。
+// > 除了上述 `CheckpointError`（用于存储/序列化错误）外，实现引入了 `CheckpointPutError`
+// > 专门用于 `put()` 操作失败。这种分离允许调用者在无需检查错误消息字符串的情况下，
+// > 区分"checkpoint 数据无效"错误和"存储后端拒绝写入"错误，从而支持更有针对性的重试
+// > 和恢复策略。核心错误类型在 `juncture-core` 中定义，而特定于存储的错误类型在
+// > `juncture-checkpoint` crate 中定义。
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum CheckpointSource {
     /// 图开始执行时的初始状态
@@ -311,6 +318,12 @@ pub enum CheckpointSource {
     /// 从历史 checkpoint 分叉时
     Fork,
 }
+
+// > **实现备注 (C-04-001)**: 实际实现增加了 `CheckpointSource::Interrupt` 变体用于
+// > human-in-the-loop (HITL) 工作流。当节点触发中断时（通过 `Command::interrupt`），
+// > 在该点保存的 checkpoint 被标记为 `source: Interrupt`。这允许 `get_state_history`
+// > 过滤器区分 HITL 暂停点和正常执行 checkpoint，使 UI 能够显示"等待人工输入"状态
+// > 并按中断事件过滤历史记录。
 
 // > **Implementation Note (C-04-1)**: Implementation adds `CheckpointSource::Interrupt` variant
 // > for human-in-the-loop (HITL) workflows. When a node triggers an interrupt (via `Command::interrupt`),
@@ -601,14 +614,12 @@ impl Checkpoint {
     }
 }
 
-// > **Implementation Note (C-04-3)**: The serialization system is more comprehensive than designed.
-// > In addition to Msgpack and JSON formats, the implementation provides auto-detection of the
-// > serialization format on read (via magic byte inspection), allowing seamless migration from
-// > JSON to Msgpack without data loss. The `Encrypted` variant (AES-256-GCM) is implemented as
-// > a serializer wrapper that composes with any inner format, and auto-detection correctly handles
-// > encrypted payloads by checking for the encryption header before delegating to the appropriate
-// > deserializer. This three-layer system (Msgpack/JSON + Encryption + Auto-detection) exceeds
-// > the design's two-format specification.
+// > **实现备注 (C-04-002)**: 实际实现的序列化系统比设计更为完善。除了 Msgpack 和 JSON 格式外，
+// > 实现提供了读取时自动检测序列化格式的功能（通过魔数字节检查），允许无缝从 JSON 迁移到 Msgpack
+// > 而不丢失数据。`detect_format()` 方法检查字节序列开头（Msgpack 以特定字节如 0x82/0x83 开头，
+// > JSON 以 `{` 或 `[` 开头），自动选择正确的反序列化器。`deserialize_auto()` 提供了统一的
+// > 反序列化入口，在读取时自动处理格式检测和解复用。这种三层系统（Msgpack/JSON + 加密 + 自动检测）
+// > 超出了设计中指定的双格式系统。
 ```
 
 ### 5.2 JSON 备用（兼容性）
@@ -709,6 +720,13 @@ impl<S: CheckpointSerializer> EncryptedSerializer<S> {
         let cipher = Aes256Gcm::new(key.into());
         Self { inner, cipher }
     }
+
+    // > **实现备注 (C-04-004)**: 实际实现提供了增强的密钥派生功能。除了直接接受 32 字节
+    // > 密钥外，还提供 `from_passphrase(phrase: &str) -> Self` 便捷方法，通过 PBKDF2-HMAC-SHA256
+    // > 从密码短语派生加密密钥（迭代次数 100,000）。`EncryptedSerializer` 使用泛型参数
+    // > `Inner: CheckpointSerializer` 而非 `Box<dyn CheckpointSerializer>`，允许编译器进行
+    // > 单态化优化，消除虚表分发开销。加密器可以与任何内部序列化格式组合（Msgpack、JSON 等），
+    // > 提供灵活的加密策略。
 }
 
 // > **实现备注 (D-04-3)**: 实际实现中 `EncryptedSerializer` 使用泛型参数 `Inner: CheckpointSerializer`
@@ -932,11 +950,17 @@ impl<S: State + Serialize + DeserializeOwned> CompiledGraph<S> {
 - `"node_name:uuid"` — 一级子图（uuid 标识具体的子图调用实例）
 - `"outer:uuid|inner:uuid"` — 嵌套子图
 
-> **Implementation Note (C-04-5)**: The actual implementation uses `|` (pipe) as the namespace
-> separator between nesting levels instead of `:` (colon) shown in the design above. For example,
-> a nested subgraph uses `"node_name|uuid"` format for one level and `"outer|uuid1|inner|uuid2"`
-> for two levels. The pipe separator was chosen to avoid ambiguity with UUID v6 string representation
-> which already contains colons. Code that parses or constructs checkpoint namespaces must use `|`.
+> **Implementation Note (C-04-005)**: 实际实现使用 `|`（管道符）作为命名空间层级分隔符
+> 而非上述设计中显示的 `:`（冒号）。例如，嵌套子图使用 `"node_name|uuid"` 格式表示一级，
+> 使用 `"outer|uuid1|inner|uuid2"` 表示两级。选择管道符是为了避免与 UUID v6 字符串表示中
+> 已包含的冒号产生歧义。解析或构建 checkpoint 命名空间的代码必须使用 `|`。
+
+// > **实现备注 (C-04-005)**: 实际实现实现了结构化的 `CheckpointNamespace` 类型系统，
+// > 超越了简单的字符串格式。`CheckpointNamespace` 提供层次化的 `child()`、`parent()`、
+// > `is_root()` 操作，以及 `NamespaceSegment` 枚举区分不同类型的段（根、子图节点、
+// > 子图实例）。这个类型系统使命名空间操作类型安全，避免手动字符串解析错误。
+// > 例如，`ns.child("agent", uuid)` 创建子命名空间，`ns.parent()` 返回父命名空间，
+// > `ns.is_root()` 检查是否为根图命名空间。
 
 ### 7.3 Config 中的 checkpoint 相关字段
 
@@ -1054,4 +1078,6 @@ crates/
 ```
 
 `juncture-checkpoint` 是纯 trait + 内存实现，无外部存储依赖。SQLite 和 Postgres 实现作为独立 crate，通过 feature flag 在门面 crate 中可选引入。
+
+---
 

@@ -96,10 +96,25 @@ pub enum StreamEvent<S: State> {
         step: usize,
     },
 
+    /// <!-- Implementation Note (C-05-001) -->: FilteredValues 变体支持 output_keys 过滤，
+    /// 避免 Values 模式克隆整个 state。仅包含调用方指定的字段，显著优化大 state 场景的性能。
+    FilteredValues {
+        fields: HashMap<String, serde_json::Value>,
+        step: usize,
+    },
+
     /// 单个节点的增量更新（StreamMode::Updates）
     Updates {
         node: String,
         update: S::Update,
+        step: usize,
+    },
+
+    /// <!-- Implementation Note (C-05-001) -->: FilteredUpdates 变体支持 output_keys 过滤，
+    /// 避免 Updates 模式克隆整个 update。仅包含调用方指定的字段，显著优化大 update 场景的性能。
+    FilteredUpdates {
+        node: String,
+        fields: HashMap<String, serde_json::Value>,
         step: usize,
     },
 
@@ -427,6 +442,16 @@ impl<S: State> EventEmitter<S> {
             }),
         }
     }
+
+    /// <!-- Implementation Note (C-05-003) -->: has_nostream_tag() 方法检查 CallOptions.tags
+    /// 是否包含 "nostream" 标记，用于跳过特定 LLM 调用的流式输出。此方法与 should_emit()
+    /// 集成，支持细粒度的流式事件过滤。
+    pub fn has_nostream_tag(&self, options: Option<&CallOptions>) -> bool {
+        options
+            .and_then(|opts| opts.tags.as_ref())
+            .map(|tags| tags.iter().any(|tag| tag == "nostream"))
+            .unwrap_or(false)
+    }
 }
 ```
 
@@ -585,6 +610,11 @@ let options = CallOptions {
 let result = model.invoke(messages, Some(&options)).await?;
 // 此调用不会产生 Messages 事件
 ```
+
+**Implementation Note (C-05-003)**: nostream 标记过滤已全面实现：
+- `EventEmitter::has_nostream_tag()` 方法检查 CallOptions.tags 是否包含 "nostream"
+- 与 should_emit() 集成，在事件发射前进行标记检查
+- 支持每条消息级别的标记过滤，允许细粒度控制流式输出
 
 ---
 
@@ -794,6 +824,11 @@ LLM streaming 可能产生大量小 chunk（每个 token 一个）。优化：
 - 考虑批量发送（累积 N 个 chunk 或 M 毫秒后一次性发送）
 - 提供 `MessageBatchConfig` 配置批量策略
 
+**Implementation Note (C-05-002)**: MessageBatchConfig 已完整实现，提供可配置的批量优化：
+- `max_chunks: 10` — 每批最多累积 10 个 chunk 后发送
+- `flush_interval_ms: 100` — 最多等待 100ms 后强制发送（即使未达 max_chunks）
+- 这解决了设计中关于吞吐性能的担忧，平衡了延迟与吞吐量。
+
 ---
 
 ## 8. Crate 组织
@@ -810,4 +845,6 @@ crates/juncture-core/src/
 ```
 
 StreamWriter 通过 `RunnableConfig` 或节点参数传递给用户代码，不需要用户直接依赖 `juncture-core` 的内部类型。
+
+---
 

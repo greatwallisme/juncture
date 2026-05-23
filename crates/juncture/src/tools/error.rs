@@ -1,6 +1,21 @@
 //! Tool execution errors
 
-use std::fmt;
+use std::fmt::{self, Write};
+
+/// Format validation error messages for display
+fn format_validation_errors(errors: &[String]) -> String {
+    if errors.is_empty() {
+        ": unknown error".to_string()
+    } else if errors.len() == 1 {
+        format!(": {}", errors[0])
+    } else {
+        let mut msg = ":\n".to_string();
+        for (i, error) in errors.iter().enumerate() {
+            writeln!(msg, "  {}. {}", i + 1, error).expect("writing to String cannot fail");
+        }
+        msg
+    }
+}
 
 /// Tool execution errors
 ///
@@ -35,8 +50,9 @@ pub enum ToolError {
     /// Tool call validation failed
     ///
     /// The tool call failed validation checks (e.g., missing required fields).
-    #[error("validation failed: {0}")]
-    ValidationFailed(String),
+    /// May contain multiple validation error messages.
+    #[error("validation failed{}", format_validation_errors(.0))]
+    ValidationFailed(Vec<String>),
 
     /// Tool execution was intercepted
     ///
@@ -72,8 +88,8 @@ impl ToolError {
 
     /// Create a validation failed error
     #[must_use]
-    pub const fn validation_failed(msg: String) -> Self {
-        Self::ValidationFailed(msg)
+    pub fn validation_failed(msg: impl Into<Vec<String>>) -> Self {
+        Self::ValidationFailed(msg.into())
     }
 
     /// Create an intercepted error
@@ -113,7 +129,7 @@ mod tests {
         let err = ToolError::ToolNotFound("my_tool".to_string());
         assert_eq!(err.to_string(), "tool not found: my_tool");
 
-        let err = ToolError::ValidationFailed("validation failed".to_string());
+        let err = ToolError::ValidationFailed(vec!["validation failed".to_string()]);
         assert_eq!(err.to_string(), "validation failed: validation failed");
 
         let err = ToolError::Intercepted("blocked".to_string());
@@ -134,7 +150,7 @@ mod tests {
         let err = ToolError::tool_not_found("search");
         assert!(matches!(err, ToolError::ToolNotFound(_)));
 
-        let err = ToolError::validation_failed("test".to_string());
+        let err = ToolError::validation_failed(vec!["test".to_string()]);
         assert!(matches!(err, ToolError::ValidationFailed(_)));
 
         let err = ToolError::intercepted("test".to_string());
@@ -152,7 +168,7 @@ mod tests {
     #[test]
     fn test_tool_error_is_retryable() {
         assert!(ToolError::InvalidInput("test".to_string()).is_retryable());
-        assert!(ToolError::ValidationFailed("test".to_string()).is_retryable());
+        assert!(ToolError::ValidationFailed(vec!["test".to_string()]).is_retryable());
         assert!(!ToolError::Timeout.is_retryable());
         assert!(!ToolError::Intercepted("test".to_string()).is_retryable());
     }
@@ -162,6 +178,27 @@ mod tests {
         let err = ToolError::InvalidInput("test".to_string());
         let cloned = err.clone();
         assert_eq!(err.to_string(), cloned.to_string());
+    }
+
+    #[test]
+    fn test_validation_failed_multiple_errors() {
+        let errors = vec![
+            "Missing required field: 'name'".to_string(),
+            "Field 'age' expected type 'integer', got 'string'".to_string(),
+        ];
+        let err = ToolError::ValidationFailed(errors);
+        assert!(matches!(err, ToolError::ValidationFailed(_)));
+
+        let display = err.to_string();
+        assert!(display.contains("validation failed"));
+        assert!(display.contains("Missing required field: 'name'"));
+        assert!(display.contains("Field 'age' expected type 'integer', got 'string'"));
+    }
+
+    #[test]
+    fn test_validation_failed_empty_vec() {
+        let err = ToolError::ValidationFailed(vec![]);
+        assert!(err.to_string().contains("validation failed: unknown error"));
     }
 }
 

@@ -10,3 +10,6 @@ paths:
 - Never write placeholder/mock code
 - Never use file-level `#![allow(...)]` or `#![expect(...)]` 
 - always apply `#[allow(...)]` or `#[expect(...)]` at the item level (function, struct, field, impl block) with a reason
+
+#  Tools
+- Use rust-analyzer-lsp for code analysis, navigation, refactoring, real-time diagnostics, auto-completion, and workspace management.

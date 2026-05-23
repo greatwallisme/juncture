@@ -339,23 +339,34 @@ pub async fn compute_next_tasks<S: State>(
     let mut next_tasks = Vec::new();
     let mut seen_nodes = HashSet::new();
 
+    // Build reverse mapping for efficient trigger lookup
+    let trigger_to_nodes = TriggerToNodes::from_trigger_table(trigger_table);
+
     // First, check if any task returned a Command with explicit routing
     for task_output in completed_tasks {
         let command = &task_output.command;
 
         match &command.goto {
             crate::Goto::None => {
-                // No explicit routing, use trigger table
+                // No explicit routing, use trigger table with reverse mapping optimization
+                // Use TriggerToNodes to efficiently find which nodes should be triggered
+                let triggered =
+                    trigger_to_nodes.triggered_nodes(std::slice::from_ref(&task_output.node_name));
+
+                // Filter outgoing edges to only those leading to triggered nodes
                 if let Some(edges) = trigger_table.outgoing.get(&task_output.node_name) {
                     for edge in edges {
-                        process_edge(
-                            edge,
-                            state,
-                            &mut next_tasks,
-                            &mut seen_nodes,
-                            &task_output.node_name,
-                        )
-                        .await?;
+                        // Only process edges that lead to triggered nodes
+                        if should_process_edge(edge, state, &triggered).await? {
+                            process_edge(
+                                edge,
+                                state,
+                                &mut next_tasks,
+                                &mut seen_nodes,
+                                &task_output.node_name,
+                            )
+                            .await?;
+                        }
                     }
                 }
             }
@@ -403,6 +414,26 @@ pub async fn compute_next_tasks<S: State>(
     }
 
     Ok(next_tasks)
+}
+
+/// Check if an edge should be processed based on triggered nodes
+///
+/// For fixed edges, checks if the target is in the triggered set.
+/// For conditional edges, the router is executed to determine the actual target.
+async fn should_process_edge<S: State>(
+    edge: &CompiledEdge<S>,
+    state: &S,
+    triggered_nodes: &HashSet<String>,
+) -> Result<bool, JunctureError> {
+    match edge {
+        CompiledEdge::Fixed { target } => Ok(triggered_nodes.contains(target)),
+        CompiledEdge::Conditional { router, .. } => {
+            let route_result = router.route(state).await?;
+            Ok(route_result
+                .as_target()
+                .is_some_and(|t| triggered_nodes.contains(t)))
+        }
+    }
 }
 
 /// Process a single edge and add appropriate tasks
@@ -690,12 +721,14 @@ fn check_replace_conflicts_from_state<S: State>(
 ///
 /// For `ephemeral` fields, this marks the channel's consumed flag, indicating
 /// that the value has been read by the framework. The consumed flag is reset
-/// on the next `update()` call.
+/// on the next `update()` call. For other field types, `consume_field()` is
+/// a no-op, making it safe to call on any field index.
 ///
 /// # Arguments
 ///
 /// * `state` - Mutable state to consume channels on
 /// * `triggered_channels` - Field indices of channels that were triggered
+///   (changed) in the current superstep
 ///
 /// # Examples
 ///
@@ -706,10 +739,8 @@ fn check_replace_conflicts_from_state<S: State>(
 /// consume_triggered_channels(&mut state, &triggered_channels);
 /// ```
 pub fn consume_triggered_channels<S: State>(state: &mut S, triggered_channels: &[usize]) {
-    for &field_idx in S::consume_field_indices() {
-        if triggered_channels.contains(&field_idx) {
-            state.consume_field(field_idx);
-        }
+    for &field_idx in triggered_channels {
+        state.consume_field(field_idx);
     }
 }
 
@@ -798,7 +829,10 @@ pub fn schedule_error_handlers<S: State>(
 ///
 /// `Some(error_handler_name)` if an error handler is registered, `None` otherwise
 #[must_use]
-#[allow(dead_code, reason = "tested via unit tests; public API awaiting external consumers")]
+#[allow(
+    dead_code,
+    reason = "tested via unit tests; public API awaiting external consumers"
+)]
 pub fn get_error_handler_node(
     node_name: &str,
     error_handler_map: &std::collections::HashMap<String, String>,

@@ -193,7 +193,8 @@ impl<S: State> StateGraph<S> {
 // > input_map 和 output_map，并将方法签名改为接受 `SubgraphMount<S>` 参数。
 // > 同时返回 `Result<(), TopologyError>` 而非 `&mut Self`，与 `add_node` 的 fail-fast
 // > 验证模式一致。`SubgraphMount` 提供类型安全的构建器 API 来配置映射函数和子图持久化选项。
-```
+
+// > **Implementation Note (C-07-003)**: `SubgraphMount` builder pattern provides fluent API with `with_name()`, `with_config()`, `with_persistence()` methods. This is cleaner than direct `add_subgraph()` parameters and improves discoverability.
 
 #### 类型安全保证
 
@@ -223,6 +224,8 @@ impl<S: State> StateGraph<S> {
 pub struct CheckpointNamespace {
     segments: Vec<NamespaceSegment>,
 }
+
+// > **Implementation Note (C-07-001)**: Struct-based CheckpointNamespace with NamespaceSegment components provides type safety compared to string manipulation. Includes `Display` trait implementation (`checkpoint.rs:155-159`), `child()` method for namespace extension, and improved serialization support.
 
 // > **Implementation Note (C-07-1)**: `CheckpointNamespace` implements `Display` trait
 // > (`checkpoint.rs:155-159`), enabling idiomatic `println!("{}", ns)` and `format!("{ns}")` usage.
@@ -795,8 +798,6 @@ impl<S: State + Serialize + DeserializeOwned> SubgraphTransformer<S> {
             subgraph_name,
             ns,
             filter: None,
-            /// > **Implementation Note (C-07-2)**: Implementation additionally provides
-            /// > `with_filter_types()` for type-based filtering alongside closure-based `with_filter()`.
             include_internal: false,
         }
     }
@@ -809,6 +810,8 @@ impl<S: State + Serialize + DeserializeOwned> SubgraphTransformer<S> {
         self.filter = Some(Box::new(filter));
         self
     }
+
+    /// > **Implementation Note (C-07-002)**: `with_filter_types()` provides type-based event filtering in addition to closure-based `with_filter()`. Reduces boilerplate for standard event type filtering patterns.
 
     /// 设置是否包含内部事件（debug, checkpoints 等）
     pub fn with_internal(mut self, include: bool) -> Self {
@@ -878,4 +881,6 @@ let subgraph_stream = subgraph.stream(input, &config, StreamMode::Updates).await
     .filter_map(|event| event.ok())
     .filter_map(|event| transformer.transform(event));
 ```
+
+---
 

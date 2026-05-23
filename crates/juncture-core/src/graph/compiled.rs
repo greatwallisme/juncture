@@ -21,6 +21,7 @@ use futures::Stream;
 use indexmap::IndexMap;
 use std::{pin::Pin, sync::Arc};
 use tokio::sync::mpsc;
+use tracing::Instrument;
 
 /// Bounded channel capacity for Messages streaming mode.
 ///
@@ -370,31 +371,63 @@ impl<S: State, I: IntoState<S>, O: FromState<S>> CompiledGraph<S, I, O> {
             pregel.set_budget_tracker(BudgetTracker::new(budget_config.clone()));
         }
 
-        // Execute the loop
-        while pregel.tick()? {
-            let result = pregel.execute_superstep().await?;
-            pregel.after_tick(result).await?;
-        }
-
-        // Extract step and run_id before consuming pregel
-        let steps = pregel.step();
+        // Create the graph.invoke span that wraps the entire execution
+        // This span provides the root for all nested spans (superstep, node.execute, etc.)
+        let graph_name = config
+            .graph_name
+            .clone()
+            .unwrap_or_else(|| "unnamed".to_string());
         let run_id = pregel.run_id().to_string();
+        let recursion_limit = pregel.runnable_config.recursion_limit;
 
-        // Return final state with extracted output
-        let final_state = pregel.into_state();
-        let output = O::from_state(&final_state);
+        async move {
+            let graph_start = std::time::Instant::now();
 
-        Ok(GraphOutput {
-            value: final_state,
-            output,
-            interrupts: Vec::new(),
-            metadata: GraphOutputMetadata {
-                steps,
-                run_id,
-                checkpoint_id: config.checkpoint_id.clone(),
-                budget_usage: None,
-            },
-        })
+            // Execute the loop
+            while pregel.tick()? {
+                let result = pregel.execute_superstep().await?;
+                pregel.after_tick(result).await?;
+            }
+
+            // Extract step and run_id before consuming pregel
+            let steps = pregel.step();
+            let run_id = pregel.run_id().to_string();
+
+            // Return final state with extracted output
+            let final_state = pregel.into_state();
+            let output = O::from_state(&final_state);
+
+            // Emit graph duration metric
+            if let Some(ref collector) = config.metrics_collector {
+                #[allow(
+                    clippy::cast_precision_loss,
+                    reason = "Milliseconds as f64 is sufficient for histogram metrics; sub-millisecond precision is not required for graph duration tracking"
+                )]
+                collector.record_histogram(
+                    "juncture.graph.duration_ms",
+                    graph_start.elapsed().as_millis() as f64,
+                );
+            }
+
+            Ok(GraphOutput {
+                value: final_state,
+                output,
+                interrupts: Vec::new(),
+                metadata: GraphOutputMetadata {
+                    steps,
+                    run_id,
+                    checkpoint_id: config.checkpoint_id.clone(),
+                    budget_usage: None,
+                },
+            })
+        }
+        .instrument(tracing::info_span!(
+            "juncture.graph.invoke",
+            "juncture.graph.name" = graph_name,
+            "juncture.run.id" = %run_id,
+            "juncture.recursion.limit" = recursion_limit,
+        ))
+        .await
     }
 
     /// Stream graph execution as a sequence of events.
@@ -556,6 +589,12 @@ impl<S: State, I: IntoState<S>, O: FromState<S>> CompiledGraph<S, I, O> {
         // Extract per-node timeout policies from builder metadata
         let timeout_policy_map = self.build_timeout_policy_map();
 
+        // Extract graph_name before moving effective
+        let graph_name = effective
+            .graph_name
+            .clone()
+            .unwrap_or_else(|| "unnamed".to_string());
+
         // Create Pregel loop
         let state_input = input.into_state();
         let mut pregel = PregelLoop::with_error_handlers(
@@ -577,6 +616,7 @@ impl<S: State, I: IntoState<S>, O: FromState<S>> CompiledGraph<S, I, O> {
 
         // Extract run_id before moving pregel into the spawned task
         let run_id = pregel.run_id().to_string();
+        let recursion_limit = pregel.runnable_config.recursion_limit;
 
         // Create a separate channel for PregelLoop's internal stream events.
         // Unbounded is acceptable here because this is an internal relay between
@@ -586,109 +626,124 @@ impl<S: State, I: IntoState<S>, O: FromState<S>> CompiledGraph<S, I, O> {
         pregel.set_stream_sender(pregel_tx);
 
         // Spawn graph execution in background task
-        tokio::spawn(async move {
-            // Task to forward PregelLoop events to the main stream,
-            // applying subgraph filtering, resumption, and output_keys filtering.
-            let tx_forward = tx.clone();
-            let mode_forward = mode.clone();
-            let output_keys_forward = output_keys.clone();
-            let resumption_forward = resumption.clone();
-            tokio::spawn(async move {
-                // Create a temporary bounded channel for EventEmitter filtering
-                let (temp_tx, _temp_rx) = mpsc::channel(1);
-                let emitter = EventEmitter::new(temp_tx, mode_forward);
+        tokio::spawn(
+            async move {
+                // Task to forward PregelLoop events to the main stream,
+                // applying subgraph filtering, resumption, and output_keys filtering.
+                let tx_forward = tx.clone();
+                let mode_forward = mode.clone();
+                let output_keys_forward = output_keys.clone();
+                let resumption_forward = resumption.clone();
+                tokio::spawn(async move {
+                    // Create a temporary bounded channel for EventEmitter filtering
+                    let (temp_tx, _temp_rx) = mpsc::channel(1);
+                    let emitter = EventEmitter::new(temp_tx, mode_forward);
 
-                while let Some(event) = pregel_rx.recv().await {
-                    if !emitter.should_emit(&event) {
-                        continue;
-                    }
-
-                    // Subgraph event filtering: events with non-empty namespace
-                    // originate from subgraphs. Skip them unless explicitly included.
-                    let ns = event.namespace();
-                    if !ns.is_empty() {
-                        if !include_subgraphs {
+                    while let Some(event) = pregel_rx.recv().await {
+                        if !emitter.should_emit(&event) {
                             continue;
                         }
-                        if let Some(ref filter) = subgraph_filter
-                            && let Some(first) = ns.first()
-                            && !filter.contains(first)
-                        {
-                            continue;
-                        }
-                    }
 
-                    // Checkpoint-based resumption: skip step-based events
-                    // (Values, Updates, and their filtered variants) at or before
-                    // the last processed step.
-                    if let Some(ref r) = resumption_forward {
-                        let step = match &event {
-                            StreamEvent::Values { step, .. }
-                            | StreamEvent::FilteredValues { step, .. }
-                            | StreamEvent::Updates { step, .. }
-                            | StreamEvent::FilteredUpdates { step, .. } => Some(*step),
+                        // Subgraph event filtering: events with non-empty namespace
+                        // originate from subgraphs. Skip them unless explicitly included.
+                        let ns = event.namespace();
+                        if !ns.is_empty() {
+                            if !include_subgraphs {
+                                continue;
+                            }
+                            if let Some(ref filter) = subgraph_filter
+                                && let Some(first) = ns.first()
+                                && !filter.contains(first)
+                            {
+                                continue;
+                            }
+                        }
+
+                        // Checkpoint-based resumption: skip step-based events
+                        // (Values, Updates, and their filtered variants) at or before
+                        // the last processed step.
+                        if let Some(ref r) = resumption_forward {
+                            let step = match &event {
+                                StreamEvent::Values { step, .. }
+                                | StreamEvent::FilteredValues { step, .. }
+                                | StreamEvent::Updates { step, .. }
+                                | StreamEvent::FilteredUpdates { step, .. } => Some(*step),
+                                _ => None,
+                            };
+                            if let Some(s) = step
+                                && r.should_skip(s)
+                            {
+                                continue;
+                            }
+                        }
+
+                        // Apply output_keys filtering to Updates events from PregelLoop
+                        let filtered = output_keys_forward.as_ref().and_then(|keys| match &event {
+                            StreamEvent::Updates { node, update, step } => {
+                                serde_json::to_value(update).ok().map(|json| {
+                                    StreamEvent::FilteredUpdates {
+                                        node: node.clone(),
+                                        data: crate::stream::filter_json_by_keys(json, keys),
+                                        step: *step,
+                                    }
+                                })
+                            }
                             _ => None,
-                        };
-                        if let Some(s) = step
-                            && r.should_skip(s)
-                        {
-                            continue;
+                        });
+
+                        if let Some(filtered_event) = filtered {
+                            let _ = tx_forward.send(Ok(filtered_event)).await;
+                        } else {
+                            let _ = tx_forward.send(Ok(event)).await;
+                        }
+                    }
+                });
+
+                // Execute the Pregel loop
+                while matches!(pregel.tick(), Ok(true)) {
+                    let step = pregel.step();
+
+                    // Emit Values events if mode is Values, applying output_keys
+                    // and resumption filtering.
+                    if matches!(mode, StreamMode::Values) {
+                        let skip = resumption.as_ref().is_some_and(|r| r.should_skip(step));
+
+                        if !skip {
+                            let event = output_keys.as_ref().map_or_else(
+                                || StreamEvent::Values {
+                                    state: pregel.snapshot_state(),
+                                    step,
+                                },
+                                |keys| {
+                                    let json = serde_json::to_value(pregel.snapshot_state())
+                                        .unwrap_or(serde_json::Value::Null);
+                                    StreamEvent::FilteredValues {
+                                        data: crate::stream::filter_json_by_keys(json, keys),
+                                        step,
+                                    }
+                                },
+                            );
+                            let _ = tx.send(Ok(event)).await;
                         }
                     }
 
-                    // Apply output_keys filtering to Updates events from PregelLoop
-                    let filtered = output_keys_forward.as_ref().and_then(|keys| match &event {
-                        StreamEvent::Updates { node, update, step } => serde_json::to_value(update)
-                            .ok()
-                            .map(|json| StreamEvent::FilteredUpdates {
-                                node: node.clone(),
-                                data: crate::stream::filter_json_by_keys(json, keys),
-                                step: *step,
-                            }),
-                        _ => None,
-                    });
-
-                    if let Some(filtered_event) = filtered {
-                        let _ = tx_forward.send(Ok(filtered_event)).await;
-                    } else {
-                        let _ = tx_forward.send(Ok(event)).await;
-                    }
-                }
-            });
-
-            // Execute the Pregel loop
-            while matches!(pregel.tick(), Ok(true)) {
-                let step = pregel.step();
-
-                // Emit Values events if mode is Values, applying output_keys
-                // and resumption filtering.
-                if matches!(mode, StreamMode::Values) {
-                    let skip = resumption.as_ref().is_some_and(|r| r.should_skip(step));
-
-                    if !skip {
-                        let event = output_keys.as_ref().map_or_else(
-                            || StreamEvent::Values {
-                                state: pregel.snapshot_state(),
-                                step,
-                            },
-                            |keys| {
-                                let json = serde_json::to_value(pregel.snapshot_state())
-                                    .unwrap_or(serde_json::Value::Null);
-                                StreamEvent::FilteredValues {
-                                    data: crate::stream::filter_json_by_keys(json, keys),
-                                    step,
-                                }
-                            },
-                        );
-                        let _ = tx.send(Ok(event)).await;
-                    }
-                }
-
-                // Execute superstep
-                match pregel.execute_superstep().await {
-                    Ok(result) => {
-                        // Process results and emit events
-                        if let Err(e) = pregel.after_tick(result).await {
+                    // Execute superstep
+                    match pregel.execute_superstep().await {
+                        Ok(result) => {
+                            // Process results and emit events
+                            if let Err(e) = pregel.after_tick(result).await {
+                                // Emit final state before error
+                                let _ = tx
+                                    .send(Ok(StreamEvent::End {
+                                        output: pregel.snapshot_state(),
+                                    }))
+                                    .await;
+                                // Send error through channel
+                                let _ = tx.send(Err(e)).await;
+                                return;
+                            }
+                        }
+                        Err(e) => {
                             // Emit final state before error
                             let _ = tx
                                 .send(Ok(StreamEvent::End {
@@ -700,28 +755,23 @@ impl<S: State, I: IntoState<S>, O: FromState<S>> CompiledGraph<S, I, O> {
                             return;
                         }
                     }
-                    Err(e) => {
-                        // Emit final state before error
-                        let _ = tx
-                            .send(Ok(StreamEvent::End {
-                                output: pregel.snapshot_state(),
-                            }))
-                            .await;
-                        // Send error through channel
-                        let _ = tx.send(Err(e)).await;
-                        return;
-                    }
                 }
-            }
 
-            // Send End event with final state
-            let final_state = pregel.into_state();
-            let _ = tx
-                .send(Ok(StreamEvent::End {
-                    output: final_state,
-                }))
-                .await;
-        });
+                // Send End event with final state
+                let final_state = pregel.into_state();
+                let _ = tx
+                    .send(Ok(StreamEvent::End {
+                        output: final_state,
+                    }))
+                    .await;
+            }
+            .instrument(tracing::info_span!(
+                "juncture.graph.invoke",
+                "juncture.graph.name" = graph_name,
+                "juncture.run.id" = %run_id,
+                "juncture.recursion.limit" = recursion_limit,
+            )),
+        );
 
         // Return stream using futures::stream::unfold to convert Receiver to Stream
         Ok(StreamHandle {
@@ -792,6 +842,12 @@ impl<S: State, I: IntoState<S>, O: FromState<S>> CompiledGraph<S, I, O> {
             exec_config.run_id = Some(uuid::Uuid::new_v4().to_string());
         }
 
+        // Extract graph_name before moving exec_config
+        let graph_name = exec_config
+            .graph_name
+            .clone()
+            .unwrap_or_else(|| "unnamed".to_string());
+
         let error_handler_map = self.build_error_handler_map();
         let retry_policy_map = self.build_retry_policy_map();
         let timeout_policy_map = self.build_timeout_policy_map();
@@ -818,6 +874,8 @@ impl<S: State, I: IntoState<S>, O: FromState<S>> CompiledGraph<S, I, O> {
         }
 
         let mode = emitter.mode().clone();
+        let run_id = pregel.run_id().to_string();
+        let recursion_limit = pregel.runnable_config.recursion_limit;
 
         // Create a separate channel for PregelLoop's internal stream events
         let (pregel_tx, mut pregel_rx) = mpsc::unbounded_channel();
@@ -833,31 +891,40 @@ impl<S: State, I: IntoState<S>, O: FromState<S>> CompiledGraph<S, I, O> {
             }
         });
 
-        // Execute the Pregel loop, emitting Values events at each tick
-        while pregel.tick()? {
-            let step = pregel.step();
+        async move {
+            // Execute the Pregel loop, emitting Values events at each tick
+            while pregel.tick()? {
+                let step = pregel.step();
 
-            if matches!(mode, StreamMode::Values) {
-                let event = StreamEvent::Values {
-                    state: pregel.snapshot_state(),
-                    step,
-                };
-                emitter.emit(event).await;
+                if matches!(mode, StreamMode::Values) {
+                    let event = StreamEvent::Values {
+                        state: pregel.snapshot_state(),
+                        step,
+                    };
+                    emitter.emit(event).await;
+                }
+
+                let result = pregel.execute_superstep().await?;
+                pregel.after_tick(result).await?;
             }
 
-            let result = pregel.execute_superstep().await?;
-            pregel.after_tick(result).await?;
+            // Emit End event with the final state
+            let final_state = pregel.into_state();
+            emitter
+                .emit(StreamEvent::End {
+                    output: final_state.clone(),
+                })
+                .await;
+
+            Ok(final_state)
         }
-
-        // Emit End event with the final state
-        let final_state = pregel.into_state();
-        emitter
-            .emit(StreamEvent::End {
-                output: final_state.clone(),
-            })
-            .await;
-
-        Ok(final_state)
+        .instrument(tracing::info_span!(
+            "juncture.graph.invoke",
+            "juncture.graph.name" = graph_name,
+            "juncture.run.id" = %run_id,
+            "juncture.recursion.limit" = recursion_limit,
+        ))
+        .await
     }
 
     /// Resume execution from an interrupt point
@@ -950,6 +1017,12 @@ impl<S: State, I: IntoState<S>, O: FromState<S>> CompiledGraph<S, I, O> {
             resume_config.run_id = Some(uuid::Uuid::new_v4().to_string());
         }
 
+        // Extract graph_name before moving resume_config
+        let graph_name = resume_config
+            .graph_name
+            .clone()
+            .unwrap_or_else(|| "unnamed".to_string());
+
         // Create Pregel loop with restored state
         let num_fields = 64; // Maximum number of fields
         let error_handler_map = self.build_error_handler_map();
@@ -977,31 +1050,43 @@ impl<S: State, I: IntoState<S>, O: FromState<S>> CompiledGraph<S, I, O> {
             pregel.set_checkpointer(cp);
         }
 
-        // Execute the loop from the restored state
-        while pregel.tick()? {
-            let result = pregel.execute_superstep().await?;
-            pregel.after_tick(result).await?;
-        }
-
-        // Extract step and run_id before consuming pregel
-        let steps = pregel.step();
         let run_id = pregel.run_id().to_string();
+        let recursion_limit = pregel.runnable_config.recursion_limit;
 
-        // Return final state with extracted output
-        let final_state = pregel.into_state();
-        let output = O::from_state(&final_state);
+        async move {
+            // Execute the loop from the restored state
+            while pregel.tick()? {
+                let result = pregel.execute_superstep().await?;
+                pregel.after_tick(result).await?;
+            }
 
-        Ok(GraphOutput {
-            value: final_state,
-            output,
-            interrupts: Vec::new(),
-            metadata: GraphOutputMetadata {
-                steps,
-                run_id,
-                checkpoint_id: config.checkpoint_id.clone(),
-                budget_usage: None,
-            },
-        })
+            // Extract step and run_id before consuming pregel
+            let steps = pregel.step();
+            let run_id = pregel.run_id().to_string();
+
+            // Return final state with extracted output
+            let final_state = pregel.into_state();
+            let output = O::from_state(&final_state);
+
+            Ok(GraphOutput {
+                value: final_state,
+                output,
+                interrupts: Vec::new(),
+                metadata: GraphOutputMetadata {
+                    steps,
+                    run_id,
+                    checkpoint_id: config.checkpoint_id.clone(),
+                    budget_usage: None,
+                },
+            })
+        }
+        .instrument(tracing::info_span!(
+            "juncture.graph.invoke",
+            "juncture.graph.name" = graph_name,
+            "juncture.run.id" = %run_id,
+            "juncture.recursion.limit" = recursion_limit,
+        ))
+        .await
     }
 
     /// Resume execution from an interrupt point with a single value
@@ -1170,10 +1255,7 @@ impl<S: State, I: IntoState<S>, O: FromState<S>> CompiledGraph<S, I, O> {
             pregel.set_checkpointer(cp);
         }
 
-        // Extract run_id before moving pregel into the spawned task
-        let run_id = pregel.run_id().to_string();
-
-        let (_handle, rx) = Self::spawn_streaming_loop(pregel, mode);
+        let (_handle, rx, run_id) = Self::spawn_streaming_loop(pregel, mode);
 
         // Return stream using futures::stream::unfold to convert Receiver to Stream
         Ok(StreamHandle {
@@ -1186,13 +1268,19 @@ impl<S: State, I: IntoState<S>, O: FromState<S>> CompiledGraph<S, I, O> {
 
     /// Spawn the Pregel execution loop and event forwarding tasks for streaming.
     ///
-    /// Returns the spawned task handle and the receiver end of the event channel.
+    /// Returns the spawned task handle, the receiver end of the event channel,
+    /// and the `run_id` for this execution.
+    #[allow(
+        clippy::type_complexity,
+        reason = "return type is a tuple of channel handle, receiver, and run_id which is clear in context"
+    )]
     fn spawn_streaming_loop(
         mut pregel: PregelLoop<S>,
         mode: StreamMode,
     ) -> (
         tokio::task::JoinHandle<()>,
         mpsc::Receiver<Result<StreamEvent<S>, JunctureError>>,
+        String,
     )
     where
         S: Clone + Send + for<'de> serde::Deserialize<'de> + serde::Serialize + 'static,
@@ -1203,6 +1291,15 @@ impl<S: State, I: IntoState<S>, O: FromState<S>> CompiledGraph<S, I, O> {
         let capacity = stream_capacity(&mode);
         let (tx, rx) = mpsc::channel(capacity);
 
+        // Extract run_id and graph_name before moving pregel into the spawned task
+        let run_id = pregel.run_id().to_string();
+        let graph_name = pregel
+            .runnable_config
+            .graph_name
+            .clone()
+            .unwrap_or_else(|| "unnamed".to_string());
+        let recursion_limit = pregel.runnable_config.recursion_limit;
+
         // Create a separate channel for PregelLoop's internal stream events.
         // Unbounded is acceptable here because this is an internal relay between
         // PregelLoop (sync send) and the forwarding task; the output channel
@@ -1210,39 +1307,50 @@ impl<S: State, I: IntoState<S>, O: FromState<S>> CompiledGraph<S, I, O> {
         let (pregel_tx, mut pregel_rx) = mpsc::unbounded_channel();
         pregel.set_stream_sender(pregel_tx);
 
-        let handle = tokio::spawn(async move {
-            // Task to forward PregelLoop events to the main stream
-            let tx_forward = tx.clone();
-            let mode_forward = mode.clone();
-            tokio::spawn(async move {
-                // Create a temporary bounded channel for EventEmitter filtering
-                let (temp_tx, _temp_rx) = mpsc::channel(1);
-                let emitter = EventEmitter::new(temp_tx, mode_forward);
+        let handle = tokio::spawn(
+            async move {
+                // Task to forward PregelLoop events to the main stream
+                let tx_forward = tx.clone();
+                let mode_forward = mode.clone();
+                tokio::spawn(async move {
+                    // Create a temporary bounded channel for EventEmitter filtering
+                    let (temp_tx, _temp_rx) = mpsc::channel(1);
+                    let emitter = EventEmitter::new(temp_tx, mode_forward);
 
-                while let Some(event) = pregel_rx.recv().await {
-                    if emitter.should_emit(&event) {
-                        let _ = tx_forward.send(Ok(event)).await;
+                    while let Some(event) = pregel_rx.recv().await {
+                        if emitter.should_emit(&event) {
+                            let _ = tx_forward.send(Ok(event)).await;
+                        }
                     }
-                }
-            });
+                });
 
-            // Execute the Pregel loop
-            while matches!(pregel.tick(), Ok(true)) {
-                let step = pregel.step();
+                // Execute the Pregel loop
+                while matches!(pregel.tick(), Ok(true)) {
+                    let step = pregel.step();
 
-                // Emit Values events if mode is Values
-                if matches!(mode, StreamMode::Values) {
-                    let event = StreamEvent::Values {
-                        state: pregel.snapshot_state(),
-                        step,
-                    };
-                    let _ = tx.send(Ok(event)).await;
-                }
+                    // Emit Values events if mode is Values
+                    if matches!(mode, StreamMode::Values) {
+                        let event = StreamEvent::Values {
+                            state: pregel.snapshot_state(),
+                            step,
+                        };
+                        let _ = tx.send(Ok(event)).await;
+                    }
 
-                // Execute superstep
-                match pregel.execute_superstep().await {
-                    Ok(result) => {
-                        if let Err(e) = pregel.after_tick(result).await {
+                    // Execute superstep
+                    match pregel.execute_superstep().await {
+                        Ok(result) => {
+                            if let Err(e) = pregel.after_tick(result).await {
+                                let _ = tx
+                                    .send(Ok(StreamEvent::End {
+                                        output: pregel.snapshot_state(),
+                                    }))
+                                    .await;
+                                let _ = tx.send(Err(e)).await;
+                                return;
+                            }
+                        }
+                        Err(e) => {
                             let _ = tx
                                 .send(Ok(StreamEvent::End {
                                     output: pregel.snapshot_state(),
@@ -1252,28 +1360,25 @@ impl<S: State, I: IntoState<S>, O: FromState<S>> CompiledGraph<S, I, O> {
                             return;
                         }
                     }
-                    Err(e) => {
-                        let _ = tx
-                            .send(Ok(StreamEvent::End {
-                                output: pregel.snapshot_state(),
-                            }))
-                            .await;
-                        let _ = tx.send(Err(e)).await;
-                        return;
-                    }
                 }
+
+                // Send End event with final state
+                let final_state = pregel.into_state();
+                let _ = tx
+                    .send(Ok(StreamEvent::End {
+                        output: final_state,
+                    }))
+                    .await;
             }
+            .instrument(tracing::info_span!(
+                "juncture.graph.invoke",
+                "juncture.graph.name" = graph_name,
+                "juncture.run.id" = %run_id,
+                "juncture.recursion.limit" = recursion_limit,
+            )),
+        );
 
-            // Send End event with final state
-            let final_state = pregel.into_state();
-            let _ = tx
-                .send(Ok(StreamEvent::End {
-                    output: final_state,
-                }))
-                .await;
-        });
-
-        (handle, rx)
+        (handle, rx, run_id)
     }
 
     /// Get the current state snapshot for a thread

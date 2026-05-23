@@ -1328,8 +1328,9 @@ impl<S: State, I: IntoState<S>, O: FromState<S>> StateGraph<S, I, O> {
         config: CompileConfig,
         checkpointer: Option<Arc<dyn crate::checkpoint::CheckpointSaver>>,
     ) -> Result<CompiledGraph<S, I, O>, TopologyError> {
-        // Validate topology
+        // Validate topology and field indices
         TopologyValidator::validate(&self.nodes, &self.edges, self.entry_point.as_deref())?;
+        self.validate_keys()?;
 
         // Build trigger table
         let trigger_table = self.build_trigger_table();
@@ -1978,6 +1979,103 @@ mod tests {
 
         fn replace_after_finish_field_indices() -> &'static [usize] {
             &[99] // Invalid: index 99 but only 2 fields (0, 1)
+        }
+    }
+
+    #[test]
+    fn test_compile_calls_validate_keys_and_catches_invalid_replace_field_index() {
+        let mut graph: StateGraph<StateWithBadReplaceIndex> = StateGraph::new();
+        graph
+            .add_node_simple(
+                "node_a",
+                NodeFnUpdate(|_s| async move { Ok(StateWithBadReplaceIndexUpdate::default()) }),
+            )
+            .unwrap();
+        graph.set_entry_point("node_a");
+        graph.set_finish_point("node_a");
+
+        // compile() should call validate_keys() internally and reject the invalid field index
+        let result = graph.compile();
+        assert!(matches!(
+            result,
+            Err(TopologyError::InvalidFieldReference { .. })
+        ));
+        if let Err(TopologyError::InvalidFieldReference {
+            index,
+            field_count,
+            context,
+            ..
+        }) = result
+        {
+            assert_eq!(index, 5);
+            assert_eq!(field_count, 2);
+            assert_eq!(context, "replace_field_indices");
+        }
+    }
+
+    #[test]
+    fn test_compile_calls_validate_keys_and_catches_invalid_replace_after_finish_field_index() {
+        let mut graph: StateGraph<StateWithBadAfterFinishIndex> = StateGraph::new();
+        graph
+            .add_node_simple(
+                "node_a",
+                NodeFnUpdate(|_s| async move { Ok(StateWithBadAfterFinishIndexUpdate::default()) }),
+            )
+            .unwrap();
+        graph.set_entry_point("node_a");
+        graph.set_finish_point("node_a");
+
+        // compile() should call validate_keys() internally and reject the invalid field index
+        let result = graph.compile();
+        assert!(matches!(
+            result,
+            Err(TopologyError::InvalidFieldReference { .. })
+        ));
+        if let Err(TopologyError::InvalidFieldReference {
+            index,
+            field_count,
+            context,
+            ..
+        }) = result
+        {
+            assert_eq!(index, 99);
+            assert_eq!(field_count, 2);
+            assert_eq!(context, "replace_after_finish_field_indices");
+        }
+    }
+
+    #[test]
+    fn test_validate_keys_validates_reducer_indices_during_compile() {
+        // This test verifies that the validation of reducer field indices
+        // happens automatically during compile(), ensuring that invalid
+        // field indices in replace_field_indices() or replace_after_finish_field_indices()
+        // are caught at graph compilation time, not at runtime.
+
+        let mut graph: StateGraph<StateWithBadReplaceIndex> = StateGraph::new();
+        graph
+            .add_node_simple(
+                "process",
+                NodeFnUpdate(|_s| async move { Ok(StateWithBadReplaceIndexUpdate::default()) }),
+            )
+            .unwrap();
+        graph.set_entry_point("process");
+        graph.set_finish_point("process");
+
+        // Before compile(), validate_keys() should catch the error
+        let validate_result = graph.validate_keys();
+        assert!(validate_result.is_err(), "validate_keys should detect invalid field index");
+
+        // compile() should also catch the same error (by calling validate_keys internally)
+        let compile_result = graph.compile();
+        assert!(compile_result.is_err(), "compile should detect invalid field index");
+
+        // Both should return the same error type
+        match (validate_result, compile_result) {
+            (Err(TopologyError::InvalidFieldReference { index: v_idx, .. }),
+             Err(TopologyError::InvalidFieldReference { index: c_idx, .. })) => {
+                assert_eq!(v_idx, c_idx, "Both methods should report the same invalid index");
+            }
+            _ => panic!("Both methods should return InvalidFieldReference error"),
         }
     }
 

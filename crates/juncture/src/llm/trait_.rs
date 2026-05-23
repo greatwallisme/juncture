@@ -1,10 +1,24 @@
 //! Core traits and error types for LLM integration.
 
 use async_trait::async_trait;
+use std::pin::Pin;
 use std::time::Duration;
 use thiserror::Error;
+use futures::Stream;
 
 use crate::llm::{Message, MessageChunk};
+
+/// Type alias for a boxed, pinned, sendable stream.
+///
+/// This is the standard return type for streaming LLM responses,
+/// erasing the concrete stream implementation while maintaining
+/// async iteration capability.
+///
+/// # Type Parameters
+///
+/// * `'a` - Lifetime of the stream (typically tied to `&self` in trait methods)
+/// * `T` - The item type yielded by the stream
+pub type BoxStream<'a, T> = Pin<Box<dyn Stream<Item = T> + Send + 'a>>;
 
 /// LLM error types.
 ///
@@ -253,7 +267,7 @@ pub trait ChatModel: Send + Sync + Clone + 'static {
         &self,
         messages: &[Message],
         options: Option<&CallOptions>,
-    ) -> std::pin::Pin<Box<dyn futures::Stream<Item = Result<MessageChunk, LlmError>> + Send + '_>>;
+    ) -> BoxStream<'_, Result<MessageChunk, LlmError>>;
 
     /// Bind tools to the model for function calling.
     ///

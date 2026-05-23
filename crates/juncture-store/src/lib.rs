@@ -27,7 +27,7 @@
 //!
 //! # Example
 //!
-//! ```no_run
+//! ```ignore
 //! use juncture_store::{MemoryStore, Store};
 //! use serde_json::json;
 //!

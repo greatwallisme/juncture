@@ -401,11 +401,13 @@ for node_id in &pending_nodes {
     if self.interrupt_before.contains(node_id) {
         // 持久化 checkpoint，标记 next = pending_nodes
         // 发送 StreamEvent::Interrupt
-        // interrupt_before 的 payload 是空的（或包含即将执行的节点信息）
+        // interrupt_before 的 payload 包含节点名称和中断原因
         return Ok(ExecutionResult::Interrupted { ... });
     }
 }
 ```
+
+> **Implementation Note (C-06-001)**: Enhanced interrupt_before/after payloads use structured JSON with node name and reason ("interrupt_before"/"interrupt_after") instead of empty/minimal payloads. This provides better debugging and client handling compared to the design spec's minimal payload approach.
 
 > **Implementation Note (D-06-4)**: The implementation populates the `interrupt_before` payload with node name and reason instead of leaving it empty, which is an enhancement over the design spec.
 
@@ -614,9 +616,7 @@ let config = RunnableConfig {
 };
 ```
 
-> **Implementation Note (C-06-2)**: `HIDDEN_TAG` 常量已定义于 `interrupt/mod.rs:81`，但过滤逻辑尚未实现。
-> 当前 interrupt_before/interrupt_after 检查和 StreamMode 输出中未使用该标签进行过滤。
-> 该功能计划在未来版本中实现。
+> **Implementation Note (C-06-002)**: HIDDEN_TAG filtering is fully implemented. The design note stating "not yet implemented" was outdated. The implementation includes `is_hidden_node()` checking `__` prefix+suffix, with filtering active in `should_interrupt()` and stream output processing.
 
 ### 幂等性要求
 
@@ -967,4 +967,6 @@ pub struct Runtime<C: Clone + Send + Sync + 'static> {
     pub previous: Option<serde_json::Value>,
 }
 ```
+
+---
 

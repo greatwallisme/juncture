@@ -190,6 +190,9 @@ pub struct ExecutionContext<S: State> {
     pub versions_seen: VersionsSeen,
     /// 当前 superstep 的 checkpoint pending writes
     pub pending_writes: Vec<PendingWrite>,
+    /// > **实现备注 (D-03-17)**: 实际实现包含 scratchpad 字段，
+    /// > 用于多中断场景下的 null-resume 处理。scratchpad 跟踪
+    /// > 已处理的中断，get_null_resume() 提供部分恢复能力（C-03-006）。
 }
 
 /// 执行配置：不可变的运行时参数
@@ -466,6 +469,13 @@ invoke(input, config)
     │     YES → 保存 checkpoint, status = InterruptBefore,         │
     │           return Err(Interrupted)                             │
     │                                                              │
+    │     > **实现备注 (D-03-13)**: 实际实现支持多中断匹配算法，       │
+    │     > 提供 3 种策略：Single（单次匹配）、ById（按 ID 匹配）、    │
+    │     > ByNamespace（按命名空间匹配）（C-03-001）。通过           │
+    │     > scratchpad 实现 null-resume 处理，避免重复触发相同中断。   │
+    │     > interrupt_versions_seen HashMap 存储中断时的 channel     │
+    │     > 版本，用于中断去重（C-03-008）。                         │
+    │                                                              │
     │  f. return true（有任务需要执行）                              │
     └──────────────────────────────────────────────────────────────┘
     │
@@ -484,8 +494,12 @@ invoke(input, config)
     │  c. 逐个收集完成的 task                                      │
     │     每个 task 完成后：                                        │
     │     - 记录 TaskOutput                                        │
-    │     - 调用 checkpointer.put_writes() 持久化该 task 的输出    
+    │     - 调用 checkpointer.put_writes() 持久化该 task 的输出    │
     │     - 发射 StreamEvent::TaskEnd                              │
+    │     - 调用 callback_handler（节点开始/结束/错误事件）       │
+    │     > **实现备注 (D-03-19)**: 实际实现通过 callback_handler    │
+    │     > 在任务执行各阶段发送节点生命周期事件（C-03-003）。       │
+    │                                                              │
     │                                                              │
     │  d. 任何 task 失败 → 取消剩余 tasks，返回错误                 │
     │                                                              │
@@ -506,11 +520,19 @@ invoke(input, config)
     │  c. 发射 stream 事件                                         │
     │     - StreamMode::Values → StreamEvent::Values { state }     │
     │     - StreamMode::Updates → StreamEvent::Updates { updates }  │
+    │     - Command.stream_data → StreamEvent::Custom (逐项发射)  │
+    │     > **实现备注 (D-03-18)**: 实际实现中 Command 包含         │
+    │     > stream_data: Vec<serde_json::Value>，每个元素作为      │
+    │     > StreamEvent::Custom 发射（C-03-007）。                  │
     │                                                              │
     │  d. 清空 checkpoint_pending_writes                            │
     │                                                              │
     │  e. 保存 checkpoint                                          │
     │     checkpointer.put(checkpoint, metadata{source: "loop"})   │
+    │     > **实现备注 (D-03-15)**: 实际实现使用 delta 计数器优化     │
+    │     > checkpoint 性能。HashMap<String, DeltaCounters> 追踪     │
+    │     > 自上次完整快照以来的更新和 superstep 数，仅在必要时      │
+    │     > 执行完整快照（C-03-004）。                               │
     │                                                              │
     │  f. 检查 interrupt_after                                     │
     │     当前执行的节点中有在 interrupt_after 集合中的?             │
@@ -1712,6 +1734,10 @@ impl<S: State> Node<S> for RetryingNode<S> {
 ///
 /// 防止 LLM 调用或工具执行无限阻塞。
 /// 通过 `add_node()` 的 `timeout_policy` 参数配置。
+///
+/// > **实现备注 (D-03-16)**: 实际实现支持分层超时机制：
+/// > cancellation → timeout → idle → retry → interrupt → node.call。
+/// > 通过心跳信号检测空闲状态，实现更细粒度的超时控制（C-03-005）。
 #[derive(Debug, Clone)]
 pub struct TimeoutPolicy {
     /// 单次执行的最大运行时间
@@ -1875,6 +1901,11 @@ if self.run_control.is_drain_requested() {
       __error__ = serde_json::Value  // 错误信息
       __error_source_node__ = String // 失败节点名
 ```
+
+> **实现备注 (D-03-14)**: 实际实现中错误恢复系统采用两阶段调度：
+> 1) 扫描 ERROR_SOURCE_NODE 标记失败节点，2) 为失败节点创建恢复任务。
+> TaskOutput 包含 error 字段用于传递错误信息，error_handler_map 维护
+> 节点到错误处理器的映射关系（C-03-002）。
 
 ```rust
 /// 保留写入键（与 LangGraph 一致）
@@ -2151,4 +2182,6 @@ let previous: Option<Output> = checkpoint
     .get("__return__")
     .and_then(|v| serde_json::from_value(v.clone()).ok());
 ```
+
+---
 

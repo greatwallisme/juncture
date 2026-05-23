@@ -249,6 +249,19 @@ pub trait State: Clone + Send + Sync + std::fmt::Debug + 'static {
     // > execute in a superstep, it calls `finish_field()` for each field using the `replace_after_finish`
     // > reducer, making their values visible to subscribers. This is the Rust equivalent of LangGraph's
     // > per-channel `finish()` call on `LastValueAfterFinish` channels.
+    //
+    // > **Implementation Note (C-01-2)**: Implementation adds comprehensive extension methods beyond design:
+    // > - `try_apply(&mut self, update: Self::Update) -> Result<FieldsChanged, InvalidUpdateError>` —
+    // >   fallible variant of `apply()` with structured error propagation
+    // > - `finish_field(&mut self, field_index: usize)` — signal `replace_after_finish` fields to become available
+    // > - `consume_field(&mut self, field_index: usize)` — clear ephemeral fields by index
+    // > - `consume_field_indices(&mut self, indices: &[usize])` — batch clear multiple ephemeral fields
+    // > - `replace_field_indices(&mut self, indices: &[usize])` — helper for Overwrite semantics
+    // > - `replace_after_finish_field_indices(&mut self, indices: &[usize])` — finish multiple after-finish fields
+    // > - `field_is_set(&self, field_index: usize) -> bool` — check if field has non-default value
+    // > - `field_count() -> usize` — return total field count (for generic code)
+    // > - `field_names() -> &'static [&'static str]` — return field name slice (for debugging/serialization)
+    // > - `delta_channel_specs() -> &[DeltaChannelSpec]` — return delta channel configuration per field
 }
 
 /// <!-- Addresses finding: R-A4-1 -->
@@ -297,6 +310,8 @@ impl<S: State> CowState<S> {
     /// > **Implementation Note (C-01-3)**: The actual implementation replaces the `todo!()` placeholders
     /// > with production-ready `Arc::make_mut()` for proper clone-on-write semantics. Only the first
     /// > mutation triggers a clone; subsequent mutations reuse the local copy. See `trait_.rs:100-173`.
+    /// > Includes fully implemented methods: `get()`, `get_mut()`, `update()`, `commit()`, `try_commit()`
+    /// > with proper Arc::make_mut() semantics for zero-copy cloning and safe mutation.
     pub fn get_mut(&mut self) -> &mut S {
         if self.pending.is_none() {
             // 首次修改：克隆共享状态
@@ -426,6 +441,11 @@ pub trait Reducer<T> {
     /// 将新值合并到当前值
     /// values 是同一 superstep 内所有节点对该字段的写入（按节点注册顺序）
     fn reduce(current: &mut T, values: Vec<T>);
+
+    /// > **Implementation Note (C-01-1)**: Implementation extends beyond design with structured error
+    /// > propagation: `reduce()` and `reduce_one()` return `Result<(), InvalidUpdateError>` instead of
+    /// > panicking on invalid updates (e.g., multiple writers to replace fields). This aligns with Rust
+    /// > best practices for error handling and enables graceful recovery in the Pregel engine.
 }
 
 /// 内置 Reducer 实现
@@ -544,14 +564,19 @@ pub struct AgentStateUpdate {
 // 2. 生成 FieldVersions 类型
 // ═══════════════════════════════════════════════════════════
 
-#[derive(Default, Clone, Debug, Serialize, Deserialize)]
-pub struct AgentStateFieldVersions {
-    pub messages: u64,
-    pub step: u64,
-    pub scratch: u64,
-    pub scores: u64,
-    pub status: u64,
-}
+// > **Implementation Note (C-01-4)**: Implementation uses unified `FieldVersions` standalone type
+// > instead of per-state generated types. `pub struct FieldVersions(pub Vec<u64>)` is used by all states,
+// > with field indexing done by position rather than named fields. This simplifies the proc-macro
+// > generation and enables generic code that operates on field versions without knowing State type.
+//
+// #[derive(Default, Clone, Debug, Serialize, Deserialize)]
+// pub struct AgentStateFieldVersions {
+//     pub messages: u64,
+//     pub step: u64,
+//     pub scratch: u64,
+//     pub scores: u64,
+//     pub status: u64,
+// }
 
 // ═══════════════════════════════════════════════════════════
 // 3. 字段索引常量（用于 FieldsChanged 位集合）
@@ -677,6 +702,12 @@ pub trait Channel<T> {
     // > serialization: each channel independently handles its own checkpoint serialization and
     // > deserialization, rather than requiring an external serializer that knows about all channel types.
     // > This design trades trait pollution for simplification of the checkpoint pipeline.
+    //
+    // > **Implementation Note (C-01-8)**: Implementation adds comprehensive type bounds and error propagation:
+    // > - `T: Clone + Send + Sync + 'static` — required for all channel values
+    // > - `fn checkpoint(&self) -> Option<serde_json::Value>` — serialize to JSON for checkpoint
+    // > - `fn from_checkpoint(value: serde_json::Value) -> Result<Self, String>` — restore from JSON with error handling
+    // > - serde integration ensures checkpoint compatibility with LangGraph Python format
 }
 
 /// EphemeralChannel 的 consume 实现
@@ -1315,6 +1346,11 @@ impl Message {
             usage: None,
         }
     }
+
+    /// > **Implementation Note (C-01-6)**: Additional factory methods for message manipulation:
+    /// > - `Message::remove_all() -> Self` — creates sentinel to clear entire message list
+    /// > - `Message::content_text() -> Option<&str>` — extracts text content from any Content variant
+    /// > These provide ergonomic API consistent with LangGraph's REMOVE_ALL_MESSAGES pattern.
 }
 ```
 
@@ -1450,6 +1486,11 @@ pub enum DeltaBlob<T> {
 // > **实现备注 (D-01-6)**: 实际实现中 `DeltaBlob` 的 `Snapshot` 变体使用 `serde_json::Value`
 // > 而非泛型 `T`：`Snapshot(serde_json::Value)`。这消除了编译时类型保证，但简化了 checkpoint
 // > 序列化——所有快照统一为 JSON 值，避免了为每个泛型 T 实现 serde trait 的约束传播。
+//
+// > **Implementation Note (C-01-7)**: Implementation simplifies `DeltaBlob` to use `serde_json::Value`
+// > instead of generic `T`: `pub enum DeltaBlob { Missing, Snapshot(serde_json::Value) }`. This eliminates
+// > compile-time type guarantees but significantly simplifies checkpoint serialization—all snapshots are
+// > uniformly JSON values, avoiding serde trait bounds propagation for every generic T.
 ```
 
 ### 7.3 快照策略
@@ -1544,4 +1585,6 @@ DeltaChannel 的 reducer 必须满足：
 | `langgraph/libs/langgraph/langgraph/pregel/_loop.py:583` | tick() — 主循环状态机 |
 | `langgraph/libs/langgraph/langgraph/pregel/_loop.py:831` | channel_versions 使用位置 |
 | `langgraph-doc/persistence.md` | Checkpoint 与 channel_versions 文档 |
+
+---
 

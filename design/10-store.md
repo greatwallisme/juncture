@@ -309,6 +309,8 @@ impl Store for MemoryStore {
 
 向量为可选功能，通过 `feature = "vector"` 启用。
 
+> **Implementation Note (B-10-003):** SQL backends (SqliteStore, PostgresStore) do not yet support vector search. The `Item.embedding` field always returns `None` for SQL backends because no embedding column exists in the SQL schema. Only `MemoryStore` computes and returns embeddings. SQL vector search (pgvector) is deferred to P3 per the implementation roadmap.
+
 ### 3.1 索引配置
 
 ```rust
@@ -393,9 +395,8 @@ pub enum FilterExpr {
 }
 ```
 
-> **Implementation Note (C-10-1b)**: Standalone crate `FilterExpr` is missing `#[serde(tag = "op")]` on the enum,
-> causing serialization format inconsistency with the core implementation. Core crate uses struct variants
-> with explicit serialization; standalone crate should add the tag for consistent wire format.
+> **Implementation Note (C-10-1b)**: ~~Standalone crate `FilterExpr` is missing `#[serde(tag = "op")]` on the enum,
+> causing serialization format inconsistency with the core implementation.~~ **CORRECTED**: Implementation correctly includes `#[serde(tag = "op")]` with tagged serialization format. Design note was outdated; the standalone crate and core implementation now use consistent tagged enum serialization.
 
 > **Implementation Note**: Complete `FilterExpr::matches()` method with full evaluation engine.
 > Supports dot-notation path access (e.g., "metadata.status") and type-aware JSON comparison logic.
@@ -709,4 +710,6 @@ let _sweep_handle = store.start_sweep_task();
 | `filter: dict[str, Any]` | `filter: Option<FilterExpr>` | 类型安全的过滤表达式 |
 | `batch(ops: Iterable[Op])` | `batch(ops: Vec<StoreOp>)` | Rust 所有权模型 |
 | `Store` 基类继承 | `Store` trait | Rust 无继承，使用 trait |
+
+---
 

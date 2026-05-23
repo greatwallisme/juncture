@@ -184,9 +184,10 @@ where
             })
         });
 
-        // Extract callback handler separately so it can be used after task_config
-        // is moved into the async block for node.call()
+        // Extract callback handler and metrics collector separately so they can
+        // be used after task_config is moved into the async block for node.call()
         let callback_handler = task_config.callback_handler.clone();
+        let metrics_collector = task_config.metrics_collector.clone();
 
         // Create span before moving values into the async block
         let span = tracing::info_span!(
@@ -228,12 +229,13 @@ where
                 // the interrupt!() macro within node execution.
                 //
                 // Layering order (outermost to innermost):
-                //   1. cancellation (tokio::select!)
-                //   2. timeout (tokio::time::timeout, when configured)
-                //   3. idle timeout (heartbeat-based, when configured)
-                //   4. retry (execute_with_retry, when configured)
-                //   5. interrupt context (INTERRUPT_CONTEXT.scope)
-                //   6. node.call()
+                //   1. node.execute span (via .instrument(span) on the entire async block)
+                //   2. cancellation (tokio::select!)
+                //   3. timeout (tokio::time::timeout, when configured)
+                //   4. idle timeout (heartbeat-based, when configured)
+                //   5. retry (execute_with_retry, when configured)
+                //   6. interrupt context (INTERRUPT_CONTEXT.scope)
+                //   7. node.call()
                 //
                 // The timeout wraps the entire retry sequence so that cumulative
                 // retry time is bounded by the run_timeout. The idle timeout
@@ -379,6 +381,18 @@ where
                     tracing::Span::current()
                         .record("juncture.node.error", tracing::field::display(e));
                     tracing::Span::current().record("otel.status_code", "ERROR");
+                }
+
+                // Emit node duration metric
+                if let Some(ref collector) = metrics_collector {
+                    #[allow(
+                        clippy::cast_precision_loss,
+                        reason = "Milliseconds as f64 is sufficient for histogram metrics; sub-millisecond precision is not required for node duration tracking"
+                    )]
+                    collector.record_histogram(
+                        "juncture.node.duration_ms",
+                        duration.as_millis() as f64,
+                    );
                 }
 
                 #[cfg(feature = "otel")]

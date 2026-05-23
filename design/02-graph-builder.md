@@ -79,19 +79,21 @@ impl<S: State> StateGraph<S> {
         retry_policies: Vec<RetryPolicy>,
     ) -> &mut Self;
 
-> **Implementation Note (C-02-2)**: The actual implementation consolidates the per-node parameters
+> **Implementation Note (C-02-001)**: The actual implementation consolidates the per-node parameters
 > (defer, metadata, destinations, retry_policies) into a `NodeMetadata` struct (`builder.rs:20-33`).
 > `add_node()` accepts `IntoNode<S>` and optional `NodeMetadata`, providing a cleaner API than
 > many individual parameters. Builder methods `with_defer()`, `with_metadata()`, `with_retry()`
-> construct `NodeMetadata` ergonomically.
+> construct `NodeMetadata` ergonomically. Additionally includes `error_handler` and `timeout_policies`
+> fields for comprehensive node-level configuration.
 
 > **Implementation Note**: `RetryingNode` wrapper provides production-grade retry with exponential backoff.
 > Goes beyond LangGraph base retry with jitter, circuit breaker, and comprehensive error classification.
 
-> **Implementation Note (C-02-1)**: The full `RetryPolicy` implementation includes exponential backoff
-> with configurable initial interval, jitter (full jitter strategy to avoid thundering herd), max
-> interval caps, and max attempt limits. This exceeds the design's basic retry specification and
-> provides production-grade resilience for transient failures in LLM API calls and network operations.
+> **Implementation Note (C-02-002)**: The full `RetryPolicy` implementation includes exponential backoff
+> with configurable initial interval, jitter (full jitter strategy with 0.75-1.25x multiplier to avoid
+> thundering herd), max interval caps, max attempt limits, and a `retry_on` predicate for conditional
+> retry based on error type. This exceeds the design's basic retry specification and provides
+> production-grade resilience for transient failures in LLM API calls and network operations.
 
     // > **实现备注 (D-02-1)**: 实际实现中 `add_node` 返回 `Result<(), TopologyError>` 而非 `&mut Self`。
     // > 这破坏了链式构建器模式（不再支持 `.add_node("a", ...)?.add_node("b", ...)?`），
@@ -162,6 +164,11 @@ impl<S: State> StateGraph<S> {
 
     /// 编译为无持久化的临时图（开发/测试用）。
     pub fn compile_ephemeral(self) -> Result<CompiledGraph<S>, TopologyError>;
+
+> **Implementation Note (C-02-006)**: Implementation introduces `CompileConfig` for compile-time
+> interrupt defaults. Allows specifying `interrupt_before` and `interrupt_after` node lists at
+> graph compilation time, which are merged with runtime `RunnableConfig` interrupt settings.
+> This enables reusable HITL configurations without requiring per-invocation config setup.
 
     /// <!-- Addresses finding: L-9 -->
     /// 验证状态键的有效性。
@@ -394,11 +401,17 @@ graph.add_node_with_error_handler(
 > - `state: S` — 执行时的状态快照，允许错误处理器基于状态做决策
 > - `attempt: u32` — 当前重试尝试次数，允许错误处理器根据重试次数选择不同策略
 
-> **Implementation Note (C-02-3)**: Implementation uses an `ErrorHandlerNode<S>` wrapper pattern
+> **Implementation Note (C-02-003)**: Implementation uses an `ErrorHandlerNode<S>` wrapper pattern
 > that composes the original node with its error handler into a single `Node<S>` implementation.
 > This wrapper intercepts errors from the inner node and delegates to the error handler's async
 > function, seamlessly integrating error recovery into the Pregel execution pipeline without
 > requiring special-case handling in the engine itself.
+
+> **Implementation Note (C-02-004)**: Timeout enforcement is implemented via a `TimeoutNode<S>` wrapper
+> that uses `tokio::time::timeout` to apply per-node timeout limits. The `TimeoutPolicy` struct
+> configures duration and behavior (e.g., whether to return an error or a default value on timeout).
+> This wrapper pattern parallels `ErrorHandlerNode` and `RetryingNode`, providing composable
+> cross-cutting concerns for node execution.
 
 ---
 
@@ -732,7 +745,14 @@ pub struct Command<S: State> {
     pub goto: Option<Goto>,
     /// 目标图（默认 Current）
     pub graph: GraphTarget,
+    /// 自定义流式事件数据（C-02-008）
+    pub stream_data: Option<serde_json::Value>,
 }
+
+> **Implementation Note (C-02-008)**: The `Command.stream_data` field allows nodes to attach custom
+> JSON payloads to streaming events. When set, the Pregel engine includes this data in `StreamEvent`
+> emissions, enabling rich progress reporting, intermediate results, or custom metadata without
+> requiring state updates. This extends LangGraph's streaming model with application-specific event data.
 
 /// 路由指令
 /// <!-- Addresses finding: M-3 -->
@@ -765,13 +785,15 @@ pub struct SendTarget {
     pub node: String,
     /// 该任务使用的 state（覆盖当前 state）
     pub state: serde_json::Value,
+    /// 可选的每次发送超时覆盖（C-02-007）
+    pub timeout: Option<Duration>,
 }
 
-// > **Implementation Note (C-02-5)**: `SendTarget` additionally carries a `timeout: Option<Duration>`
-// > field, allowing per-send-target timeout configuration. When set, the Pregel engine applies this
-// > timeout to the spawned task executing the target node, overriding the graph-level default.
-// > This enables fine-grained control over fan-out operations where some targets may be expected
-// > to complete faster than others.
+> **Implementation Note (C-02-007)**: `SendTarget` additionally carries a `timeout: Option<Duration>`
+> field, allowing per-send-target timeout configuration. When set, the Pregel engine applies this
+> timeout to the spawned task executing the target node, overriding the graph-level default.
+> This enables fine-grained control over fan-out operations where some targets may be expected
+> to complete faster than others.
 
 /// Send API 的目标
 pub struct SendTarget<S: State> {
@@ -954,6 +976,11 @@ pub enum TopologyError {
     PotentialInfiniteLoop { cycle: Vec<String> },
 }
 ```
+
+> **Implementation Note (C-02-005)**: The implementation provides enhanced `TopologyError` variants
+> beyond the design specification: `InvalidNodeName` (validates node names against naming rules),
+> and `InvalidFieldReference` (detects state field references that don't exist in the State schema).
+> These variants include detailed context for better error messages and debugging.
 
 ### 5.3 循环检测策略
 
@@ -1506,4 +1533,6 @@ Command 是一个 struct，各字段独立组合，天然支持任意组合。
 - 节点可能需要对 state 做大量计算（排序、过滤、转换），owned 避免不必要的 clone
 - 执行引擎已经为每个节点 clone 了 state，传 owned 不增加额外开销
 - 与 cognis 的 `&S` 方案相比，owned 更符合 Rust 的所有权语义，避免生命周期复杂性
+
+---
 
