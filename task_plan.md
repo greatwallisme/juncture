@@ -1,73 +1,73 @@
-# Task Plan: Strict Fix All 39 Gaps (v3)
+# Task Plan: Verify All 39 Review Gaps (Re-Audit)
 
 ## Goal
-Fix ALL 39 gaps identified in the strict re-review. Zero deferred items.
-Every fix must pass: cargo build + cargo test + cargo clippy with zero warnings.
+Audit current codebase to verify every gap from the v3 strict re-review has been genuinely resolved.
 
-## Phases
+## Verification Baseline
+- Clippy: ZERO warnings, ZERO errors
+- Tests: ALL passing (877 passed, 0 failed)
+- Build: clean
 
-### Phase 1: Dead Code Cleanup (M05) - QUICK WIN
-- **Status**: complete
+## Audit Result: 34 PASS / 4 PARTIAL / 1 FAIL
 
-### Phase 2: M05 Cancelled Event + MessageBatchConfig
-- **Status**: complete
+### PASS (34 items)
+| # | Gap ID | Description | Evidence |
+|---|--------|-------------|----------|
+| 1 | M09-A1 | DebugEvent type dedup | Single definition at core/src/stream.rs:208 |
+| 2 | M09-A2 | ServerInfo type dedup | Single definition at tracing/src/types.rs:27 |
+| 3 | M05-001 | Cancelled event variant | `Cancelled { step: usize }` in StreamEvent |
+| 4 | M01-001 | NamedBarrierValue Channel | `NamedBarrierChannel<T,R>` in channel.rs:201 |
+| 5 | M05-002 | StreamPart dead code removed | Not found anywhere in codebase |
+| 6 | M05-003 | StreamChannel dead code removed | Not found anywhere in codebase |
+| 7 | M01-002 | Topic Channel | `TopicChannel<T>` in channel.rs |
+| 8 | M01-003 | Delta replay_writes Overwrite | Detects `__overwrite__` wrapper in channel.rs:765-808 |
+| 9 | M01-004 | AfterFinish checkpoint is_finished | Saved/restored in checkpoint() methods |
+| 10 | M02-001 | Functional API | func/mod.rs: compile_entrypoint, Runtime |
+| 11 | M04-001 | TTL checkpoint GC | lazy_cleanup() in memory.rs:122-164 |
+| 12 | M04-003 | DeltaSnapshot ancestor walk | recover_from_deltas() in types.rs:95-120 |
+| 13 | M05-004 | MessageBatchConfig batching | BatchTransformer in stream.rs:889-947 |
+| 14 | M05-005 | with_run_id() | config.rs:202 |
+| 15 | M06-001 | InterruptRecord audit trail | interrupt/mod.rs:98-112 |
+| 16 | M06-002 | Timestamp in payloads | InterruptSignal.timestamp: DateTime<Utc> |
+| 17 | M06-003 | extract_namespace() | interrupt/mod.rs:142 |
+| 18 | M06-004 | validate_resume_coverage() | interrupt/mod.rs:203-220 |
+| 19 | M06-005 | Scratchpad methods | record_interrupt(), clear_transient() |
+| 20 | M07-001 | StateSubset proc-macro | state_derive.rs:322-362 |
+| 21 | M07-002 | add_subgraph convenience | builder.rs:870-1060, 3 overloads |
+| 22 | M08-001 | Event metadata | ToolStarted.timestamp, ToolFinished.success |
+| 23 | M08-002 | StatefulTool lifecycle | emit_tool_started/finished in tools.rs:197-240 |
+| 24 | M08-003 | Proper error variants | LlmError::Other uses Box<dyn Error + Send + Sync> |
+| 25 | M09-B01 | Graph metrics | inc_counter invocations/errors in compiled.rs:391/418 |
+| 26 | M09-B02 | Superstep duration | emit_histogram in loop_.rs:733 |
+| 27 | M09-B03 | LLM metrics | tokens/cost/calls/duration in budget.rs |
+| 28 | M09-B04 | Tool metrics | calls/errors/duration in budget.rs |
+| 29 | M09-B05 | Graph duration histogram | record_histogram in compiled.rs:438-441 |
+| 30 | M09-B07 | OpenTelemetry integration | opentelemetry::metrics usage in metrics.rs |
+| 31 | M09-B08 | Span attribute recording | span.record() in ollama/anthropic/openai providers |
+| 32 | M09-B09 | Metrics testing | test_utils.rs + metrics.rs:749-1063 |
+| 33 | M09-B10 | Metrics/budget integration | BudgetTracker.with_metrics_collector() |
+| 34 | M09-B12 | MetricsRegistry API | counter/histogram/gauge builders in metrics.rs:532-690 |
 
-### Phase 3: M09 Type Deduplication
-- **Status**: complete
+### PARTIAL (4 items)
+| # | Gap ID | Severity | Issue | Detail |
+|---|--------|----------|-------|--------|
+| 35 | M10-001 | HIGH | SqliteStore missing vector search | PostgresStore has full vector search (embeddings + cosine similarity). SqliteStore.get()/search() hardcode `embedding: None`, put() ignores `_index` param |
+| 36 | M10-002 | HIGH | InjectedStore wrapper missing | Tool trait has requires_store() and invoke_with_store() methods. Missing: InjectedStore<T> declarative wrapper type |
+| 37 | M04-002 | MEDIUM | Schema migration no auto-migrate | migrate_checkpoint_schema() exists but only returns error on version mismatch; tells user to call State::migrate() manually |
+| 38 | M09-B06 | MEDIUM | Active invocations counter vs gauge | Uses inc_counter(u64::MAX-1) to decrement instead of set_gauge(). Semantically approximates gauge but isn't a true gauge |
 
-### Phase 4: M09 Metrics Emissions (12 items)
-- **Status**: complete
+### FAIL (1 item)
+| # | Gap ID | Severity | Issue | Detail |
+|---|--------|----------|-------|--------|
+| 39 | M09-B11 | MEDIUM | No distributed trace context propagation | No W3C TraceContext, no propagator, no trace_id injection/extraction found anywhere |
 
-### Phase 5: M10 SQL Vector Search + InjectedStore
-- **Status**: complete
+## Remaining Work (5 items)
 
-### Phase 6: M01 Missing Channels
-- **Status**: complete
+### HIGH priority (2)
+1. M10-001: Implement SqliteStore vector search (embedding storage + cosine similarity)
+2. M10-002: Add InjectedStore<T> wrapper type for declarative store injection
 
-### Phase 7: M01 Delta + AfterFinish Fixes
-- **Status**: complete
-
-### Phase 8: M06 HITL Audit Trail
-- **Status**: complete
-
-### Phase 9: M04 Checkpoint Gaps
-- **Status**: complete
-- **Items**: M04-001 (TTL cleanup), M04-002 (schema migration), M04-003 (delta recovery)
-
-### Phase 10: M07 StateSubset + M07 add_subgraph
-- **Status**: complete
-- M07-001: StateSubset proc-macro was already implemented (review agent misidentified gap)
-- M07-002: Added `add_subgraph_explicit()` convenience method in builder.rs
-
-### Phase 11: M08 Event Metadata + Lifecycle + Errors
-- **Status**: complete
-- M08-001: Added timestamp to ToolStarted, success to ToolFinished
-- M08-002: Added emit_tool_started/emit_tool_finished to ToolRuntime
-- M08-003: Changed LlmError::Other to Box<dyn Error>
-
-### Phase 12: M02 Functional API + M05 with_run_id
-- **Status**: complete
-- M05-005: Added with_run_id() to RunnableConfig (complete)
-- M02-001: Functional API module (complete)
-  - Created crates/juncture-core/src/func/mod.rs with Runtime<S>, compile_entrypoint(), compile_entrypoint_with_config()
-  - Added pub mod func to lib.rs and re-exports (FuncRuntime, compile_entrypoint, compile_entrypoint_with_config)
-  - Fixed 6 clippy issues: doc_markdown, type_repetition_in_bounds, option_as_ref_cloned, assertions_on_result_states, redundant_clone, unused_imports
-  - Tests: test_runtime_new, test_runtime_default, test_runtime_with_previous, test_runtime_from_entrypoint_config, test_runtime_clone, test_compile_entrypoint_basic, test_compile_entrypoint_with_config
-
-### Phase 13: Final Verification
-- **Status**: complete
-- **Result**: cargo build (0 errors), cargo clippy (0 warnings), cargo test (877 passed, 0 failed), cargo fmt (clean)
-
-## Errors Encountered
-| Error | Attempt | Resolution |
-|-------|---------|------------|
-| clippy assertions_on_result_states in interrupt tests | 1 | Replaced assert!(result.is_ok()) with result.unwrap() |
-| M06 timestamp field missing in InterruptSignal constructions | 1 | Added timestamp: Utc::now() to all 13+ construction sites |
-| M04 agent const fn with Arc::new | 1 | Removed const from with_ttl_config() |
-| M04 doc backtick errors | 1 | Added backticks around code identifiers in doc comments |
-| M04 significant_drop_tightening | 1 | Added #[allow] with reason |
-| M02 IntoNode trait bound not satisfied for raw functions | 1 | Wrapped test functions in NodeFnUpdate() wrapper type |
-| M02 compile() takes 0 args, not checkpointer | 1 | Changed to compile_with_checkpointer(checkpointer) |
-| M02 clippy doc_markdown on StateGraph | 1 | Added backticks around StateGraph in doc comment |
-| M02 clippy type_repetition_in_bounds on Debug impl | 1 | Combined S: State + Default + Debug into single bound |
-| M02 clippy option_as_ref_cloned | 1 | Replaced .as_ref().cloned() with .clone() |
+### MEDIUM priority (3)
+3. M04-002: Add auto-migration or migration utilities to schema version handling
+4. M09-B06: Replace counter-based active_invocations with proper set_gauge() calls
+5. M09-B11: Add W3C TraceContext propagation for distributed tracing

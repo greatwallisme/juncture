@@ -166,6 +166,7 @@ impl<S: State, I: IntoState<S>, O: FromState<S>> CompiledGraph<S, I, O> {
                 interrupt_before,
                 interrupt_after,
                 subgraphs,
+                active_invocations: std::sync::atomic::AtomicU64::new(0),
             }),
             _input: std::marker::PhantomData,
             _output: std::marker::PhantomData,
@@ -386,12 +387,16 @@ impl<S: State, I: IntoState<S>, O: FromState<S>> CompiledGraph<S, I, O> {
         async move {
             let graph_start = std::time::Instant::now();
 
-            // Emit graph invocation counter metric
+            // Emit graph invocation counter metric and update active gauge
             if let Some(ref collector) = config.metrics_collector {
                 collector.inc_counter("juncture.graph.invocations", 1);
 
-                // Increment active invocations gauge
-                collector.inc_counter("juncture.graph.active_invocations", 1);
+                let active = self
+                    .inner
+                    .active_invocations
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                    + 1;
+                collector.set_gauge("juncture.graph.active_invocations", active);
             }
 
             // Execute the loop
@@ -406,7 +411,12 @@ impl<S: State, I: IntoState<S>, O: FromState<S>> CompiledGraph<S, I, O> {
 
             // Decrement active invocations gauge (always, regardless of success/failure)
             if let Some(ref collector) = config.metrics_collector {
-                collector.inc_counter("juncture.graph.active_invocations", u64::MAX - 1);
+                let active = self
+                    .inner
+                    .active_invocations
+                    .fetch_sub(1, std::sync::atomic::Ordering::Relaxed)
+                    - 1;
+                collector.set_gauge("juncture.graph.active_invocations", active);
             }
 
             // Handle execution errors
@@ -1903,6 +1913,13 @@ struct CompiledGraphInner<S: State> {
 
     /// Mounted subgraph metadata
     subgraphs: Vec<SubgraphInfo>,
+
+    /// Active invocation count for gauge metric emission.
+    ///
+    /// Tracks the number of currently executing graph invocations across
+    /// all shared references to this compiled graph. Used to emit the
+    /// `juncture.graph.active_invocations` gauge metric.
+    active_invocations: std::sync::atomic::AtomicU64,
 }
 
 /// Output from graph execution

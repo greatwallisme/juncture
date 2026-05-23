@@ -45,6 +45,22 @@
 //! assert_eq!(names::GRAPH_INVOKE, "juncture.graph.invoke");
 //! assert_eq!(attrs::NODE_NAME, "juncture.node.name");
 //! ```
+//!
+//! # Distributed Trace Propagation
+//!
+//! Use the propagation module for W3C `TraceContext` injection/extraction:
+//!
+//! ```ignore
+//! use juncture_tracing::propagation::{inject_trace_context, extract_trace_context};
+//! use std::collections::HashMap;
+//!
+//! // Inject before crossing process boundaries
+//! let mut carrier = HashMap::new();
+//! inject_trace_context(&mut carrier);
+//!
+//! // Extract on the receiving side
+//! let ctx = extract_trace_context(&carrier);
+//! ```
 
 pub mod callback;
 pub mod spans;
@@ -55,6 +71,8 @@ pub mod types;
 pub mod config;
 #[cfg(feature = "otel")]
 pub mod metrics;
+#[cfg(feature = "otel")]
+pub mod propagation;
 
 // Re-exports for convenience
 pub use callback::{
@@ -69,6 +87,8 @@ pub use config::{TracingConfig, TracingInstallResult, init};
 pub use metrics::{
     CounterBuilder, GaugeBuilder, HistogramBuilder, MetricsRegistry, RegistryMetricsCollector,
 };
+#[cfg(feature = "otel")]
+pub use propagation::{attach_context, extract_trace_context, inject_trace_context};
 
 // Re-export span constants
 pub use spans::{attrs, names};

@@ -1041,13 +1041,16 @@ fn extract_index_text(value: &serde_json::Value, fields: &[String]) -> String {
 
 /// SQLite-based store implementation
 ///
-/// Provides persistent storage using `SQLite` database.
+/// Provides persistent storage using `SQLite` database with optional
+/// vector similarity search support.
 /// Requires the `sqlite` feature flag.
 #[cfg(feature = "sqlite")]
 #[derive(Debug)]
 pub struct SqliteStore {
     /// Database connection pool
     pool: Option<sqlx::SqlitePool>,
+    /// Vector index configuration
+    index_config: Option<IndexConfig>,
 }
 
 #[cfg(feature = "sqlite")]
@@ -1083,7 +1086,47 @@ impl SqliteStore {
         .await
         .map_err(|e| StoreError::InvalidOperation(format!("Failed to create table: {e}")))?;
 
-        Ok(Self { pool: Some(pool) })
+        // Create store_vectors table for vector search support
+        // Stores pre-computed embeddings as BLOB for cosine similarity search
+        sqlx::query(
+            r"
+            CREATE TABLE IF NOT EXISTS store_vectors (
+                namespace TEXT NOT NULL,
+                key TEXT NOT NULL,
+                field TEXT NOT NULL,
+                vector BLOB NOT NULL,
+                PRIMARY KEY (namespace, key, field),
+                FOREIGN KEY (namespace, key) REFERENCES store_items(namespace, key) ON DELETE CASCADE
+            )
+            ",
+        )
+        .execute(&pool)
+        .await
+        .map_err(|e| StoreError::InvalidOperation(format!("Failed to create vectors table: {e}")))?;
+
+        Ok(Self {
+            pool: Some(pool),
+            index_config: None,
+        })
+    }
+
+    /// Create new `SqliteStore` with vector search enabled.
+    ///
+    /// # Arguments
+    ///
+    /// * `database_url` - `SQLite` database connection string
+    /// * `config` - [`IndexConfig`] for vector search
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] if connection fails or table creation fails.
+    pub async fn with_vector_search(
+        database_url: &str,
+        config: IndexConfig,
+    ) -> Result<Self, StoreError> {
+        let mut store = Self::new(database_url).await?;
+        store.index_config = Some(config);
+        Ok(store)
     }
 }
 
@@ -1190,6 +1233,31 @@ impl Store for SqliteStore {
                 .try_get("updated_at")
                 .map_err(|e| StoreError::Database(e.to_string()))?;
 
+            // Load embedding if exists
+            let embedding = if self.index_config.is_some() {
+                let vector_row = sqlx::query(
+                    "SELECT vector FROM store_vectors WHERE namespace = ? AND key = ? LIMIT 1",
+                )
+                .bind(namespace)
+                .bind(key)
+                .fetch_optional(pool)
+                .await
+                .map_err(|e| {
+                    StoreError::InvalidOperation(format!("Failed to load embedding: {e}"))
+                })?;
+
+                if let Some(vrow) = vector_row {
+                    let bytes: Vec<u8> = vrow
+                        .try_get("vector")
+                        .map_err(|e| StoreError::Database(e.to_string()))?;
+                    Some(blob_to_vector(&bytes)?)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
             Ok(Some(Item {
                 namespace: namespace.to_string(),
                 key: key.to_string(),
@@ -1201,7 +1269,7 @@ impl Store for SqliteStore {
                     .map_err(|e| StoreError::Database(format!("invalid timestamp: {e}")))?
                     .with_timezone(&chrono::Utc),
                 expires_at: None,
-                embedding: None,
+                embedding,
             }))
         } else {
             Ok(None)
@@ -1213,15 +1281,38 @@ impl Store for SqliteStore {
         namespace: &str,
         key: &str,
         value: serde_json::Value,
-        _index: Option<Vec<String>>,
+        index: Option<Vec<String>>,
     ) -> Result<(), StoreError> {
         let pool = self
             .pool
             .as_ref()
             .ok_or_else(|| StoreError::InvalidOperation("Store not initialized".to_string()))?;
 
+        let now = Utc::now();
+
+        // Compute embedding before the database transaction
+        let embedding = if let Some(ref index_config) = self.index_config {
+            if let (Some(embed_fn), Some(index_fields)) = (&index_config.embed, &index) {
+                if index_fields.is_empty() {
+                    None
+                } else {
+                    let text = extract_index_text(&value, index_fields);
+                    if text.is_empty() {
+                        None
+                    } else {
+                        let mut embeddings = embed_fn.embed(vec![text]).await?;
+                        embeddings.pop()
+                    }
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         let value_str = serde_json::to_string(&value).map_err(StoreError::Serialization)?;
-        let now = Utc::now().to_rfc3339();
+        let now_str = now.to_rfc3339();
 
         sqlx::query(
             r"
@@ -1235,11 +1326,30 @@ impl Store for SqliteStore {
         .bind(namespace)
         .bind(key)
         .bind(&value_str)
-        .bind(&now)
-        .bind(&now)
+        .bind(&now_str)
+        .bind(&now_str)
         .execute(pool)
         .await
         .map_err(|e| StoreError::InvalidOperation(format!("Failed to put item: {e}")))?;
+
+        // Store embedding if configured
+        if let Some(vec) = embedding {
+            let bytes = vector_to_blob(&vec);
+            sqlx::query(
+                r"
+                INSERT INTO store_vectors (namespace, key, field, vector)
+                VALUES (?, ?, 'default', ?)
+                ON CONFLICT (namespace, key, field) DO UPDATE SET
+                    vector = excluded.vector
+                ",
+            )
+            .bind(namespace)
+            .bind(key)
+            .bind(&bytes)
+            .execute(pool)
+            .await
+            .map_err(|e| StoreError::InvalidOperation(format!("Failed to store embedding: {e}")))?;
+        }
 
         Ok(())
     }
@@ -1275,6 +1385,22 @@ impl Store for SqliteStore {
             .as_ref()
             .ok_or_else(|| StoreError::InvalidOperation("Store not initialized".to_string()))?;
 
+        // Compute query embedding if vector search is enabled and query text is provided
+        let query_embedding: Option<Vec<f32>> = if let Some(ref index_config) = self.index_config {
+            if let (Some(embed_fn), Some(query_text)) = (&index_config.embed, &query.query) {
+                if query_text.is_empty() {
+                    None
+                } else {
+                    let mut embeddings = embed_fn.embed(vec![query_text.clone()]).await?;
+                    embeddings.pop()
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         let namespace_pattern = format!("{}%", query.namespace_prefix);
         let mut conditions = vec!["namespace LIKE ?".to_string()];
         let mut params_str: Vec<String> = vec![namespace_pattern];
@@ -1289,38 +1415,25 @@ impl Store for SqliteStore {
 
         let where_clause = conditions.join(" AND ");
 
-        // Count total matching items
-        let count_sql = format!("SELECT COUNT(*) as cnt FROM store_items WHERE {where_clause}");
-        let mut count_query = sqlx::query(&count_sql);
-        for p in &params_str {
-            count_query = count_query.bind(p.as_str());
-        }
-        let total_count: i64 = count_query
-            .fetch_one(pool)
-            .await
-            .map_err(|e| StoreError::InvalidOperation(format!("Search count failed: {e}")))?
-            .try_get("cnt")
-            .map_err(|e| StoreError::Database(e.to_string()))?;
-
-        // Fetch paginated results
+        // Fetch all matching items for vector similarity computation
         let data_sql = format!(
             "SELECT namespace, key, value, created_at, updated_at \
              FROM store_items WHERE {where_clause} \
-             ORDER BY namespace, key LIMIT ? OFFSET ?"
+             ORDER BY namespace, key"
         );
         let mut data_query = sqlx::query(&data_sql);
         for p in &params_str {
             data_query = data_query.bind(p.as_str());
         }
-        data_query = data_query.bind(query.limit as i64);
-        data_query = data_query.bind(query.offset as i64);
 
         let rows = data_query
             .fetch_all(pool)
             .await
             .map_err(|e| StoreError::InvalidOperation(format!("Search query failed: {e}")))?;
 
-        let mut items = Vec::with_capacity(rows.len());
+        let mut items: Vec<SearchItem> = Vec::with_capacity(rows.len());
+
+        // For items with embeddings, compute similarity scores
         for row in rows {
             let namespace: String = row
                 .try_get("namespace")
@@ -1339,6 +1452,38 @@ impl Store for SqliteStore {
                 .try_get("updated_at")
                 .map_err(|e| StoreError::Database(e.to_string()))?;
 
+            // Load embedding for this item
+            let embedding = if query_embedding.is_some() {
+                let vector_row = sqlx::query(
+                    "SELECT vector FROM store_vectors WHERE namespace = ? AND key = ? LIMIT 1",
+                )
+                .bind(&namespace)
+                .bind(&key)
+                .fetch_optional(pool)
+                .await
+                .map_err(|e| {
+                    StoreError::InvalidOperation(format!("Failed to load embedding: {e}"))
+                })?;
+
+                if let Some(vrow) = vector_row {
+                    let bytes: Vec<u8> = vrow
+                        .try_get("vector")
+                        .map_err(|e| StoreError::Database(e.to_string()))?;
+                    Some(blob_to_vector(&bytes)?)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            // Compute similarity score if both query and item embeddings exist
+            let score = query_embedding.as_ref().and_then(|q_emb| {
+                embedding
+                    .as_ref()
+                    .map(|i_emb| f64::from(cosine_similarity(q_emb, i_emb)))
+            });
+
             items.push(SearchItem {
                 item: Item {
                     namespace,
@@ -1351,15 +1496,31 @@ impl Store for SqliteStore {
                         .map_err(|e| StoreError::Database(format!("invalid timestamp: {e}")))?
                         .with_timezone(&chrono::Utc),
                     expires_at: None,
-                    embedding: None,
+                    embedding,
                 },
-                score: None,
+                score,
             });
         }
 
+        let total_count = items.len();
+
+        // Sort by similarity when vector search is active
+        if query_embedding.is_some() {
+            items.sort_by(|a, b| {
+                b.score
+                    .partial_cmp(&a.score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+        }
+
+        // Apply pagination
+        let start = query.offset.min(items.len());
+        let end = (start + query.limit).min(items.len());
+        let page = items.drain(start..end).collect();
+
         Ok(SearchResult {
-            items,
-            total_count: total_count as usize,
+            items: page,
+            total_count,
         })
     }
 
@@ -1590,6 +1751,38 @@ fn bytea_to_vector(bytes: &[u8]) -> Result<Vec<f32>, StoreError> {
     if bytes.len() % std::mem::size_of::<f32>() != 0 {
         return Err(StoreError::VectorSearch(
             "Invalid BYTEA length for vector data".to_string(),
+        ));
+    }
+    let vec = bytes
+        .chunks_exact(std::mem::size_of::<f32>())
+        .map(|chunk| {
+            let arr: [u8; 4] = chunk.try_into().expect("chunk is exactly 4 bytes");
+            f32::from_le_bytes(arr)
+        })
+        .collect();
+    Ok(vec)
+}
+
+/// Serialize a vector of `f32` to a `BLOB` for `SQLite` storage.
+///
+/// Uses little-endian byte order for cross-platform consistency.
+#[cfg(feature = "sqlite")]
+fn vector_to_blob(vec: &[f32]) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(vec.len().saturating_mul(std::mem::size_of::<f32>()));
+    for &val in vec {
+        bytes.extend_from_slice(&val.to_le_bytes());
+    }
+    bytes
+}
+
+/// Deserialize a `BLOB` from `SQLite` to a vector of `f32`.
+///
+/// Expects little-endian byte order.
+#[cfg(feature = "sqlite")]
+fn blob_to_vector(bytes: &[u8]) -> Result<Vec<f32>, StoreError> {
+    if bytes.len() % std::mem::size_of::<f32>() != 0 {
+        return Err(StoreError::VectorSearch(
+            "Invalid BLOB length for vector data".to_string(),
         ));
     }
     let vec = bytes
