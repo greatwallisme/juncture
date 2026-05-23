@@ -5,6 +5,7 @@ pub mod command;
 pub mod config;
 pub mod edge;
 pub mod error;
+pub mod func;
 pub mod graph;
 pub mod interrupt;
 pub mod llm;
@@ -208,6 +209,7 @@ pub use command::{Command, CommandGoto, Final, Goto, GraphTarget, ParentCommand,
 pub use config::{CacheConfig, CachePolicy, EntrypointConfig, RunnableConfig, TaskConfig};
 pub use edge::{END, Edge, PathMap, RouteResult, Router, START, TriggerTable};
 pub use error::{ErrorCode, InvalidUpdateError, JunctureError, NodeTimeoutError};
+pub use func::{Runtime as FuncRuntime, compile_entrypoint, compile_entrypoint_with_config};
 pub use graph::{
     CompiledGraph, DrawableEdge, DrawableGraph, DrawableNode, ErrorHandlerNode, GraphOutput,
     GraphOutputMetadata, InterruptInfo, NodeMetadata, RemoteGraph, RetryPolicy, RetryingNode,
@@ -222,7 +224,7 @@ pub use llm::{
     ToolDefinition,
 };
 pub use node::{IntoNode, Node, NodeError};
-pub use observability::{CacheKeyInput, GraphLifecycleCallback, MetricsCollector, ServerInfo};
+pub use observability::{CacheKeyInput, GraphLifecycleCallback, MetricsCollector};
 pub use prebuilt::{PromptSource, ReactAgentConfig};
 pub use pregel::{
     BubbleUp, BudgetConfig, BudgetExceededAction, BudgetExceededReason, BudgetTracker, BudgetUsage,
@@ -249,9 +251,8 @@ pub use store::{
 };
 pub use stream::{
     BatchTransformer, DebugEvent, EventEmitter, FilterFieldsTransformer, JsonParseTransformer,
-    MessageBatchConfig, StreamChannel, StreamConfig, StreamEvent, StreamMode, StreamPart,
-    StreamResumption, StreamTransformer, StreamWriter, TaskEventType, ToolsEvent,
-    call_llm_streaming,
+    MessageBatchConfig, StreamConfig, StreamEvent, StreamMode, StreamResumption, StreamTransformer,
+    StreamWriter, TaskEventType, ToolsEvent, call_llm_streaming,
 };
 pub use subgraph::{
     StateSubset, SubgraphConfig, SubgraphMount, SubgraphNode, SubgraphPersistence,

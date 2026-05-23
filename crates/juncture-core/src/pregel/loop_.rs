@@ -686,13 +686,9 @@ impl<S: State> PregelLoop<S> {
             }));
         }
 
-        // Emit graph invocation counter metric
-        self.emit_counter("juncture.graph.invocations", 1);
-        tracing::debug!(
-            name: "juncture.graph.invocations",
-            step = self.step,
-            num_tasks = self.pending_tasks.len(),
-        );
+        // Emit superstep tasks counter metric
+        let num_tasks = u64::try_from(self.pending_tasks.len()).unwrap_or(u64::MAX);
+        self.emit_counter("juncture.superstep.tasks", num_tasks);
 
         let (result, interrupt_rx) = execute_superstep(
             &self.pending_tasks,
@@ -2128,6 +2124,7 @@ mod tests {
         node::NodeFnCommand,
         pregel::types::{TaskOutput, TaskTrigger},
     };
+    use chrono::Utc;
 
     #[test]
     fn test_pregel_loop_creation() {
@@ -2208,6 +2205,7 @@ mod tests {
             index: 0,
             id: Some("sub-int-0".to_string()),
             payload: serde_json::json!({"node": "subgraph_node"}),
+            timestamp: Utc::now(),
         }];
         let bubble_ups = vec![BubbleUp::Interrupt(crate::pregel::types::GraphInterrupt {
             interrupts: signals,
@@ -2313,6 +2311,7 @@ mod tests {
                     index: 0,
                     id: None,
                     payload: serde_json::Value::Null,
+                    timestamp: Utc::now(),
                 }],
                 step: 1,
                 namespace: vec![],
@@ -2811,11 +2810,13 @@ mod tests {
                 index: 0,
                 id: Some("int-alpha".to_string()),
                 payload: serde_json::Value::Null,
+                timestamp: Utc::now(),
             },
             crate::interrupt::InterruptSignal {
                 index: 1,
                 id: Some("int-beta".to_string()),
                 payload: serde_json::Value::Null,
+                timestamp: Utc::now(),
             },
         ];
 
@@ -2873,6 +2874,7 @@ mod tests {
             index: 0,
             id: Some("int-1".to_string()),
             payload: serde_json::Value::Null,
+            timestamp: Utc::now(),
         }];
 
         let _ = loop_.execute_superstep().await;
@@ -2887,6 +2889,7 @@ mod tests {
             index: 0,
             id: Some("int-2".to_string()),
             payload: serde_json::Value::Null,
+            timestamp: Utc::now(),
         }];
 
         let _ = loop_.execute_superstep().await;
@@ -3216,6 +3219,7 @@ mod tests {
             index: 0,
             id: Some("int-ns-0".to_string()),
             payload: serde_json::json!({"node": "child_node"}),
+            timestamp: Utc::now(),
         }];
         let bubble_ups = vec![BubbleUp::Interrupt(crate::pregel::types::GraphInterrupt {
             interrupts: signals,
@@ -3264,16 +3268,19 @@ mod tests {
                 index: 0,
                 id: Some("int-visible".to_string()),
                 payload: serde_json::json!({"node": "agent"}),
+                timestamp: Utc::now(),
             },
             crate::interrupt::InterruptSignal {
                 index: 1,
                 id: Some("int-hidden".to_string()),
                 payload: serde_json::json!({"node": "__route__"}),
+                timestamp: Utc::now(),
             },
             crate::interrupt::InterruptSignal {
                 index: 2,
                 id: Some("int-also-visible".to_string()),
                 payload: serde_json::json!({"node": "review"}),
+                timestamp: Utc::now(),
             },
         ];
         let bubble_ups = vec![BubbleUp::Interrupt(crate::pregel::types::GraphInterrupt {
@@ -3322,11 +3329,13 @@ mod tests {
                 index: 0,
                 id: Some("int-h1".to_string()),
                 payload: serde_json::json!({"node": "__route__"}),
+                timestamp: Utc::now(),
             },
             crate::interrupt::InterruptSignal {
                 index: 1,
                 id: Some("int-h2".to_string()),
                 payload: serde_json::json!({"node": "__handler__"}),
+                timestamp: Utc::now(),
             },
         ];
         let bubble_ups = vec![BubbleUp::Interrupt(crate::pregel::types::GraphInterrupt {
@@ -3508,6 +3517,7 @@ mod tests {
             index: 0,
             id: Some("int-exit-test".to_string()),
             payload: serde_json::json!({"node": "test_node"}),
+            timestamp: Utc::now(),
         }];
         loop_.save_interrupt_checkpoint("test_node").await;
 

@@ -586,6 +586,7 @@ impl<S: State> ToolNode<S> {
                 tool_call_id: tool_call.id.clone(),
                 node: "tools".to_string(),
                 input,
+                timestamp: chrono::Utc::now(),
             };
             let _ = tx.send(event);
         }
@@ -648,6 +649,10 @@ impl<S: State> ToolNode<S> {
             tool_name = %tool.name(),
         );
 
+        // Report tool call and duration metrics
+        let _ = juncture_core::pregel::try_report_tool_call();
+        let _ = juncture_core::pregel::try_report_tool_duration(duration_ms);
+
         // Post-execute hook
         let output = match interceptor.post_execute(tool_call, &result).await {
             Ok(out) => {
@@ -661,6 +666,7 @@ impl<S: State> ToolNode<S> {
                         tool_call_id: tool_call.id.clone(),
                         output: output_json,
                         duration_ms,
+                        success: true,
                     };
                     let _ = tx.send(event);
                 }
@@ -677,6 +683,7 @@ impl<S: State> ToolNode<S> {
                         tool_call_id: tool_call.id.clone(),
                         output: serde_json::json!({"error": e.to_string()}),
                         duration_ms,
+                        success: false,
                     };
                     let _ = tx.send(event);
                 }
@@ -699,6 +706,9 @@ impl<S: State> ToolNode<S> {
                     name: "juncture.tool.errors",
                     tool_name = %tool.name(),
                 );
+
+                // Report tool error metric
+                let _ = juncture_core::pregel::try_report_tool_error();
 
                 return Err(e);
             }

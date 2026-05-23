@@ -213,10 +213,41 @@ impl PostgresSaver {
             .map_or_else(String::new, juncture_core::CheckpointNamespace::as_str)
     }
 
+    /// Migrate checkpoint data from older schema version to current version
+    ///
+    /// This function implements the schema migration strategy specified in
+    /// design doc §5.4. It validates schema version compatibility and returns
+    /// the `channel_values` as-is if versions match, or an error if they do not.
+    ///
+    /// Schema migration operates on `serde_json::Value` to avoid dependencies
+    /// on old struct definitions. When schema versions differ, the application
+    /// layer must handle migration using `State::migrate()` after checkpoint load.
+    #[allow(clippy::too_many_arguments, reason = "required by database schema")]
+    fn migrate_checkpoint_schema(
+        channel_values: serde_json::Value,
+        stored_schema_version: u32,
+        checkpoint_id: &str,
+    ) -> Result<serde_json::Value, CoreCheckpointError> {
+        let current_schema_version = 1u32;
+
+        if stored_schema_version == current_schema_version {
+            return Ok(channel_values);
+        }
+
+        Err(CoreCheckpointError::Other(format!(
+            "Checkpoint {checkpoint_id} has schema version {stored_schema_version}, \
+             but current version is {current_schema_version}. Manual migration required. \
+             Use State::migrate() at the application layer."
+        )))
+    }
+
     /// Deserialize checkpoint from database row fields
     ///
     /// Helper function to reconstruct a Checkpoint from individual column values
     /// as per design specification (section 4.2).
+    ///
+    /// This function implements M04-002: Schema migration logic by calling
+    /// `migrate_checkpoint_schema()` to handle version mismatches.
     #[allow(clippy::too_many_arguments, reason = "required by database schema")]
     fn deserialize_checkpoint(
         channel_values_bytes: &[u8],
@@ -229,8 +260,17 @@ impl PostgresSaver {
         checkpoint_id: String,
         created_at: String,
     ) -> Result<Checkpoint, CoreCheckpointError> {
-        let channel_values: serde_json::Value = deserialize_auto(channel_values_bytes)
+        let raw_channel_values: serde_json::Value = deserialize_auto(channel_values_bytes)
             .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
+
+        // Apply schema migration (M04-002)
+        let schema_version_u32 = u32::try_from(schema_version).expect("schema_version fits in u32");
+        let channel_values = Self::migrate_checkpoint_schema(
+            raw_channel_values,
+            schema_version_u32,
+            &checkpoint_id,
+        )?;
+
         let channel_versions: std::collections::HashMap<String, u64> =
             deserialize_auto(channel_versions_bytes)
                 .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
@@ -269,7 +309,7 @@ impl PostgresSaver {
             pending_tasks,
             pending_sends,
             pending_interrupts,
-            schema_version: u32::try_from(schema_version).expect("schema_version fits in u32"),
+            schema_version: schema_version_u32,
             created_at,
             v: 1,
             new_versions: std::collections::HashMap::new(),
@@ -1020,11 +1060,13 @@ mod tests {
                     index: 0,
                     id: Some("interrupt-approval".to_string()),
                     payload: json!({"reason": "awaiting human review"}),
+                    timestamp: Utc::now(),
                 },
                 InterruptSignal {
                     index: 1,
                     id: None,
                     payload: json!({"type": "confirmation"}),
+                    timestamp: Utc::now(),
                 },
             ],
             schema_version: 1,
@@ -1072,4 +1114,4 @@ mod tests {
     }
 }
 
-// Rust guideline compliant 2026-05-21
+// Rust guideline compliant 2026-05-23

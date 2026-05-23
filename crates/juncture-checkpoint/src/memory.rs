@@ -65,6 +65,9 @@ pub struct MemorySaver {
 
     /// (`thread_id`, `checkpoint_id`, `checkpoint_ns`) -> Vec<PendingWrite>
     writes: Arc<RwLock<WritesMap>>,
+
+    /// TTL configuration for checkpoint expiration (M04-001)
+    ttl_config: Arc<std::sync::RwLock<crate::types::TtlConfig>>,
 }
 
 impl MemorySaver {
@@ -74,7 +77,111 @@ impl MemorySaver {
         Self {
             storage: Arc::new(RwLock::new(HashMap::new())),
             writes: Arc::new(RwLock::new(HashMap::new())),
+            ttl_config: Arc::new(std::sync::RwLock::new(crate::types::TtlConfig::default())),
         }
+    }
+
+    /// Create a new in-memory saver with TTL configuration (M04-001)
+    ///
+    /// # Arguments
+    ///
+    /// * `ttl_config` - TTL configuration for automatic checkpoint expiration
+    #[must_use]
+    pub fn with_ttl_config(mut self, ttl_config: crate::types::TtlConfig) -> Self {
+        self.ttl_config = Arc::new(std::sync::RwLock::new(ttl_config));
+        self
+    }
+
+    /// Get the current TTL configuration
+    ///
+    /// Returns a clone of the current TTL configuration.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal `RwLock` is poisoned (indicating a writer thread
+    /// panicked while holding the write lock).
+    #[must_use]
+    pub fn ttl_config(&self) -> crate::types::TtlConfig {
+        self.ttl_config.read().unwrap().clone()
+    }
+
+    /// Update the TTL configuration (M04-001)
+    ///
+    /// # Arguments
+    ///
+    /// * `ttl_config` - New TTL configuration
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal `RwLock` is poisoned (indicating a writer thread
+    /// panicked while holding the write lock).
+    pub fn set_ttl_config(&self, ttl_config: crate::types::TtlConfig) {
+        *self.ttl_config.write().unwrap() = ttl_config;
+    }
+
+    /// Perform lazy cleanup of expired checkpoints (M04-001)
+    ///
+    /// This method implements lazy cleanup as specified in design doc §5.7.
+    /// It removes expired checkpoints and enforces `max_checkpoints` limit.
+    /// Called automatically by `list()` and `get_tuple()` operations.
+    #[allow(
+        clippy::significant_drop_tightening,
+        reason = "lock scope is already optimized for minimal contention"
+    )]
+    async fn lazy_cleanup(
+        &self,
+        thread_id: &str,
+        checkpoint_ns: &str,
+    ) -> Result<(), CheckpointError> {
+        let ttl_config = self.ttl_config.read().unwrap().clone();
+
+        // Reduce lock contention by limiting write lock scope
+        let (checkpoint_ids, expired_count) = {
+            let mut storage = self.storage.write().await;
+
+            let thread_map = storage
+                .entry(thread_id.to_string())
+                .or_insert_with(HashMap::new);
+            let checkpoints = thread_map
+                .entry(checkpoint_ns.to_string())
+                .or_insert_with(Vec::new);
+
+            // Remove expired checkpoints (lazy cleanup per design §5.7)
+            let original_len = checkpoints.len();
+            checkpoints.retain(|tuple| !ttl_config.is_expired(&tuple.checkpoint.created_at));
+            let expired_count = original_len - checkpoints.len();
+
+            // Enforce max_checkpoints limit (delete oldest)
+            let Some(max) = ttl_config.max_checkpoints else {
+                return Ok(());
+            };
+
+            if checkpoints.len() > max {
+                let excess = checkpoints.len() - max;
+                checkpoints.truncate(max);
+                tracing::debug!("Deleted {excess} oldest checkpoints (max_checkpoints={max})");
+            }
+
+            // Collect checkpoint IDs for writes cleanup
+            let checkpoint_ids: std::collections::HashSet<String> = checkpoints
+                .iter()
+                .map(|t| t.checkpoint.id.clone())
+                .collect();
+
+            (checkpoint_ids, expired_count)
+        };
+
+        // Clean up writes for deleted checkpoints outside storage lock
+        if expired_count > 0 {
+            let mut writes = self.writes.write().await;
+
+            // Remove writes for checkpoints that no longer exist
+            writes.retain(|(thread, ns, id), _| {
+                thread == thread_id && ns == checkpoint_ns && checkpoint_ids.contains(id)
+            });
+        }
+
+        Ok(())
     }
 
     /// Get checkpoint namespace string from config, defaulting to empty string
@@ -120,6 +227,11 @@ impl CheckpointSaver for MemorySaver {
         let thread_id = Self::get_thread_id(config).map_checkpoint()?;
         let checkpoint_ns = Self::get_checkpoint_ns(config);
 
+        // Perform lazy cleanup before retrieving checkpoint (M04-001)
+        Self::lazy_cleanup(self, &thread_id, &checkpoint_ns)
+            .await
+            .map_checkpoint()?;
+
         // Clone the checkpoint data we need while holding the lock briefly
         let storage = self.storage.read().await;
         let checkpoint_data = storage
@@ -164,6 +276,11 @@ impl CheckpointSaver for MemorySaver {
     ) -> Result<Vec<CheckpointTuple>, CoreCheckpointError> {
         let thread_id = Self::get_thread_id(config).map_checkpoint()?;
         let checkpoint_ns = Self::get_checkpoint_ns(config);
+
+        // Perform lazy cleanup before listing checkpoints (M04-001)
+        Self::lazy_cleanup(self, &thread_id, &checkpoint_ns)
+            .await
+            .map_checkpoint()?;
 
         let namespace = {
             let storage = self.storage.read().await;
@@ -587,6 +704,72 @@ mod tests {
         assert!(result.is_some());
         assert_eq!(result.unwrap().checkpoint.id, "cp1");
     }
+
+    #[tokio::test]
+    async fn test_memory_saver_ttl_expiration() {
+        use crate::types::TtlConfig;
+        use std::time::Duration;
+
+        let saver = MemorySaver::new().with_ttl_config(TtlConfig {
+            default_ttl: Some(Duration::from_millis(100)), // Very short TTL for testing
+            sweep_interval: Duration::from_secs(3600),
+            max_checkpoints: None,
+        });
+
+        let config = create_test_config("thread1");
+
+        // Add checkpoints
+        for i in 0..3 {
+            let checkpoint = create_test_checkpoint(&format!("cp{i}"), i);
+            let metadata = create_test_metadata(CheckpointSource::Loop, i);
+            saver.put(&config, checkpoint, metadata).await.unwrap();
+        }
+
+        // Should have 3 checkpoints initially
+        let list = saver.list(&config, None).await.unwrap();
+        assert_eq!(list.len(), 3);
+
+        // Wait for TTL to expire
+        tokio::time::sleep(Duration::from_millis(150)).await;
+
+        // Trigger lazy cleanup via get_tuple (M04-001)
+        let result = saver.get_tuple(&config).await.unwrap();
+
+        // All checkpoints should be expired and cleaned up
+        assert!(result.is_none());
+
+        // List should also be empty after lazy cleanup
+        let list = saver.list(&config, None).await.unwrap();
+        assert_eq!(list.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_memory_saver_max_checkpoints() {
+        use crate::types::TtlConfig;
+
+        let saver = MemorySaver::new().with_ttl_config(TtlConfig {
+            default_ttl: None,
+            sweep_interval: std::time::Duration::from_secs(3600),
+            max_checkpoints: Some(2), // Keep only 2 most recent
+        });
+
+        let config = create_test_config("thread1");
+
+        // Add 5 checkpoints
+        for i in 0..5 {
+            let checkpoint = create_test_checkpoint(&format!("cp{i}"), i);
+            let metadata = create_test_metadata(CheckpointSource::Loop, i);
+            saver.put(&config, checkpoint, metadata).await.unwrap();
+        }
+
+        // Trigger lazy cleanup via list (M04-001)
+        let list = saver.list(&config, None).await.unwrap();
+
+        // Should only keep 2 most recent (cp3, cp4)
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0].checkpoint.id, "cp4"); // Most recent
+        assert_eq!(list[1].checkpoint.id, "cp3"); // Second most recent
+    }
 }
 
-// Rust guideline compliant 2026-05-19
+// Rust guideline compliant 2026-05-23

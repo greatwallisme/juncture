@@ -305,31 +305,27 @@ impl<S: State> CowState<S> {
 
     /// 获取可变状态（写时复制）
     ///
-    /// 首次调用时会克隆 shared Arc，后续调用重用本地副本。
-    ///
-    /// > **Implementation Note (C-01-3)**: The actual implementation replaces the `todo!()` placeholders
-    /// > with production-ready `Arc::make_mut()` for proper clone-on-write semantics. Only the first
-    /// > mutation triggers a clone; subsequent mutations reuse the local copy. See `trait_.rs:100-173`.
-    /// > Includes fully implemented methods: `get()`, `get_mut()`, `update()`, `commit()`, `try_commit()`
-    /// > with proper Arc::make_mut() semantics for zero-copy cloning and safe mutation.
+    /// 使用 `Arc::make_mut()` 实现写时复制。首次修改时克隆共享 Arc，
+    /// 后续修改重用本地副本。返回本地副本的可变引用。
     pub fn get_mut(&mut self) -> &mut S {
         if self.pending.is_none() {
-            // 首次修改：克隆共享状态
-            let local = (*self.shared).clone();
+            // 首次修改：通过 Arc::make_mut 克隆共享状态
+            let local = Arc::make_mut(&mut self.shared);
             self.pending = Some(S::Update::default());
+            local
+        } else {
+            Arc::make_mut(&mut self.shared)
         }
-        todo!("return mutable reference to local copy")
     }
 
     /// 应用更新（延迟执行）
     ///
-    /// > **Implementation Note (C-01-3)**: `update()` merges changes into the pending update struct
-    /// > and applies them via `S::apply()` when `commit()` is called, using `Arc::make_mut()` to
-    /// > ensure copy-on-write semantics without unnecessary clones.
+    /// 将变更合并到 pending update 结构体，在 `commit()` 时通过
+    /// `S::apply()` 应用到状态，使用 `Arc::make_mut()` 保证写时复制。
     pub fn update(&mut self, changes: S::Update) {
         if let Some(ref mut pending) = self.pending {
             // 合并到待处理的更新
-            todo!("merge changes into pending update");
+            pending.merge(changes);
         } else {
             self.pending = Some(changes);
         }
@@ -639,14 +635,20 @@ impl ::juncture_core::State for AgentState {
     }
 
     fn field_versions(&self) -> &AgentStateFieldVersions {
-        // 存储在内部（实际实现中 field_versions 可能存储在 PregelLoop 中
-        // 而非 State 本身，此处为概念展示）
-        todo!("field_versions stored in PregelLoop context")
+        // 由 PregelLoop 在每次 superstep 完成时更新，
+        // State 持有版本映射的引用
+        &self.field_versions
     }
 
     fn bump_versions(&mut self, changed: &FieldsChanged) {
-        // 由 PregelLoop 在外部管理版本号递增
-        todo!("managed externally by PregelLoop")
+        // 对 changed 中每个设置的 bit，递增对应字段的版本号
+        for i in 0..64 {
+            if changed.0 & (1u64 << i) != 0 {
+                if let Some(v) = self.field_versions.get_mut(i) {
+                    *v += 1;
+                }
+            }
+        }
     }
 
     fn schema_version() -> u32 { 2 }

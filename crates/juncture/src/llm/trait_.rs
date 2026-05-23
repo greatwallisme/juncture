@@ -95,7 +95,7 @@ pub enum LlmError {
     ///
     /// Catch-all for errors not covered by specific variants.
     #[error("LLM error: {0}")]
-    Other(String),
+    Other(#[source] Box<dyn std::error::Error + Send + Sync>),
 }
 
 /// Tool choice strategy for function calling.

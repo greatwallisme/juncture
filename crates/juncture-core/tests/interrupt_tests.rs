@@ -56,6 +56,7 @@ fn test_interrupt_context_send_signal() {
         index: 0,
         id: Some("test_id".to_string()),
         payload: json!("test_payload"),
+        timestamp: chrono::Utc::now(),
     };
 
     ctx.send_interrupt(signal).unwrap();

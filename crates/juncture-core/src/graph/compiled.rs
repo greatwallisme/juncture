@@ -368,7 +368,10 @@ impl<S: State, I: IntoState<S>, O: FromState<S>> CompiledGraph<S, I, O> {
 
         // Wire up budget tracking when budget limits are configured
         if let Some(budget_config) = &pregel.runnable_config.budget {
-            pregel.set_budget_tracker(BudgetTracker::new(budget_config.clone()));
+            let metrics_collector = pregel.runnable_config.metrics_collector.clone();
+            pregel.set_budget_tracker(
+                BudgetTracker::new(budget_config.clone()).with_metrics_collector(metrics_collector),
+            );
         }
 
         // Create the graph.invoke span that wraps the entire execution
@@ -383,11 +386,40 @@ impl<S: State, I: IntoState<S>, O: FromState<S>> CompiledGraph<S, I, O> {
         async move {
             let graph_start = std::time::Instant::now();
 
-            // Execute the loop
-            while pregel.tick()? {
-                let result = pregel.execute_superstep().await?;
-                pregel.after_tick(result).await?;
+            // Emit graph invocation counter metric
+            if let Some(ref collector) = config.metrics_collector {
+                collector.inc_counter("juncture.graph.invocations", 1);
+
+                // Increment active invocations gauge
+                collector.inc_counter("juncture.graph.active_invocations", 1);
             }
+
+            // Execute the loop
+            let execution_result = async {
+                while pregel.tick()? {
+                    let result = pregel.execute_superstep().await?;
+                    pregel.after_tick(result).await?;
+                }
+                Ok::<(), JunctureError>(())
+            }
+            .await;
+
+            // Decrement active invocations gauge (always, regardless of success/failure)
+            if let Some(ref collector) = config.metrics_collector {
+                collector.inc_counter("juncture.graph.active_invocations", u64::MAX - 1);
+            }
+
+            // Handle execution errors
+            let execution_result = match execution_result {
+                Ok(()) => Ok(()),
+                Err(e) => {
+                    // Emit graph error counter metric
+                    if let Some(ref collector) = config.metrics_collector {
+                        collector.inc_counter("juncture.graph.errors", 1);
+                    }
+                    Err(e)
+                }
+            };
 
             // Extract step and run_id before consuming pregel
             let steps = pregel.step();
@@ -408,6 +440,8 @@ impl<S: State, I: IntoState<S>, O: FromState<S>> CompiledGraph<S, I, O> {
                     graph_start.elapsed().as_millis() as f64,
                 );
             }
+
+            execution_result?;
 
             Ok(GraphOutput {
                 value: final_state,
@@ -611,7 +645,10 @@ impl<S: State, I: IntoState<S>, O: FromState<S>> CompiledGraph<S, I, O> {
 
         // Wire up budget tracking when budget limits are configured
         if let Some(budget_config) = &pregel.runnable_config.budget {
-            pregel.set_budget_tracker(BudgetTracker::new(budget_config.clone()));
+            let metrics_collector = pregel.runnable_config.metrics_collector.clone();
+            pregel.set_budget_tracker(
+                BudgetTracker::new(budget_config.clone()).with_metrics_collector(metrics_collector),
+            );
         }
 
         // Extract run_id before moving pregel into the spawned task
@@ -866,7 +903,10 @@ impl<S: State, I: IntoState<S>, O: FromState<S>> CompiledGraph<S, I, O> {
 
         // Wire up budget tracking when budget limits are configured
         if let Some(budget_config) = &pregel.runnable_config.budget {
-            pregel.set_budget_tracker(BudgetTracker::new(budget_config.clone()));
+            let metrics_collector = pregel.runnable_config.metrics_collector.clone();
+            pregel.set_budget_tracker(
+                BudgetTracker::new(budget_config.clone()).with_metrics_collector(metrics_collector),
+            );
         }
 
         if let Some(cp) = self.inner.checkpointer.clone() {
@@ -1042,7 +1082,10 @@ impl<S: State, I: IntoState<S>, O: FromState<S>> CompiledGraph<S, I, O> {
 
         // Wire up budget tracking when budget limits are configured
         if let Some(budget_config) = &pregel.runnable_config.budget {
-            pregel.set_budget_tracker(BudgetTracker::new(budget_config.clone()));
+            let metrics_collector = pregel.runnable_config.metrics_collector.clone();
+            pregel.set_budget_tracker(
+                BudgetTracker::new(budget_config.clone()).with_metrics_collector(metrics_collector),
+            );
         }
 
         // Set checkpointer
@@ -1247,7 +1290,10 @@ impl<S: State, I: IntoState<S>, O: FromState<S>> CompiledGraph<S, I, O> {
 
         // Wire up budget tracking when budget limits are configured
         if let Some(budget_config) = &pregel.runnable_config.budget {
-            pregel.set_budget_tracker(BudgetTracker::new(budget_config.clone()));
+            let metrics_collector = pregel.runnable_config.metrics_collector.clone();
+            pregel.set_budget_tracker(
+                BudgetTracker::new(budget_config.clone()).with_metrics_collector(metrics_collector),
+            );
         }
 
         // Set checkpointer on the Pregel loop

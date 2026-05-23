@@ -11,6 +11,11 @@ use crate::llm::{
     ToolDefinition,
 };
 
+/// Mock error for testing error scenarios
+#[derive(Debug, thiserror::Error)]
+#[error("Mock error")]
+struct MockError;
+
 /// Mock LLM provider for testing.
 ///
 /// Returns pre-configured responses without making actual API calls.
@@ -152,7 +157,7 @@ impl ChatModel for MockChatModel {
         _options: Option<&CallOptions>,
     ) -> Result<Message, LlmError> {
         if self.should_error {
-            return Err(LlmError::Other("Mock error".to_string()));
+            return Err(LlmError::Other(Box::new(MockError)));
         }
 
         let content = self.response.clone().unwrap_or_default();
@@ -168,7 +173,7 @@ impl ChatModel for MockChatModel {
         _options: Option<&CallOptions>,
     ) -> BoxStream<'_, Result<MessageChunk, LlmError>> {
         if self.should_error {
-            let error = LlmError::Other("Mock error".to_string());
+            let error = LlmError::Other(Box::new(MockError));
             return Box::pin(stream::once(async move { Err(error) }));
         }
 

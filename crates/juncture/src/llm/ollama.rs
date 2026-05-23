@@ -225,6 +225,11 @@ impl ChatModel for ChatOllama {
             model = %model,
         );
 
+        // Report LLM call and duration metrics
+        let duration_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let _ = juncture_core::pregel::try_report_llm_call();
+        let _ = juncture_core::pregel::try_report_llm_duration(duration_ms);
+
         Ok(Message::ai_with_tool_calls(
             api_response.message.content,
             Vec::new(),

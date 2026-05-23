@@ -63,7 +63,7 @@ pub enum LlmError {
 
     /// Other errors
     #[error("llm error: {0}")]
-    Other(String),
+    Other(#[source] Box<dyn std::error::Error + Send + Sync>),
 }
 
 /// Options for LLM invocations

@@ -5,8 +5,8 @@
 | Finding ID | Description | File | Section | Change Made |
 |------------|-------------|------|---------|-------------|
 | R-A4-1 | CowState as default | 01-state-channel.md | State Trait | Added CowState<S> wrapper as default State type with Arc-based copy-on-write |
-| H-1 | Vector search in Store | 10-store.md | TBD | Not yet addressed |
-| H-2 | Complete FilterExpr | 10-store.md | TBD | Not yet addressed |
+| H-1 | Vector search in Store | 10-store.md | §3 | REQUIRED - must implement for all backends |
+| H-2 | Complete FilterExpr | 10-store.md | §4 | REQUIRED - all operators must work |
 | H-3 | CachePolicy struct | 02-graph-builder.md | RunnableConfig | Added CachePolicy struct with custom key generation support |
 | H-4 | Cache field to RunnableConfig | 02-graph-builder.md | RunnableConfig | Added cache: Option<CacheConfig> field to RunnableConfig |
 | H-5 | Bounded concurrency | 03-pregel-engine.md | execute_superstep | Added max_parallel_tasks parameter with Semaphore-based limiting |
@@ -24,22 +24,22 @@
 | R-A1-1 | Const generics for field count | 01-state-channel.md | FieldsChanged | Added const generics validation for <64 fields at compile time |
 | M-1 | AnyValue channel type | 01-state-channel.md | Reducer trait | Added AnyValueReducer for equal-values assumption |
 | M-2 | Verify checkpoint_ns | 02-graph-builder.md | RunnableConfig | Added checkpoint_ns: Option<String> field |
-| M-3 | Tool call interceptor | 08-llm-tools.md | TBD | Not yet addressed |
-| M-4 | Verify structured output | 08-llm-tools.md | TBD | Not yet addressed |
-| M-5 | Verify lifecycle hooks | 09-observability.md | TBD | Not yet addressed |
+| M-3 | Tool call interceptor | 08-llm-tools.md | §5 | REQUIRED |
+| M-4 | Verify structured output | 08-llm-tools.md | §4 | REQUIRED |
+| M-5 | Verify lifecycle hooks | 09-observability.md | §3 | REQUIRED |
 | M-6 | SyncAsyncFuture handling | 03-pregel-engine.md | Functional API | Added SyncAsyncFuture section with async result handling |
 | M-7 | Previous result injection | 03-pregel-engine.md | Functional API | Added previous result injection section for entrypoint |
-| M-8 | SubgraphTransformer | 07-subgraph.md | TBD | Not yet addressed |
-| M-9 | Explicit metrics API | 09-observability.md | TBD | Not yet addressed |
+| M-8 | SubgraphTransformer | 07-subgraph.md | §4 | REQUIRED |
+| M-9 | Explicit metrics API | 09-observability.md | §5 | REQUIRED |
 | M-10 | add_sequence convenience method | 02-graph-builder.md | StateGraph | Added add_sequence() method for linear chains |
-| M-11 | TTL/auto-expiration in Store | 10-store.md | TBD | Not yet addressed |
-| M-12 | Batch operations in Store | 10-store.md | TBD | Not yet addressed |
-| M-13 | list_namespaces in Store | 10-store.md | TBD | Not yet addressed |
+| M-11 | TTL/auto-expiration in Store | 10-store.md | §9 | REQUIRED |
+| M-12 | Batch operations in Store | 10-store.md | §5 | REQUIRED |
+| M-13 | list_namespaces in Store | 10-store.md | §2 | REQUIRED |
 | M-14 | ToolCallTransformer | 01-state-channel.md | AfterFinish | Added ToolCallTransformer documentation |
 | M-15 | ErrorKind is_xxx() methods | 03-pregel-engine.md | ErrorCode | Added is_xxx() methods to JunctureError |
 | M-16 | run_name explicit field | 02-graph-builder.md | RunnableConfig | Added run_name: Option<String> field |
 | M-17 | JsonPlusSerializer details | 04-checkpoint.md | Serialization | Added JsonPlusSerializer section with enhanced JSON features |
-| M-18 | InjectedState for tools | 08-llm-tools.md | TBD | Not yet addressed |
+| M-18 | InjectedState for tools | 08-llm-tools.md | §3 | REQUIRED |
 
 ## LOW Priority
 
@@ -54,7 +54,7 @@
 | L-7 | Const generics for field count | 01-state-channel.md | FieldsChanged | Added compile-time field count validation |
 | L-8 | Schema customization | 02-graph-builder.md | StateGraph | Already documented with IntoState/FromState traits |
 | L-9 | validate_keys helper | 02-graph-builder.md | StateGraph | Added validate_keys() method |
-| L-10 | output_keys parameter | 05-streaming.md | TBD | Not yet addressed |
+| L-10 | output_keys parameter | 05-streaming.md | §2 | REQUIRED |
 
 ## Statistics
 

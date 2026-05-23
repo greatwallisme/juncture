@@ -1,7 +1,6 @@
 // Observability and cache key types
 //
-// This module provides cache key types for LLM response caching
-// and server metadata for observability features.
+// This module provides cache key types for LLM response caching.
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -122,75 +121,6 @@ impl CacheKeyInput {
         }
 
         hasher.finish()
-    }
-}
-
-/// Server deployment metadata for observability
-///
-/// Contains deployment information for multi-instance scenarios.
-#[derive(Debug, Clone, Default)]
-pub struct ServerInfo {
-    /// Assistant ID for multi-assistant deployments
-    pub assistant_id: Option<String>,
-    /// Graph ID
-    pub graph_id: Option<String>,
-    /// Current authenticated user
-    pub user: Option<String>,
-    /// Deployment environment identifier
-    pub deployment: Option<String>,
-    /// Service version
-    pub version: Option<String>,
-    /// Instance ID
-    pub instance_id: Option<String>,
-}
-
-impl ServerInfo {
-    /// Create new server info
-    #[must_use]
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Set assistant ID
-    #[must_use]
-    pub fn with_assistant_id(mut self, id: impl Into<String>) -> Self {
-        self.assistant_id = Some(id.into());
-        self
-    }
-
-    /// Set graph ID
-    #[must_use]
-    pub fn with_graph_id(mut self, id: impl Into<String>) -> Self {
-        self.graph_id = Some(id.into());
-        self
-    }
-
-    /// Set user
-    #[must_use]
-    pub fn with_user(mut self, user: impl Into<String>) -> Self {
-        self.user = Some(user.into());
-        self
-    }
-
-    /// Set deployment
-    #[must_use]
-    pub fn with_deployment(mut self, deployment: impl Into<String>) -> Self {
-        self.deployment = Some(deployment.into());
-        self
-    }
-
-    /// Set version
-    #[must_use]
-    pub fn with_version(mut self, version: impl Into<String>) -> Self {
-        self.version = Some(version.into());
-        self
-    }
-
-    /// Set instance ID
-    #[must_use]
-    pub fn with_instance_id(mut self, id: impl Into<String>) -> Self {
-        self.instance_id = Some(id.into());
-        self
     }
 }
 

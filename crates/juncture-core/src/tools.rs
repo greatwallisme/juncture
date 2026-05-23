@@ -80,6 +80,47 @@ pub trait Tool: Send + Sync + 'static {
     ///
     /// Tool output as string
     async fn invoke(&self, input: serde_json::Value) -> Result<String, ToolError>;
+
+    /// Check if this tool requires Store access
+    ///
+    /// Tools that need persistent cross-thread storage should return `true`.
+    /// The default implementation returns `false`.
+    ///
+    /// # Returns
+    ///
+    /// `true` if the tool requires Store access, `false` otherwise
+    #[must_use]
+    fn requires_store(&self) -> bool {
+        false
+    }
+
+    /// Execute the tool with Store access
+    ///
+    /// This method is called instead of `invoke()` when `requires_store()` returns `true`.
+    /// The default implementation delegates to `invoke()`, ignoring the Store parameter.
+    ///
+    /// # Arguments
+    ///
+    /// * `input` - Tool input as JSON value (validated against schema)
+    /// * `store` - Store for cross-thread persistent data access
+    ///
+    /// # Returns
+    ///
+    /// Tool output as string
+    fn invoke_with_store<'a>(
+        &'a self,
+        input: serde_json::Value,
+        _store: &'a dyn crate::store::Store,
+    ) -> BoxFuture<'a, Result<String, ToolError>>
+    where
+        Self: 'a,
+    {
+        // Default implementation delegates to invoke() and ignores the store
+        Box::pin(async move {
+            let result = self.invoke(input).await?;
+            Ok(result)
+        })
+    }
 }
 
 /// Tool runtime context injected into tool execution
@@ -100,6 +141,8 @@ pub struct ToolRuntime<S: State> {
     pub store: Option<Arc<dyn Store>>,
     /// Streaming sender for tool output deltas
     stream_tx: Option<tokio::sync::mpsc::UnboundedSender<serde_json::Value>>,
+    /// Optional sender for tool lifecycle streaming events
+    tools_event_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::stream::ToolsEvent>>,
 }
 
 impl<S: State> ToolRuntime<S> {
@@ -112,6 +155,7 @@ impl<S: State> ToolRuntime<S> {
     /// * `config` - Runtime configuration
     /// * `store` - Optional cross-thread persistent store
     /// * `stream_tx` - Optional streaming sender for output deltas
+    /// * `tools_event_tx` - Optional streaming sender for tool lifecycle events
     #[must_use]
     pub const fn new(
         state: S,
@@ -119,6 +163,7 @@ impl<S: State> ToolRuntime<S> {
         config: RunnableConfig,
         store: Option<Arc<dyn Store>>,
         stream_tx: Option<tokio::sync::mpsc::UnboundedSender<serde_json::Value>>,
+        tools_event_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::stream::ToolsEvent>>,
     ) -> Self {
         Self {
             state,
@@ -126,6 +171,7 @@ impl<S: State> ToolRuntime<S> {
             config,
             store,
             stream_tx,
+            tools_event_tx,
         }
     }
 
@@ -143,6 +189,51 @@ impl<S: State> ToolRuntime<S> {
                 "delta": delta,
                 "tool_call_id": self.tool_call_id
             }));
+        }
+    }
+
+    /// Emit tool started lifecycle event
+    ///
+    /// Sends a [`ToolsEvent::ToolStarted`] through the tools event channel
+    /// when one is configured. If no channel is available, this is a no-op.
+    ///
+    /// # Arguments
+    ///
+    /// * `tool_name` - Name of the tool being started
+    /// * `node` - Node name where the tool is executing
+    /// * `input` - Tool input as JSON value
+    pub fn emit_tool_started(&self, tool_name: &str, node: &str, input: serde_json::Value) {
+        if let Some(ref tx) = self.tools_event_tx {
+            let event = crate::stream::ToolsEvent::ToolStarted {
+                tool_name: tool_name.to_string(),
+                tool_call_id: self.tool_call_id.clone(),
+                node: node.to_string(),
+                input,
+                timestamp: chrono::Utc::now(),
+            };
+            let _ = tx.send(event);
+        }
+    }
+
+    /// Emit tool finished lifecycle event
+    ///
+    /// Sends a [`ToolsEvent::ToolFinished`] through the tools event channel
+    /// when one is configured. If no channel is available, this is a no-op.
+    ///
+    /// # Arguments
+    ///
+    /// * `output` - Tool output as JSON value
+    /// * `duration_ms` - Execution duration in milliseconds
+    /// * `success` - Whether the tool execution succeeded
+    pub fn emit_tool_finished(&self, output: serde_json::Value, duration_ms: u64, success: bool) {
+        if let Some(ref tx) = self.tools_event_tx {
+            let event = crate::stream::ToolsEvent::ToolFinished {
+                tool_call_id: self.tool_call_id.clone(),
+                output,
+                duration_ms,
+                success,
+            };
+            let _ = tx.send(event);
         }
     }
 }
@@ -171,7 +262,10 @@ pub trait StatefulTool<S: State>: Tool {
         runtime: &ToolRuntime<S>,
     ) -> BoxFuture<'_, Result<String, ToolError>>;
 
-    /// Execute with store access
+    /// Override `invoke_with_store` to use state access when available
+    ///
+    /// This default implementation calls the base Tool trait's `invoke_with_store`.
+    /// Tools that need both state and store access can override this method.
     ///
     /// # Arguments
     ///
@@ -181,11 +275,17 @@ pub trait StatefulTool<S: State>: Tool {
     /// # Returns
     ///
     /// Tool output as string
-    fn invoke_with_store(
-        &self,
+    fn invoke_with_store<'a>(
+        &'a self,
         input: serde_json::Value,
-        store: &dyn Store,
-    ) -> BoxFuture<'_, Result<String, ToolError>>;
+        store: &'a dyn crate::store::Store,
+    ) -> BoxFuture<'a, Result<String, ToolError>>
+    where
+        Self: 'a,
+    {
+        // Delegate to the base Tool trait implementation
+        Tool::invoke_with_store(self, input, store)
+    }
 }
 
 /// Tool call interceptor trait

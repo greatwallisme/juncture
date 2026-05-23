@@ -678,6 +678,7 @@ mod tests {
     use super::*;
     use crate::node::{IntoNode, NodeFnCommand};
     use crate::state::FieldVersions;
+    use chrono::Utc;
 
     #[tokio::test]
     async fn test_execute_superstep_empty() {
@@ -897,11 +898,13 @@ mod tests {
                 index: 0,
                 id: Some("id-0".to_string()),
                 payload: serde_json::Value::Null,
+                timestamp: Utc::now(),
             },
             InterruptSignal {
                 index: 1,
                 id: Some("id-1".to_string()),
                 payload: serde_json::Value::Null,
+                timestamp: Utc::now(),
             },
         ];
         let result = match_resume_to_interrupts(&resume, &interrupts, &scratchpad);
@@ -929,11 +932,13 @@ mod tests {
                 index: 0,
                 id: Some("id-0".to_string()),
                 payload: serde_json::Value::Null,
+                timestamp: Utc::now(),
             },
             InterruptSignal {
                 index: 1,
                 id: Some("id-1".to_string()),
                 payload: serde_json::Value::Null,
+                timestamp: Utc::now(),
             },
         ];
         let result = match_resume_to_interrupts(&resume, &interrupts, &scratchpad);
@@ -959,11 +964,13 @@ mod tests {
                 index: 0,
                 id: Some("id-0".to_string()),
                 payload: serde_json::Value::Null,
+                timestamp: Utc::now(),
             },
             InterruptSignal {
                 index: 1,
                 id: Some("id-1".to_string()),
                 payload: serde_json::Value::Null,
+                timestamp: Utc::now(),
             },
         ];
         let result = match_resume_to_interrupts(&resume, &interrupts, &scratchpad);
@@ -986,11 +993,13 @@ mod tests {
                 index: 0,
                 id: Some("id-0".to_string()),
                 payload: serde_json::Value::Null,
+                timestamp: Utc::now(),
             },
             InterruptSignal {
                 index: 1,
                 id: Some("id-1".to_string()),
                 payload: serde_json::Value::Null,
+                timestamp: Utc::now(),
             },
         ];
         let result = match_resume_to_interrupts(&resume, &interrupts, &scratchpad);
@@ -1017,16 +1026,19 @@ mod tests {
                 index: 0,
                 id: Some("id-0".to_string()),
                 payload: serde_json::Value::Null,
+                timestamp: Utc::now(),
             },
             InterruptSignal {
                 index: 1,
                 id: Some("id-1".to_string()),
                 payload: serde_json::Value::Null,
+                timestamp: Utc::now(),
             },
             InterruptSignal {
                 index: 2,
                 id: Some("id-2".to_string()),
                 payload: serde_json::Value::Null,
+                timestamp: Utc::now(),
             },
         ];
         let result = match_resume_to_interrupts(&resume, &interrupts, &scratchpad);
@@ -1048,6 +1060,7 @@ mod tests {
         let resume = Some(ResumeValue::ById(map));
 
         let interrupts = vec![InterruptSignal {
+            timestamp: Utc::now(),
             index: 0,
             id: Some("id-0".to_string()),
             payload: serde_json::Value::Null,
@@ -1069,16 +1082,19 @@ mod tests {
                 index: 0,
                 id: Some("id-0".to_string()),
                 payload: serde_json::Value::Null,
+                timestamp: Utc::now(),
             },
             InterruptSignal {
                 index: 1,
                 id: Some("id-1".to_string()),
                 payload: serde_json::Value::Null,
+                timestamp: Utc::now(),
             },
             InterruptSignal {
                 index: 2,
                 id: Some("id-2".to_string()),
                 payload: serde_json::Value::Null,
+                timestamp: Utc::now(),
             },
         ];
         let result = match_resume_to_interrupts(&resume, &interrupts, &scratchpad);
@@ -1106,11 +1122,13 @@ mod tests {
                 index: 0,
                 id: Some("id-0".to_string()),
                 payload: serde_json::Value::Null,
+                timestamp: Utc::now(),
             },
             InterruptSignal {
                 index: 1,
                 id: Some("id-1".to_string()),
                 payload: serde_json::Value::Null,
+                timestamp: Utc::now(),
             },
         ];
         let result = match_resume_to_interrupts(&resume, &interrupts, &scratchpad);
@@ -1153,6 +1171,7 @@ mod tests {
             index: 0,
             id: None,
             payload: serde_json::Value::Null,
+            timestamp: Utc::now(),
         }];
         let result = match_resume_to_interrupts(&resume, &interrupts, &scratchpad);
         assert_eq!(result, vec![None]);

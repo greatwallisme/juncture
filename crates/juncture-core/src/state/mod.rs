@@ -4,8 +4,8 @@ pub mod trait_;
 
 pub use channel::{
     AnyValueReducer, AppendReducer, Channel, DeltaBlob, DeltaChannel, EphemeralChannel,
-    LastValueAfterFinishChannel, LastWriteWinsReducer, Overwrite, Reducer, RemoveMessage,
-    ReplaceReducer, UntrackedChannel,
+    LastValueAfterFinishChannel, LastWriteWinsReducer, NamedBarrierChannel, Overwrite, Reducer,
+    RemoveMessage, ReplaceReducer, TopicChannel, UntrackedChannel,
 };
 pub use messages::{
     Content, ContentPart, ImageData, ImageSource, Message, MessagesState, MessagesStateUpdate,

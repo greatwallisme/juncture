@@ -47,7 +47,6 @@
 //! ```
 
 pub mod callback;
-pub mod debug;
 pub mod spans;
 pub mod test_utils;
 pub mod types;
@@ -61,7 +60,6 @@ pub mod metrics;
 pub use callback::{
     CallbackHandlerAdapter, GraphCallbackHandler, GraphInterruptEvent, GraphResumeEvent,
 };
-pub use debug::DebugEvent;
 pub use test_utils::TestMetricsCollector;
 pub use types::{LlmCacheKeyInput, LlmCachePolicy, ServerInfo};
 
@@ -125,16 +123,6 @@ mod tests {
         // Calling init_tracing multiple times is safe (it will just fail silently)
         init_tracing();
         init_tracing();
-    }
-
-    #[test]
-    fn test_debug_event_reexport() {
-        // Verify DebugEvent is accessible from the root
-        let event = DebugEvent::GraphEnd {
-            total_steps: 0,
-            total_duration_ms: 0,
-        };
-        assert!(event.is_graph_end());
     }
 
     #[test]

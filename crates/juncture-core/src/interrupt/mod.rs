@@ -9,6 +9,8 @@ use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
 use xxhash_rust::xxh3::Xxh3;
 
+use chrono::{DateTime, Utc};
+
 pub use context::InterruptContext;
 
 // Task-local storage for the interrupt context during node execution.
@@ -33,6 +35,18 @@ pub struct InterruptSignal {
 
     /// Interrupt payload (human-readable context)
     pub payload: serde_json::Value,
+
+    /// Timestamp when the interrupt was created
+    #[serde(default = "InterruptSignal::current_timestamp")]
+    pub timestamp: DateTime<Utc>,
+}
+
+impl InterruptSignal {
+    /// Returns the current UTC timestamp as the default value for timestamp field
+    #[must_use]
+    fn current_timestamp() -> DateTime<Utc> {
+        Utc::now()
+    }
 }
 
 /// Value provided when resuming from an interrupt
@@ -74,6 +88,136 @@ impl From<Vec<serde_json::Value>> for ResumeValue {
                 .collect();
             Self::ByNamespace(map)
         }
+    }
+}
+
+/// Record of an interrupt event for audit trail purposes
+///
+/// Tracks the complete lifecycle of an interrupt from creation to resumption.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct InterruptRecord {
+    /// Unique identifier for this interrupt
+    pub id: String,
+
+    /// Node name where the interrupt occurred
+    pub node: String,
+
+    /// Payload associated with the interrupt
+    pub payload: serde_json::Value,
+
+    /// Timestamp when the interrupt was created
+    pub timestamp: DateTime<Utc>,
+
+    /// Timestamp when the interrupt was resumed (None if still pending)
+    pub resumed_at: Option<DateTime<Utc>>,
+
+    /// Value provided when resuming (None if still pending)
+    pub resume_value: Option<serde_json::Value>,
+}
+
+/// Extract the namespace from an interrupt ID
+///
+/// Interrupt IDs follow the format `node_name#index` or `namespace:node_name#index`.
+/// This function extracts the namespace portion if it exists.
+///
+/// # Arguments
+///
+/// * `interrupt_id` - The interrupt ID string to parse
+///
+/// # Returns
+///
+/// * `Some(namespace)` - if the ID contains a namespace prefix
+/// * `None` - if the ID does not contain a namespace prefix
+///
+/// # Examples
+///
+/// ```
+/// use juncture_core::interrupt::extract_namespace;
+///
+/// assert_eq!(extract_namespace("agent:review#0"), Some("agent"));
+/// assert_eq!(extract_namespace("node_name#index"), None);
+/// assert_eq!(extract_namespace("simple"), None);
+/// ```
+#[must_use]
+pub fn extract_namespace(interrupt_id: &str) -> Option<&str> {
+    // Check for namespace:node format
+    if let Some(colon_pos) = interrupt_id.find(':') {
+        // Ensure there's content before the colon
+        if colon_pos > 0 {
+            return Some(&interrupt_id[..colon_pos]);
+        }
+    }
+    None
+}
+
+/// Validate that resume values cover all pending interrupts
+///
+/// Ensures that each pending interrupt has a corresponding resume value
+/// provided. Returns an error with a list of uncovered interrupt IDs if
+/// any are missing.
+///
+/// # Arguments
+///
+/// * `pending` - Slice of pending interrupt signals
+/// * `resume_values` - Map of interrupt IDs to their resume values
+///
+/// # Returns
+///
+/// * `Ok(())` - All pending interrupts have resume values
+/// * `Err(Vec<String>)` - List of interrupt IDs without resume values
+///
+/// # Errors
+///
+/// Returns an error with a list of interrupt IDs that don't have
+/// corresponding resume values if any pending interrupts are uncovered.
+///
+/// # Examples
+///
+/// ```
+/// use juncture_core::interrupt::{validate_resume_coverage, InterruptSignal};
+/// use serde_json::json;
+/// use std::collections::HashMap;
+/// use chrono::Utc;
+///
+/// let pending = vec![
+///     InterruptSignal {
+///         index: 0,
+///         id: Some("int-1".to_string()),
+///         payload: json!({}),
+///         timestamp: Utc::now(),
+///     }
+/// ];
+/// let mut resume_values = HashMap::new();
+/// resume_values.insert("int-1".to_string(), json!("value"));
+///
+/// assert!(validate_resume_coverage(&pending, &resume_values).is_ok());
+/// ```
+#[expect(
+    clippy::implicit_hasher,
+    reason = "accepting standard HashMap is fine for this use case"
+)]
+#[expect(
+    clippy::collapsible_if,
+    reason = "nested if is more readable for checking conditions in sequence"
+)]
+pub fn validate_resume_coverage(
+    pending: &[InterruptSignal],
+    resume_values: &HashMap<String, serde_json::Value>,
+) -> Result<(), Vec<String>> {
+    let mut uncovered = Vec::new();
+
+    for signal in pending {
+        if let Some(ref id) = signal.id {
+            if !resume_values.contains_key(id) {
+                uncovered.push(id.clone());
+            }
+        }
+    }
+
+    if uncovered.is_empty() {
+        Ok(())
+    } else {
+        Err(uncovered)
     }
 }
 
@@ -205,6 +349,7 @@ pub fn should_interrupt<S: crate::State>(
         }
 
         if interrupt_before.contains(node_name) {
+            let timestamp = Utc::now();
             signals.push(InterruptSignal {
                 index: signals.len(),
                 id: Some(generate_interrupt_id(node_name, signals.len())),
@@ -212,10 +357,12 @@ pub fn should_interrupt<S: crate::State>(
                     "node": node_name,
                     "reason": "interrupt_before",
                 }),
+                timestamp,
             });
         }
 
         if interrupt_after.contains(node_name) {
+            let timestamp = Utc::now();
             signals.push(InterruptSignal {
                 index: signals.len(),
                 id: Some(generate_interrupt_id(node_name, signals.len())),
@@ -223,6 +370,7 @@ pub fn should_interrupt<S: crate::State>(
                     "node": node_name,
                     "reason": "interrupt_after",
                 }),
+                timestamp,
             });
         }
     }
@@ -277,6 +425,7 @@ pub async fn __interrupt_impl(
         index,
         id: Some(interrupt_id),
         payload,
+        timestamp: Utc::now(),
     })
     .map_err(|_err| crate::JunctureError::execution("interrupt channel closed"))?;
 
@@ -285,8 +434,8 @@ pub async fn __interrupt_impl(
 
 /// Scratchpad for interrupt handling and transient data storage
 ///
-/// Used by the HITL system to track processed interrupts and store
-/// transient data during interrupt handling.
+/// Used by the HITL system to track processed interrupts, maintain
+/// an audit trail, and store transient data during interrupt handling.
 #[derive(Clone, Debug, Default)]
 pub struct Scratchpad {
     /// Set of interrupt IDs that have been processed
@@ -294,6 +443,9 @@ pub struct Scratchpad {
 
     /// Transient data storage for interrupt handling
     data: HashMap<String, serde_json::Value>,
+
+    /// Audit trail of all interrupts
+    interrupt_history: Vec<InterruptRecord>,
 }
 
 impl Scratchpad {
@@ -303,6 +455,7 @@ impl Scratchpad {
         Self {
             processed_interrupts: HashSet::new(),
             data: HashMap::new(),
+            interrupt_history: Vec::new(),
         }
     }
 
@@ -361,12 +514,72 @@ impl Scratchpad {
     pub fn set_data(&mut self, key: String, value: serde_json::Value) {
         self.data.insert(key, value);
     }
+
+    /// Record an interrupt event in the audit trail
+    ///
+    /// Creates a new record with the current timestamp and adds it to
+    /// the interrupt history.
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The interrupt ID
+    /// * `node` - The node name where the interrupt occurred
+    /// * `payload` - The interrupt payload
+    pub fn record_interrupt(&mut self, id: String, node: String, payload: serde_json::Value) {
+        let record = InterruptRecord {
+            id,
+            node,
+            payload,
+            timestamp: Utc::now(),
+            resumed_at: None,
+            resume_value: None,
+        };
+        self.interrupt_history.push(record);
+    }
+
+    /// Record that an interrupt was resumed
+    ///
+    /// Finds the interrupt record by ID and updates it with the resume
+    /// timestamp and value.
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The interrupt ID to mark as resumed
+    /// * `value` - The resume value provided
+    pub fn record_resume(&mut self, id: &str, value: serde_json::Value) {
+        if let Some(record) = self.interrupt_history.iter_mut().find(|r| r.id == id) {
+            record.resumed_at = Some(Utc::now());
+            record.resume_value = Some(value);
+        }
+    }
+
+    /// Get the complete interrupt history
+    ///
+    /// Returns all interrupt records in chronological order.
+    ///
+    /// # Returns
+    ///
+    /// A slice of all interrupt records
+    #[must_use]
+    pub fn interrupt_history(&self) -> &[InterruptRecord] {
+        &self.interrupt_history
+    }
+
+    /// Clear transient scratchpad entries
+    ///
+    /// Removes entries that are not persistent (entries not prefixed with
+    /// `null_resume:`). Persistent entries are preserved.
+    pub fn clear_transient(&mut self) {
+        self.data
+            .retain(|key, _value| key.starts_with("null_resume:"));
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{HIDDEN_TAG, Scratchpad, is_hidden_node, should_interrupt};
-    use std::collections::{HashMap, HashSet};
+    use super::*;
+
+    // --- Scratchpad tests ---
 
     #[test]
     fn scratchpad_get_null_resume() {
@@ -375,6 +588,215 @@ mod tests {
         pad.mark_interrupt_processed("int-1");
         assert!(pad.get_null_resume("int-1"));
         assert!(!pad.get_null_resume("int-2"));
+    }
+
+    #[test]
+    fn scratchpad_record_interrupt() {
+        let mut pad = Scratchpad::new();
+        pad.record_interrupt(
+            "int-1".to_string(),
+            "node_a".to_string(),
+            serde_json::json!({"reason": "test"}),
+        );
+
+        let history = pad.interrupt_history();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].id, "int-1");
+        assert_eq!(history[0].node, "node_a");
+        assert_eq!(history[0].payload["reason"], "test");
+        assert!(history[0].resumed_at.is_none());
+        assert!(history[0].resume_value.is_none());
+    }
+
+    #[test]
+    fn scratchpad_record_resume() {
+        let mut pad = Scratchpad::new();
+        pad.record_interrupt(
+            "int-1".to_string(),
+            "node_a".to_string(),
+            serde_json::json!({}),
+        );
+
+        pad.record_resume("int-1", serde_json::json!("approved"));
+
+        let history = pad.interrupt_history();
+        assert_eq!(history.len(), 1);
+        assert!(history[0].resumed_at.is_some());
+        assert_eq!(history[0].resume_value, Some(serde_json::json!("approved")));
+    }
+
+    #[test]
+    fn scratchpad_interrupt_history_order() {
+        let mut pad = Scratchpad::new();
+
+        pad.record_interrupt(
+            "int-1".to_string(),
+            "node_a".to_string(),
+            serde_json::json!({}),
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        pad.record_interrupt(
+            "int-2".to_string(),
+            "node_b".to_string(),
+            serde_json::json!({}),
+        );
+
+        let history = pad.interrupt_history();
+        assert_eq!(history.len(), 2);
+        assert!(history[0].timestamp < history[1].timestamp);
+    }
+
+    #[test]
+    fn scratchpad_clear_transient() {
+        let mut pad = Scratchpad::new();
+        pad.set_data("temp_key".to_string(), serde_json::json!("temp"));
+        pad.set_data(
+            "null_resume:persistent".to_string(),
+            serde_json::json!("keep"),
+        );
+
+        pad.clear_transient();
+
+        assert!(pad.get_data("temp_key").is_none());
+        assert_eq!(
+            pad.get_data("null_resume:persistent"),
+            Some(&serde_json::json!("keep"))
+        );
+    }
+
+    #[test]
+    fn scratchpad_clear_transient_empty() {
+        let mut pad = Scratchpad::new();
+        pad.clear_transient();
+        assert!(pad.data.is_empty());
+    }
+
+    #[test]
+    fn scratchpad_record_resume_nonexistent() {
+        let mut pad = Scratchpad::new();
+        // Recording resume for non-existent interrupt should be safe (no-op)
+        pad.record_resume("nonexistent", serde_json::json!("value"));
+        assert_eq!(pad.interrupt_history().len(), 0);
+    }
+
+    // --- extract_namespace tests ---
+
+    #[test]
+    fn extract_namespace_with_namespace() {
+        assert_eq!(extract_namespace("agent:review#0"), Some("agent"));
+        assert_eq!(extract_namespace("namespace:node#index"), Some("namespace"));
+    }
+
+    #[test]
+    fn extract_namespace_without_namespace() {
+        assert_eq!(extract_namespace("node_name#index"), None);
+        assert_eq!(extract_namespace("simple_id"), None);
+        assert_eq!(extract_namespace("no_colon"), None);
+    }
+
+    #[test]
+    fn extract_namespace_empty_namespace() {
+        assert_eq!(extract_namespace(":node#index"), None);
+        assert_eq!(extract_namespace(":only_colon"), None);
+    }
+
+    // --- validate_resume_coverage tests ---
+
+    #[test]
+    fn validate_resume_coverage_complete() {
+        let pending = vec![InterruptSignal {
+            index: 0,
+            id: Some("int-1".to_string()),
+            payload: serde_json::json!({}),
+            timestamp: Utc::now(),
+        }];
+
+        let mut resume_values = HashMap::new();
+        resume_values.insert("int-1".to_string(), serde_json::json!("value"));
+
+        validate_resume_coverage(&pending, &resume_values).unwrap();
+    }
+
+    #[test]
+    fn validate_resume_coverage_incomplete() {
+        let pending = vec![
+            InterruptSignal {
+                index: 0,
+                id: Some("int-1".to_string()),
+                payload: serde_json::json!({}),
+                timestamp: Utc::now(),
+            },
+            InterruptSignal {
+                index: 1,
+                id: Some("int-2".to_string()),
+                payload: serde_json::json!({}),
+                timestamp: Utc::now(),
+            },
+        ];
+
+        let mut resume_values = HashMap::new();
+        resume_values.insert("int-1".to_string(), serde_json::json!("value"));
+
+        let result = validate_resume_coverage(&pending, &resume_values);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), vec!["int-2".to_string()]);
+    }
+
+    #[test]
+    fn validate_resume_coverage_empty_pending() {
+        let pending = vec![];
+        let resume_values = HashMap::new();
+
+        validate_resume_coverage(&pending, &resume_values).unwrap();
+    }
+
+    #[test]
+    fn validate_resume_coverage_no_id() {
+        let pending = vec![InterruptSignal {
+            index: 0,
+            id: None,
+            payload: serde_json::json!({}),
+            timestamp: Utc::now(),
+        }];
+
+        let resume_values = HashMap::new();
+
+        // Interrupts without ID are skipped in validation
+        validate_resume_coverage(&pending, &resume_values).unwrap();
+    }
+
+    #[test]
+    fn validate_resume_coverage_multiple_uncovered() {
+        let pending = vec![
+            InterruptSignal {
+                index: 0,
+                id: Some("int-1".to_string()),
+                payload: serde_json::json!({}),
+                timestamp: Utc::now(),
+            },
+            InterruptSignal {
+                index: 1,
+                id: Some("int-2".to_string()),
+                payload: serde_json::json!({}),
+                timestamp: Utc::now(),
+            },
+            InterruptSignal {
+                index: 2,
+                id: Some("int-3".to_string()),
+                payload: serde_json::json!({}),
+                timestamp: Utc::now(),
+            },
+        ];
+
+        let resume_values = HashMap::new();
+
+        let result = validate_resume_coverage(&pending, &resume_values);
+        assert!(result.is_err());
+        let uncovered = result.unwrap_err();
+        assert_eq!(uncovered.len(), 3);
+        assert!(uncovered.contains(&"int-1".to_string()));
+        assert!(uncovered.contains(&"int-2".to_string()));
+        assert!(uncovered.contains(&"int-3".to_string()));
     }
 
     // --- is_hidden_node tests ---

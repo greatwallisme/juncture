@@ -372,7 +372,7 @@ impl Store for MemoryStore {
 
 向量为可选功能，通过 `feature = "vector"` 启用。
 
-> **Implementation Note (B-10-003):** SQL backends (SqliteStore, PostgresStore) do not yet support vector search. The `Item.embedding` field always returns `None` for SQL backends because no embedding column exists in the SQL schema. Only `MemoryStore` computes and returns embeddings. SQL vector search (pgvector) is deferred to P3 per the implementation roadmap.
+> **Requirement**: ALL Store backends (MemoryStore, SqliteStore, PostgresStore) MUST support vector search. SQL backends use the `store_vectors` table (§6.2.2) with pgvector for PostgreSQL and a compatible approach for SQLite. The `Item.embedding` field MUST return actual embeddings for all backends.
 
 ### 3.1 索引配置
 
@@ -762,7 +762,7 @@ CREATE TABLE store_items (
     PRIMARY KEY (namespace, key)
 );
 
--- 向量搜索（PostgreSQL + pgvector，P3 待实现）
+-- 向量搜索（PostgreSQL + pgvector）
 CREATE TABLE store_vectors (
     namespace TEXT NOT NULL,
     key       TEXT NOT NULL,
@@ -1117,14 +1117,14 @@ pub enum StoreError {
 | P0 | Item / SearchQuery / SearchResult 类型 | - |
 | P0 | MemoryStore 基础 CRUD | Store trait |
 | P0 | Runtime.store 注入 | Runtime (02-graph-builder.md) |
-| P1 | 层级命名空间匹配 | - |
-| P1 | 过滤操作符实现 | SearchQuery |
-| P1 | 批量操作 | Store trait |
-| P2 | 向量搜索 (feature = "vector") | EmbeddingFunc |
-| P2 | Tool InjectedStore | Tool trait (08-llm-tools.md) |
-| P3 | SqliteStore | sqlx |
-| P3 | PostgresStore + pgvector | sqlx, pgvector |
-| P3 | TTL 自动过期 | 定时清理任务 |
+| P0 | 层级命名空间匹配 | - |
+| P0 | 过滤操作符实现 | SearchQuery |
+| P0 | 批量操作 | Store trait |
+| P0 | 向量搜索 (feature = "vector") | EmbeddingFunc |
+| P0 | Tool InjectedStore | Tool trait (08-llm-tools.md) |
+| P0 | SqliteStore | sqlx |
+| P0 | PostgresStore + pgvector | sqlx, pgvector |
+| P0 | TTL 自动过期 | 定时清理任务 |
 
 ---
 

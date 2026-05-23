@@ -11,6 +11,11 @@ use futures::Stream;
 
 use crate::llm::{CallOptions, ChatModel, LlmError, Message, MessageChunk, ToolDefinition};
 
+/// Simple error type for retry-related errors
+#[derive(Debug, thiserror::Error)]
+#[error("Max retries exceeded with unknown error")]
+struct RetryExhaustedError;
+
 /// Wrapper that adds retry logic to any [`ChatModel`].
 ///
 /// Implements exponential backoff retry for transient errors like rate limiting
@@ -175,9 +180,7 @@ impl<M: ChatModel> ChatModel for RetryingModel<M> {
             }
         }
 
-        Err(last_error.unwrap_or_else(|| {
-            LlmError::Other("Max retries exceeded with unknown error".to_string())
-        }))
+        Err(last_error.unwrap_or_else(|| LlmError::Other(Box::new(RetryExhaustedError))))
     }
 
     fn stream(

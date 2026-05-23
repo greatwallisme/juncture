@@ -1,6 +1,5 @@
 use crate::state::State;
 use futures::StreamExt;
-use std::collections::HashMap;
 use std::sync::Mutex;
 
 /// Stream mode for graph execution
@@ -113,6 +112,14 @@ pub enum StreamEvent<S: State> {
     /// Graph execution completed
     End { output: S },
 
+    /// Graph execution was cancelled (e.g. by the caller dropping the stream).
+    ///
+    /// Emitted when the graph is interrupted before reaching a natural `End`.
+    /// Consumers use this to distinguish between successful completion
+    /// ([`End`](Self::End)), cancellation ([`Cancelled`](Self::Cancelled)),
+    /// and errors (propagated via `Result`).
+    Cancelled { step: usize },
+
     /// Debug event
     Debug(DebugEvent),
 
@@ -161,6 +168,7 @@ impl<S: State> StreamEvent<S> {
             | Self::TaskEnd { .. }
             | Self::BudgetExceeded { .. }
             | Self::End { .. }
+            | Self::Cancelled { .. }
             | Self::Debug(_)
             | Self::Tools(_)
             | Self::CheckpointSaved { .. }
@@ -233,6 +241,7 @@ pub enum ToolsEvent {
         tool_call_id: String,
         node: String,
         input: serde_json::Value,
+        timestamp: chrono::DateTime<chrono::Utc>,
     },
     ToolOutputDelta {
         tool_call_id: String,
@@ -242,6 +251,7 @@ pub enum ToolsEvent {
         tool_call_id: String,
         output: serde_json::Value,
         duration_ms: u64,
+        success: bool,
     },
     ToolError {
         tool_call_id: String,
@@ -265,61 +275,6 @@ pub enum TaskEventType {
     Completed { duration_ms: u64 },
     Failed { error: String },
     Retrying { attempt: usize },
-}
-
-/// A part of a stream with namespace and metadata
-#[derive(Clone)]
-pub struct StreamPart<S: State> {
-    pub ns: Vec<String>,
-    pub event: &'static str,
-    pub data: StreamEvent<S>,
-    pub metadata: Option<HashMap<String, serde_json::Value>>,
-}
-
-impl<S: State> std::fmt::Debug for StreamPart<S> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("StreamPart")
-            .field("ns", &self.ns)
-            .field("event", &self.event)
-            .field("data", &"<StreamEvent>")
-            .field("metadata", &self.metadata)
-            .finish()
-    }
-}
-
-/// A named channel for streaming events
-#[derive(Clone)]
-pub struct StreamChannel {
-    pub name: String,
-    tx: tokio::sync::mpsc::Sender<serde_json::Value>,
-}
-
-impl std::fmt::Debug for StreamChannel {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("StreamChannel")
-            .field("name", &self.name)
-            .field("tx", &"<mpsc::Sender>")
-            .finish()
-    }
-}
-
-impl StreamChannel {
-    #[must_use]
-    pub const fn new(name: String, tx: tokio::sync::mpsc::Sender<serde_json::Value>) -> Self {
-        Self { name, tx }
-    }
-
-    /// Send data through this channel
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the channel is closed
-    pub async fn send(
-        &self,
-        data: serde_json::Value,
-    ) -> Result<(), tokio::sync::mpsc::error::SendError<serde_json::Value>> {
-        self.tx.send(data).await
-    }
 }
 
 /// Transformer for stream data
@@ -1173,6 +1128,7 @@ mod tests {
             tool_call_id: "call_1".to_string(),
             node: "tools".to_string(),
             input: serde_json::json!({}),
+            timestamp: chrono::Utc::now(),
         });
         assert!(emitter.should_emit(&event));
     }
@@ -1196,6 +1152,7 @@ mod tests {
             tool_call_id: "call_1".to_string(),
             output: serde_json::json!({"result": "ok"}),
             duration_ms: 100,
+            success: true,
         });
         assert!(emitter.should_emit(&event));
     }

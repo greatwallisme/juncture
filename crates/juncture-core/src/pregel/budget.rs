@@ -137,7 +137,6 @@ impl BudgetConfig {
 /// Budget tracker for execution limits
 ///
 /// Tracks resource usage during execution and checks against configured limits.
-#[derive(Debug)]
 pub struct BudgetTracker {
     /// Tokens used (`AtomicU64` for thread-safe updates)
     tokens_used: AtomicU64,
@@ -153,6 +152,25 @@ pub struct BudgetTracker {
 
     /// Budget configuration
     config: BudgetConfig,
+
+    /// Optional metrics collector for emitting usage metrics
+    metrics_collector: Option<std::sync::Arc<dyn crate::observability::MetricsCollector>>,
+}
+
+impl std::fmt::Debug for BudgetTracker {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BudgetTracker")
+            .field("tokens_used", &self.tokens_used)
+            .field("cost_usd_micros", &self.cost_usd_micros)
+            .field("start_time", &self.start_time)
+            .field("steps_completed", &self.steps_completed)
+            .field("config", &self.config)
+            .field(
+                "metrics_collector",
+                &self.metrics_collector.as_ref().map(|_| "<Arc>"),
+            )
+            .finish()
+    }
 }
 
 impl BudgetTracker {
@@ -177,7 +195,18 @@ impl BudgetTracker {
             start_time: Instant::now(),
             steps_completed: AtomicUsize::new(0),
             config,
+            metrics_collector: None,
         }
+    }
+
+    /// Set the metrics collector for emitting usage metrics
+    #[must_use]
+    pub fn with_metrics_collector(
+        mut self,
+        collector: Option<std::sync::Arc<dyn crate::observability::MetricsCollector>>,
+    ) -> Self {
+        self.metrics_collector = collector;
+        self
     }
 
     /// Report token usage
@@ -193,6 +222,22 @@ impl BudgetTracker {
     /// ```
     pub fn report_tokens(&self, tokens: u64) {
         self.tokens_used.fetch_add(tokens, Ordering::Relaxed);
+
+        // Emit token input metric
+        if let Some(ref collector) = self.metrics_collector {
+            collector.inc_counter("juncture.llm.tokens.input", tokens);
+        }
+    }
+
+    /// Report token output (generated tokens)
+    ///
+    /// This is called separately to distinguish between input and output tokens
+    /// for metrics purposes.
+    pub fn report_output_tokens(&self, tokens: u64) {
+        // Emit token output metric
+        if let Some(ref collector) = self.metrics_collector {
+            collector.inc_counter("juncture.llm.tokens.output", tokens);
+        }
     }
 
     /// Report cost in USD
@@ -219,6 +264,11 @@ impl BudgetTracker {
         let cost_micros = (cost_usd * 1_000_000.0) as u64;
         self.cost_usd_micros
             .fetch_add(cost_micros, Ordering::Relaxed);
+
+        // Emit cost metric (convert to integer micro-units for counter)
+        if let Some(ref collector) = self.metrics_collector {
+            collector.inc_counter("juncture.llm.cost_usd", cost_micros);
+        }
     }
 
     /// Report a completed step
@@ -235,6 +285,59 @@ impl BudgetTracker {
     /// ```
     pub fn report_step(&self) {
         self.steps_completed.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Report an LLM call
+    ///
+    /// This should be called when an LLM invocation completes successfully.
+    pub fn report_llm_call(&self) {
+        if let Some(ref collector) = self.metrics_collector {
+            collector.inc_counter("juncture.llm.calls", 1);
+        }
+    }
+
+    /// Report LLM call duration in milliseconds
+    ///
+    /// This should be called when an LLM invocation completes.
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "milliseconds as f64 is sufficient for histogram metrics"
+    )]
+    pub fn report_llm_duration(&self, duration_ms: u64) {
+        if let Some(ref collector) = self.metrics_collector {
+            collector.record_histogram("juncture.llm.duration_ms", duration_ms as f64);
+        }
+    }
+
+    /// Report tool call
+    ///
+    /// This should be called when a tool invocation completes.
+    pub fn report_tool_call(&self) {
+        if let Some(ref collector) = self.metrics_collector {
+            collector.inc_counter("juncture.tool.calls", 1);
+        }
+    }
+
+    /// Report tool error
+    ///
+    /// This should be called when a tool invocation fails.
+    pub fn report_tool_error(&self) {
+        if let Some(ref collector) = self.metrics_collector {
+            collector.inc_counter("juncture.tool.errors", 1);
+        }
+    }
+
+    /// Report tool execution duration in milliseconds
+    ///
+    /// This should be called when a tool invocation completes.
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "milliseconds as f64 is sufficient for histogram metrics"
+    )]
+    pub fn report_tool_duration(&self, duration_ms: u64) {
+        if let Some(ref collector) = self.metrics_collector {
+            collector.record_histogram("juncture.tool.duration_ms", duration_ms as f64);
+        }
     }
 
     /// Report token and cost usage from a model call
@@ -463,6 +566,82 @@ pub fn try_report_model_call(
     BUDGET_TRACKER
         .try_with(|tracker| {
             tracker.report_model_call(input_tokens, output_tokens);
+        })
+        .map_err(|_err| BudgetReportError::NoTracker)
+}
+
+/// Report an LLM call completion (for metrics)
+///
+/// This function reports that an LLM call completed successfully,
+/// incrementing the call counter metric.
+///
+/// # Errors
+///
+/// Returns `BudgetReportError::NoTracker` if called outside of a graph execution context.
+pub fn try_report_llm_call() -> Result<(), BudgetReportError> {
+    BUDGET_TRACKER
+        .try_with(|tracker| {
+            tracker.report_llm_call();
+        })
+        .map_err(|_err| BudgetReportError::NoTracker)
+}
+
+/// Report LLM call duration in milliseconds (for metrics)
+///
+/// This function records the duration of an LLM call in a histogram metric.
+///
+/// # Errors
+///
+/// Returns `BudgetReportError::NoTracker` if called outside of a graph execution context.
+pub fn try_report_llm_duration(duration_ms: u64) -> Result<(), BudgetReportError> {
+    BUDGET_TRACKER
+        .try_with(|tracker| {
+            tracker.report_llm_duration(duration_ms);
+        })
+        .map_err(|_err| BudgetReportError::NoTracker)
+}
+
+/// Report a tool call (for metrics)
+///
+/// This function reports that a tool was invoked, incrementing the call counter.
+///
+/// # Errors
+///
+/// Returns `BudgetReportError::NoTracker` if called outside of a graph execution context.
+pub fn try_report_tool_call() -> Result<(), BudgetReportError> {
+    BUDGET_TRACKER
+        .try_with(|tracker| {
+            tracker.report_tool_call();
+        })
+        .map_err(|_err| BudgetReportError::NoTracker)
+}
+
+/// Report a tool error (for metrics)
+///
+/// This function reports that a tool invocation failed, incrementing the error counter.
+///
+/// # Errors
+///
+/// Returns `BudgetReportError::NoTracker` if called outside of a graph execution context.
+pub fn try_report_tool_error() -> Result<(), BudgetReportError> {
+    BUDGET_TRACKER
+        .try_with(|tracker| {
+            tracker.report_tool_error();
+        })
+        .map_err(|_err| BudgetReportError::NoTracker)
+}
+
+/// Report tool execution duration in milliseconds (for metrics)
+///
+/// This function records the duration of a tool call in a histogram metric.
+///
+/// # Errors
+///
+/// Returns `BudgetReportError::NoTracker` if called outside of a graph execution context.
+pub fn try_report_tool_duration(duration_ms: u64) -> Result<(), BudgetReportError> {
+    BUDGET_TRACKER
+        .try_with(|tracker| {
+            tracker.report_tool_duration(duration_ms);
         })
         .map_err(|_err| BudgetReportError::NoTracker)
 }

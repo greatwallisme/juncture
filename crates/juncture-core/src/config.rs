@@ -197,6 +197,13 @@ impl RunnableConfig {
         self
     }
 
+    /// Set the run ID for stream resumption and observability correlation
+    #[must_use]
+    pub fn with_run_id(mut self, id: impl Into<String>) -> Self {
+        self.run_id = Some(id.into());
+        self
+    }
+
     /// Set the recursion limit (maximum superstep count)
     #[must_use]
     pub const fn with_recursion_limit(mut self, limit: usize) -> Self {

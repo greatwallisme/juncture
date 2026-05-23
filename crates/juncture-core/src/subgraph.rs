@@ -1428,6 +1428,7 @@ impl SubgraphTransformer {
             StreamEvent::Tools(_) => "tools",
             StreamEvent::CheckpointSaved { .. } => "checkpoint_saved",
             StreamEvent::TaskDetail { .. } => "task_detail",
+            StreamEvent::Cancelled { .. } => "cancelled",
         };
         let filter_value = serde_json::json!({ "type": event_type });
         filter(&filter_value)

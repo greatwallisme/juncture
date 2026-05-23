@@ -1019,6 +1019,50 @@ impl<S: State, I: IntoState<S>, O: FromState<S>> StateGraph<S, I, O> {
         Ok(self)
     }
 
+    /// Add a subgraph with explicit state mapping using default config
+    ///
+    /// Convenience overload for `add_subgraph_with_config()` that uses
+    /// `SubgraphConfig::default()`. See that method for full documentation.
+    ///
+    /// # Type Parameters
+    ///
+    /// * `Sub` - The subgraph's state type
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The node name for the subgraph mount point
+    /// * `subgraph` - The compiled subgraph to add
+    /// * `input_map` - Function to transform parent state to subgraph input
+    /// * `output_map` - Function to transform subgraph output to parent state update
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a node with the same name already exists.
+    #[allow(
+        clippy::type_complexity,
+        reason = "requires type erasure for trait object storage"
+    )]
+    pub fn add_subgraph_explicit<Sub>(
+        &mut self,
+        name: &str,
+        subgraph: Arc<crate::graph::CompiledGraph<Sub>>,
+        input_map: impl Fn(&S) -> Sub + Send + Sync + 'static,
+        output_map: impl Fn(&Sub) -> S::Update + Send + Sync + 'static,
+    ) -> Result<&mut Self, TopologyError>
+    where
+        Sub: State + serde::Serialize + for<'de> serde::Deserialize<'de>,
+        Sub::Update: serde::Serialize,
+        S: Clone,
+    {
+        self.add_subgraph_with_config(
+            name,
+            subgraph,
+            input_map,
+            output_map,
+            crate::subgraph::SubgraphConfig::default(),
+        )
+    }
+
     /// Set the context schema type for this graph
     ///
     /// Currently a no-op that returns `self` for forward compatibility.
