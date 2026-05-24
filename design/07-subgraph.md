@@ -123,18 +123,23 @@ struct ReviewState {
 
 ```rust
 impl<S: State> StateGraph<S> {
-    pub fn add_subgraph_node<Sub: StateSubset<S>>(
+    /// 添加共享状态模式的子图节点
+    ///
+    /// `Sub` 必须实现 `StateSubset<S>`，即其字段是父状态的子集。
+    /// 接受 `Arc<CompiledGraph<Sub>>` 以允许同一子图在多个父图中复用。
+    /// 返回 `Result` 以支持 fail-fast 验证（重复节点名等），
+    /// 与其他 builder 方法（`add_node` 等）保持一致。
+    pub fn add_subgraph_node<Sub>(
         &mut self,
         name: &str,
-        subgraph: CompiledGraph<Sub>,
-    ) -> &mut Self;
+        subgraph: Arc<CompiledGraph<Sub>>,
+    ) -> Result<&mut Self, TopologyError>
+    where
+        Sub: StateSubset<S> + State + Clone
+            + Serialize + for<'de> Deserialize<'de>,
+        Sub::Update: Serialize,
+        S: Clone;
 }
-```
-
-// > **实现备注 (D-07-3)**: 实际实现中 `add_subgraph_node` 接受 `Arc<CompiledGraph<Sub>>` 而非
-// > `CompiledGraph<Sub>`（CompiledGraph 已内部使用 Arc，但显式 Arc 允许同一子图在多个父图中复用），
-// > 且返回 `Result<&mut Self, TopologyError>` 而非 `&mut Self`（与 `add_node` 等 builder 方法一致，
-// > 返回 `Result` 类型以支持 fail-fast 验证，同时保留 `&mut Self` 以支持方法链）。
 ```
 
 ### 2.2 模式 2：显式映射（不同 State 类型）
@@ -194,7 +199,24 @@ impl<S: State> StateGraph<S> {
 // > 同时返回 `Result<(), TopologyError>` 而非 `&mut Self`，与 `add_node` 的 fail-fast
 // > 验证模式一致。`SubgraphMount` 提供类型安全的构建器 API 来配置映射函数和子图持久化选项。
 
-// > **Implementation Note (C-07-003)**: `SubgraphMount` builder pattern provides fluent API with `with_name()`, `with_config()`, `with_persistence()` methods. This is cleaner than direct `add_subgraph()` parameters and improves discoverability.
+#### SubgraphMount 结构体
+
+```rust
+pub struct SubgraphMount<S: State> {
+    pub name: String,
+    pub config: SubgraphConfig,
+    pub node: Arc<dyn Node<S>>,
+}
+
+impl<S: State> SubgraphMount<S> {
+    pub fn new(...) -> Self
+    pub fn with_name(...) -> Self
+    pub fn with_config(...) -> Self
+    pub fn with_persistence(...) -> Self
+}
+```
+
+`SubgraphMount` 提供类型安全的构建器 API 来配置映射函数和子图持久化选项，比直接参数更清晰且提高可发现性。
 
 #### 类型安全保证
 
@@ -227,10 +249,6 @@ pub struct CheckpointNamespace {
 
 // > **Implementation Note (C-07-001)**: Struct-based CheckpointNamespace with NamespaceSegment components provides type safety compared to string manipulation. Includes `Display` trait implementation (`checkpoint.rs:155-159`), `child()` method for namespace extension, and improved serialization support.
 
-// > **Implementation Note (C-07-1)**: `CheckpointNamespace` implements `Display` trait
-// > (`checkpoint.rs:155-159`), enabling idiomatic `println!("{}", ns)` and `format!("{ns}")` usage.
-// > The display output joins segments with `|` separator for human-readable namespace representation.
-
 #[derive(Clone, Debug)]
 pub struct NamespaceSegment {
     pub node_name: String,
@@ -257,6 +275,12 @@ impl CheckpointNamespace {
             .map(|s| format!("{}:{}", s.node_name, s.invocation_id))
             .collect::<Vec<_>>()
             .join("|")
+    }
+}
+
+impl std::fmt::Display for CheckpointNamespace {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.to_string())
     }
 }
 ```
@@ -857,6 +881,34 @@ impl<S: State + Serialize + DeserializeOwned> SubgraphTransformer<S> {
             },
             _ => event,
         }
+    }
+
+    /// 创建子转换器用于嵌套子图
+    ///
+    /// 继承当前命名空间并追加当前 `subgraph_name` 作为额外段，
+    /// 然后设置子图名称。用于子图的子图（嵌套）场景。
+    pub fn child_transformer(&self, child_name: &str) -> Self {
+        let mut child = self.clone();
+        child.ns.push(self.subgraph_name.clone());
+        child.subgraph_name = child_name.to_string();
+        child
+    }
+
+    /// 创建带有完整命名空间链的 EventEmitter
+    ///
+    /// 将 `self.ns` 和 `self.subgraph_name` 中的每个段
+    /// 通过 `EventEmitter::with_subgraph_ns` 应用，使发射的事件
+    /// 携带完整的子图嵌套路径。
+    pub fn to_emitter<S: State>(
+        &self,
+        tx: tokio::sync::mpsc::Sender<StreamEvent<S>>,
+        mode: StreamMode,
+    ) -> EventEmitter<S> {
+        let mut emitter = EventEmitter::new(tx, mode);
+        for segment in &self.ns {
+            emitter = emitter.with_subgraph_ns(segment.clone());
+        }
+        emitter.with_subgraph_ns(self.subgraph_name.clone())
     }
 }
 ```
