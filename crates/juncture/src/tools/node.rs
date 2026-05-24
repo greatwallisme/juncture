@@ -16,6 +16,9 @@ use crate::tools::runtime::ToolRuntime;
 use crate::tools::trait_::{StatefulTool, Tool, ToolDefinition};
 use crate::tools::transformer::ToolCallTransformer;
 
+/// Type alias for the tools condition function to reduce type complexity
+type ToolsConditionFn = Arc<dyn Fn(&Message) -> bool + Send + Sync>;
+
 /// Configuration for `ToolNode`
 ///
 /// Controls tool execution behavior including error handling,
@@ -38,6 +41,13 @@ pub struct ToolNodeConfig<S: State> {
 
     /// Optional interceptor for pre/post execution hooks
     pub interceptor: Option<Arc<dyn ToolInterceptor>>,
+
+    /// Optional condition function to determine if tools should be executed
+    ///
+    /// If set, this function is called with the AI message containing tool calls.
+    /// Returns true to execute tools, false to skip tool execution.
+    /// Used for implementing `tools_condition` routing pattern.
+    pub tools_condition: Option<ToolsConditionFn>,
 }
 
 /// A wrapper that can hold either a stateless or stateful tool.
@@ -117,6 +127,7 @@ impl<S: State> Default for ToolNodeConfig<S> {
             validate_input: true,
             call_transformer: None,
             interceptor: None,
+            tools_condition: None,
         }
     }
 }
@@ -129,6 +140,7 @@ impl<S: State> std::fmt::Debug for ToolNodeConfig<S> {
             .field("validate_input", &self.validate_input)
             .field("call_transformer", &self.call_transformer.is_some())
             .field("interceptor", &self.interceptor.is_some())
+            .field("tools_condition", &self.tools_condition.is_some())
             .finish()
     }
 }
@@ -275,6 +287,12 @@ pub struct ToolNode<S: State> {
     /// Optional interceptor for pre/post execution hooks
     interceptor: Option<Arc<dyn ToolInterceptor>>,
 
+    /// Optional condition function to determine if tools should be executed
+    ///
+    /// If set, this function is called with the AI message containing tool calls.
+    /// Returns true to execute tools, false to skip tool execution.
+    tools_condition: Option<ToolsConditionFn>,
+
     /// Optional sender for tool lifecycle streaming events.
     ///
     /// When set, [`ToolStarted`](ToolsEvent::ToolStarted) and
@@ -291,6 +309,7 @@ impl<S: State> std::fmt::Debug for ToolNode<S> {
             .field("validate_input", &self.validate_input)
             .field("call_transformer", &self.call_transformer.is_some())
             .field("interceptor", &self.interceptor.is_some())
+            .field("tools_condition", &self.tools_condition.is_some())
             .field("tools_event_tx", &self.tools_event_tx.is_some())
             .finish()
     }
@@ -318,6 +337,7 @@ impl<S: State> ToolNode<S> {
             validate_input: true,
             call_transformer: None,
             interceptor: None,
+            tools_condition: None,
             tools_event_tx: None,
         }
     }
@@ -340,6 +360,7 @@ impl<S: State> ToolNode<S> {
             validate_input: true,
             call_transformer: None,
             interceptor: None,
+            tools_condition: None,
             tools_event_tx: None,
         }
     }
@@ -358,6 +379,7 @@ impl<S: State> ToolNode<S> {
             validate_input: config.validate_input,
             call_transformer: config.call_transformer.map(Arc::from),
             interceptor: config.interceptor,
+            tools_condition: config.tools_condition,
             tools_event_tx: None,
         }
     }
@@ -390,6 +412,32 @@ impl<S: State> ToolNode<S> {
     #[must_use]
     pub fn with_interceptor(mut self, interceptor: Arc<dyn ToolInterceptor>) -> Self {
         self.interceptor = Some(interceptor);
+        self
+    }
+
+    /// Set a tools condition function for conditional tool execution
+    ///
+    /// If set, this function is called with the AI message containing tool calls.
+    /// When the function returns false, tool execution is skipped and an empty
+    /// result is returned.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use juncture::tools::{ToolNode, Tool};
+    /// use juncture_core::state::messages::Message;
+    /// use std::sync::Arc;
+    ///
+    /// let tools = vec![Box::new(MySearchTool::new())];
+    /// let tool_node = ToolNode::new(tools)
+    ///     .with_tools_condition(Arc::new(|msg| {
+    ///         // Only execute tools if message contains specific keyword
+    ///         msg.content_text().contains("search")
+    ///     }));
+    /// ```
+    #[must_use]
+    pub fn with_tools_condition(mut self, condition: ToolsConditionFn) -> Self {
+        self.tools_condition = Some(condition);
         self
     }
 
@@ -436,6 +484,10 @@ impl<S: State> ToolNode<S> {
     /// - No AI message with tool calls is found
     /// - Tool execution fails and error handling is disabled
     /// - Required tool is not found and error handling is disabled
+    #[allow(
+        clippy::too_many_lines,
+        reason = "execute_with_state requires: message validation, tools_condition check, tool iteration, concurrent spawning, transformer application, validation, interceptor hooks, and result collection. The complexity is necessary for comprehensive tool execution with state support and conditional execution."
+    )]
     pub async fn execute_with_state(
         &self,
         messages: &[Message],
@@ -453,6 +505,14 @@ impl<S: State> ToolNode<S> {
             })?;
 
         if last_ai.tool_calls.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Check tools_condition if set
+        if let Some(ref condition) = self.tools_condition
+            && !condition(last_ai)
+        {
+            // Condition returned false, skip tool execution
             return Ok(Vec::new());
         }
 
@@ -1004,6 +1064,7 @@ mod tests {
             validate_input: false,
             call_transformer: None,
             interceptor: None,
+            tools_condition: None,
         };
         let node = TestToolNode::with_config(config);
 
@@ -1786,6 +1847,105 @@ mod tests {
 
         assert_eq!(started_count, 2, "should have 2 ToolStarted events");
         assert_eq!(finished_count, 2, "should have 2 ToolFinished events");
+    }
+
+    // --- tools_condition tests ---
+
+    #[tokio::test]
+    async fn test_tool_node_with_tools_condition_allows_execution() {
+        use std::sync::Arc;
+
+        let node = TestToolNode::new(vec![Box::new(EchoTool) as Box<dyn Tool>])
+            .with_tools_condition(Arc::new(|msg| {
+                // Allow execution if message contains "execute"
+                msg.content_text().contains("execute")
+            }));
+
+        let messages = vec![Message::ai_with_tool_calls(
+            "execute this tool",
+            vec![ToolCall {
+                id: "call_1".to_string(),
+                name: "echo".to_string(),
+                arguments: json!({"message": "hello"}),
+            }],
+        )];
+
+        let results = node.execute(&messages).await.unwrap();
+        assert_eq!(results.len(), 1);
+        // Tool should have executed
+        match &results[0].content {
+            juncture_core::state::messages::Content::Text(text) => {
+                assert_eq!(text, "hello");
+            }
+            juncture_core::state::messages::Content::MultiPart(_) => {
+                panic!("Expected Text content")
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_tool_node_with_tools_condition_blocks_execution() {
+        use std::sync::Arc;
+
+        let node = TestToolNode::new(vec![Box::new(EchoTool) as Box<dyn Tool>])
+            .with_tools_condition(Arc::new(|msg| {
+                // Block execution if message contains "block"
+                !msg.content_text().contains("block")
+            }));
+
+        let messages = vec![Message::ai_with_tool_calls(
+            "block this tool",
+            vec![ToolCall {
+                id: "call_1".to_string(),
+                name: "echo".to_string(),
+                arguments: json!({"message": "hello"}),
+            }],
+        )];
+
+        let results = node.execute(&messages).await.unwrap();
+        assert_eq!(results.len(), 0);
+        // Tool should not have executed
+    }
+
+    #[tokio::test]
+    async fn test_tool_node_tools_condition_with_config() {
+        use std::sync::Arc;
+
+        let config = ToolNodeConfig::<juncture_core::state::messages::MessagesState> {
+            tools: vec![ToolEntry::from_stateless(Box::new(EchoTool))],
+            handle_errors: true,
+            validate_input: true,
+            call_transformer: None,
+            interceptor: None,
+            tools_condition: Some(Arc::new(|msg| msg.content_text().contains("allow"))),
+        };
+        let node = TestToolNode::with_config(config);
+
+        // Test with allowed message
+        let messages_allowed = vec![Message::ai_with_tool_calls(
+            "allow execution",
+            vec![ToolCall {
+                id: "call_1".to_string(),
+                name: "echo".to_string(),
+                arguments: json!({"message": "test"}),
+            }],
+        )];
+
+        let results = node.execute(&messages_allowed).await.unwrap();
+        assert_eq!(results.len(), 1);
+
+        // Test with blocked message
+        let messages_blocked = vec![Message::ai_with_tool_calls(
+            "deny execution",
+            vec![ToolCall {
+                id: "call_2".to_string(),
+                name: "echo".to_string(),
+                arguments: json!({"message": "test"}),
+            }],
+        )];
+
+        let results = node.execute(&messages_blocked).await.unwrap();
+        assert_eq!(results.len(), 0);
     }
 }
 

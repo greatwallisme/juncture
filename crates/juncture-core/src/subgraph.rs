@@ -502,7 +502,10 @@ mod tests {
             Some(&parent),
             Some("thread-42"),
         );
-        assert!(ns.is_none(), "Stateless should return None even with parent namespace");
+        assert!(
+            ns.is_none(),
+            "Stateless should return None even with parent namespace"
+        );
     }
 
     #[test]

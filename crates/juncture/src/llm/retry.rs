@@ -51,6 +51,17 @@ pub struct RetryingModel<M: ChatModel> {
 
     /// Initial backoff duration.
     initial_backoff: Duration,
+
+    /// Maximum backoff duration.
+    ///
+    /// Exponential backoff is capped at this value to prevent excessive delays.
+    max_backoff: Duration,
+
+    /// Whether to respect the `retry_after` field from rate limit errors.
+    ///
+    /// If true, uses the server-suggested retry delay when available.
+    /// If false, always calculates backoff using exponential backoff.
+    respect_retry_after: bool,
 }
 
 impl<M: ChatModel> RetryingModel<M> {
@@ -74,6 +85,8 @@ impl<M: ChatModel> RetryingModel<M> {
             inner,
             max_retries: 3,
             initial_backoff: Duration::from_millis(500),
+            max_backoff: Duration::from_secs(30),
+            respect_retry_after: true,
         }
     }
 
@@ -123,6 +136,51 @@ impl<M: ChatModel> RetryingModel<M> {
         self
     }
 
+    /// Set the maximum backoff duration.
+    ///
+    /// Exponential backoff is capped at this value to prevent excessive delays.
+    ///
+    /// # Arguments
+    ///
+    /// * `max_backoff` - Maximum backoff duration
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use juncture::llm::{MockChatModel, RetryingModel};
+    /// use std::time::Duration;
+    ///
+    /// let base_model = MockChatModel::new("gpt-4");
+    /// let model = RetryingModel::new(base_model)
+    ///     .max_backoff(Duration::from_secs(60));
+    /// ```
+    #[must_use]
+    pub const fn max_backoff(mut self, max_backoff: Duration) -> Self {
+        self.max_backoff = max_backoff;
+        self
+    }
+
+    /// Set whether to respect the `retry_after` field from rate limit errors.
+    ///
+    /// # Arguments
+    ///
+    /// * `respect` - If true, uses server-suggested retry delay when available
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use juncture::llm::{MockChatModel, RetryingModel};
+    ///
+    /// let base_model = MockChatModel::new("gpt-4");
+    /// let model = RetryingModel::new(base_model)
+    ///     .respect_retry_after(false);
+    /// ```
+    #[must_use]
+    pub const fn respect_retry_after(mut self, respect: bool) -> Self {
+        self.respect_retry_after = respect;
+        self
+    }
+
     /// Check if an error is retryable.
     ///
     /// Only rate limits and timeouts are retried. All other errors are considered permanent.
@@ -134,13 +192,18 @@ impl<M: ChatModel> RetryingModel<M> {
     fn backoff_duration(&self, attempt: usize) -> Duration {
         // Exponential backoff: 2^attempt * initial_backoff
         let multiplier = 2_u32.pow(u32::try_from(attempt).unwrap_or(u32::MAX));
-        self.initial_backoff.saturating_mul(multiplier)
+        let exponential = self.initial_backoff.saturating_mul(multiplier);
+        exponential.min(self.max_backoff)
     }
 
     /// Extract suggested retry delay from error if available.
-    const fn extract_retry_delay(error: &LlmError) -> Option<Duration> {
+    const fn extract_retry_delay(&self, error: &LlmError) -> Option<Duration> {
         if let LlmError::RateLimited { retry_after } = error {
-            *retry_after
+            if self.respect_retry_after {
+                *retry_after
+            } else {
+                None
+            }
         } else {
             None
         }
@@ -171,7 +234,8 @@ impl<M: ChatModel> ChatModel for RetryingModel<M> {
                     last_error = Some(error);
 
                     // Use suggested retry delay if available, otherwise calculate backoff
-                    let delay = Self::extract_retry_delay(last_error.as_ref().unwrap())
+                    let delay = self
+                        .extract_retry_delay(last_error.as_ref().unwrap())
                         .unwrap_or_else(|| self.backoff_duration(attempt));
 
                     tokio::time::sleep(delay).await;
@@ -199,11 +263,105 @@ impl<M: ChatModel> ChatModel for RetryingModel<M> {
             inner: inner_with_tools,
             max_retries: self.max_retries,
             initial_backoff: self.initial_backoff,
+            max_backoff: self.max_backoff,
+            respect_retry_after: self.respect_retry_after,
         }
     }
 
     fn model_name(&self) -> &str {
         self.inner.model_name()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::llm::mock::MockChatModel;
+
+    #[test]
+    fn test_retry_model_new() {
+        let base_model = MockChatModel::new("gpt-4");
+        let model = RetryingModel::new(base_model);
+
+        assert_eq!(model.max_retries, 3);
+        assert_eq!(model.initial_backoff, Duration::from_millis(500));
+        assert_eq!(model.max_backoff, Duration::from_secs(30));
+        assert!(model.respect_retry_after);
+    }
+
+    #[test]
+    fn test_retry_model_builder_methods() {
+        let base_model = MockChatModel::new("gpt-4");
+        let model = RetryingModel::new(base_model)
+            .max_retries(5)
+            .initial_backoff(Duration::from_secs(2))
+            .max_backoff(Duration::from_secs(60))
+            .respect_retry_after(false);
+
+        assert_eq!(model.max_retries, 5);
+        assert_eq!(model.initial_backoff, Duration::from_secs(2));
+        assert_eq!(model.max_backoff, Duration::from_secs(60));
+        assert!(!model.respect_retry_after);
+    }
+
+    #[test]
+    fn test_backoff_duration_capping() {
+        let base_model = MockChatModel::new("gpt-4");
+        let model = RetryingModel::new(base_model)
+            .initial_backoff(Duration::from_secs(1))
+            .max_backoff(Duration::from_secs(10));
+
+        // Test exponential backoff with capping
+        assert_eq!(model.backoff_duration(0), Duration::from_secs(1));
+        assert_eq!(model.backoff_duration(1), Duration::from_secs(2));
+        assert_eq!(model.backoff_duration(2), Duration::from_secs(4));
+        assert_eq!(model.backoff_duration(3), Duration::from_secs(8));
+        assert_eq!(model.backoff_duration(4), Duration::from_secs(10)); // Capped at max_backoff
+        assert_eq!(model.backoff_duration(5), Duration::from_secs(10)); // Stays capped
+    }
+
+    #[test]
+    fn test_extract_retry_delay_respects_flag() {
+        let base_model = MockChatModel::new("gpt-4");
+
+        // Test with respect_retry_after = true (default)
+        let model_respect = RetryingModel::new(base_model.clone()).respect_retry_after(true);
+        let retry_after = Duration::from_secs(5);
+        let rate_limited_error = LlmError::RateLimited {
+            retry_after: Some(retry_after),
+        };
+
+        assert_eq!(
+            model_respect.extract_retry_delay(&rate_limited_error),
+            Some(retry_after)
+        );
+
+        // Test with respect_retry_after = false
+        let model_ignore = RetryingModel::new(base_model).respect_retry_after(false);
+        assert_eq!(model_ignore.extract_retry_delay(&rate_limited_error), None);
+    }
+
+    #[test]
+    fn test_extract_retry_delay_non_rate_limited() {
+        let base_model = MockChatModel::new("gpt-4");
+        let model = RetryingModel::new(base_model);
+
+        // Test with non-rate-limited error
+        let timeout_error = LlmError::Timeout(Duration::from_secs(30));
+        assert_eq!(model.extract_retry_delay(&timeout_error), None);
+    }
+
+    #[test]
+    fn test_bind_tools_preserves_new_fields() {
+        let base_model = MockChatModel::new("gpt-4");
+        let model = RetryingModel::new(base_model)
+            .max_backoff(Duration::from_secs(60))
+            .respect_retry_after(false);
+
+        let model_with_tools = model.bind_tools(vec![]);
+
+        assert_eq!(model_with_tools.max_backoff, Duration::from_secs(60));
+        assert!(!model_with_tools.respect_retry_after);
     }
 }
 
