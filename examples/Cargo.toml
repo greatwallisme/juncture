@@ -1,0 +1,61 @@
+[package]
+name = "juncture-simple-example"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "Simple examples demonstrating Juncture graph execution patterns"
+
+[dependencies]
+juncture = { path = "../crates/juncture" }
+juncture-core = { path = "../crates/juncture-core" }
+juncture-derive = { path = "../crates/juncture-derive" }
+juncture-checkpoint = { path = "../crates/juncture-checkpoint" }
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+futures = "0.3"
+async-trait = "0.1"
+uuid = { version = "1", features = ["v4"] }
+
+[[bin]]
+name = "01_state_machine"
+path = "src/01_state_machine.rs"
+
+[[bin]]
+name = "02_counter_reducers"
+path = "src/02_counter_reducers.rs"
+
+[[bin]]
+name = "03_conditional_routing"
+path = "src/03_conditional_routing.rs"
+
+[[bin]]
+name = "04_chat_basic"
+path = "src/04_chat_basic.rs"
+
+[[bin]]
+name = "05_tool_calling"
+path = "src/05_tool_calling.rs"
+
+[[bin]]
+name = "06_streaming"
+path = "src/06_streaming.rs"
+
+[[bin]]
+name = "07_human_in_the_loop"
+path = "src/07_human_in_the_loop.rs"
+
+[[bin]]
+name = "08_checkpoint_resume"
+path = "src/08_checkpoint_resume.rs"
+
+[[bin]]
+name = "09_error_recovery"
+path = "src/09_error_recovery.rs"
+
+[lints]
+workspace = true

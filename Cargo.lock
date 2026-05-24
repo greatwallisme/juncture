@@ -1205,6 +1205,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "juncture-simple-example"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "futures",
+ "juncture",
+ "juncture-checkpoint",
+ "juncture-core",
+ "juncture-derive",
+ "serde",
+ "serde_json",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "juncture-store"
 version = "0.1.0"
 dependencies = [
