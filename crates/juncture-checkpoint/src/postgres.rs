@@ -55,7 +55,7 @@ impl<T> ToCoreCheckpointError<T> for Result<T, CheckpointError> {
                 CoreCheckpointError::Other(format!("Schema migration: {from} -> {to}: {reason}"))
             }
             CheckpointError::PoolExhausted => {
-                CoreCheckpointError::Storage("Connection pool exhausted".to_string())
+                CoreCheckpointError::Storage("Connection pool exhausted".into())
             }
         })
     }
@@ -87,7 +87,10 @@ impl std::fmt::Debug for PostgresSaver {
     }
 }
 
-/// SQL for creating the `checkpoints` table, including the `pending_interrupts` column.
+/// SQL for creating the `checkpoints` table.
+///
+/// Uses `JSONB` for structured metadata fields to enable SQL-level queryability.
+/// The `channel_values` field uses `BYTEA` for binary serialized state data.
 #[cfg(feature = "postgres")]
 const CHECKPOINTS_CREATE_TABLE_SQL: &str = r"
     CREATE TABLE IF NOT EXISTS checkpoints (
@@ -96,13 +99,13 @@ const CHECKPOINTS_CREATE_TABLE_SQL: &str = r"
         checkpoint_id TEXT NOT NULL,
         parent_checkpoint_id TEXT,
         channel_values BYTEA NOT NULL,
-        channel_versions BYTEA NOT NULL,
-        versions_seen BYTEA NOT NULL,
-        pending_tasks BYTEA,
-        pending_sends BYTEA,
-        pending_interrupts BYTEA,
+        channel_versions JSONB NOT NULL,
+        versions_seen JSONB NOT NULL,
+        pending_tasks JSONB,
+        pending_sends JSONB,
+        pending_interrupts JSONB,
         schema_version INTEGER NOT NULL DEFAULT 1,
-        metadata BYTEA NOT NULL,
+        metadata JSONB NOT NULL,
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         PRIMARY KEY (thread_id, checkpoint_ns, checkpoint_id)
     )
@@ -142,7 +145,7 @@ impl PostgresSaver {
     pub async fn new(connection_string: &str) -> Result<Self, CheckpointError> {
         let pool = sqlx::PgPool::connect(connection_string)
             .await
-            .map_err(|e| CheckpointError::Database(e.to_string()))?;
+            .map_err(|e| CheckpointError::Database(Box::new(e)))?;
 
         Self::run_schema_migrations(&pool).await?;
 
@@ -161,12 +164,12 @@ impl PostgresSaver {
         sqlx::query(CHECKPOINTS_CREATE_TABLE_SQL)
             .execute(pool)
             .await
-            .map_err(|e| CheckpointError::Database(e.to_string()))?;
+            .map_err(|e| CheckpointError::Database(Box::new(e)))?;
 
         sqlx::query(CHECKPOINT_WRITES_CREATE_TABLE_SQL)
             .execute(pool)
             .await
-            .map_err(|e| CheckpointError::Database(e.to_string()))?;
+            .map_err(|e| CheckpointError::Database(Box::new(e)))?;
 
         // Create indexes
         sqlx::query(
@@ -177,7 +180,7 @@ impl PostgresSaver {
         )
         .execute(pool)
         .await
-        .map_err(|e| CheckpointError::Database(e.to_string()))?;
+        .map_err(|e| CheckpointError::Database(Box::new(e)))?;
 
         sqlx::query(
             r"
@@ -187,14 +190,14 @@ impl PostgresSaver {
         )
         .execute(pool)
         .await
-        .map_err(|e| CheckpointError::Database(e.to_string()))?;
+        .map_err(|e| CheckpointError::Database(Box::new(e)))?;
 
         // Add pending_interrupts column for databases created before this field existed.
         // PostgreSQL supports IF NOT EXISTS for ALTER TABLE ADD COLUMN.
-        sqlx::query("ALTER TABLE checkpoints ADD COLUMN IF NOT EXISTS pending_interrupts BYTEA")
+        sqlx::query("ALTER TABLE checkpoints ADD COLUMN IF NOT EXISTS pending_interrupts JSONB")
             .execute(pool)
             .await
-            .map_err(|e| CheckpointError::Database(e.to_string()))?;
+            .map_err(|e| CheckpointError::Database(Box::new(e)))?;
 
         Ok(())
     }
@@ -241,7 +244,7 @@ impl PostgresSaver {
         config
             .thread_id
             .clone()
-            .ok_or_else(|| CheckpointError::Storage("thread_id is required".to_string()))
+            .ok_or_else(|| CheckpointError::Storage("thread_id is required".into()))
     }
 
     /// Get checkpoint namespace string from config, defaulting to empty string
@@ -321,18 +324,18 @@ impl PostgresSaver {
     #[allow(clippy::too_many_arguments, reason = "required by database schema")]
     fn deserialize_checkpoint(
         channel_values_bytes: &[u8],
-        channel_versions_bytes: &[u8],
-        versions_seen_bytes: &[u8],
-        pending_tasks_bytes: Option<&[u8]>,
-        pending_sends_bytes: Option<&[u8]>,
-        pending_interrupts_bytes: Option<&[u8]>,
+        channel_versions_value: serde_json::Value,
+        versions_seen_value: serde_json::Value,
+        pending_tasks_value: Option<serde_json::Value>,
+        pending_sends_value: Option<serde_json::Value>,
+        pending_interrupts_value: Option<serde_json::Value>,
         schema_version: i64,
         checkpoint_id: String,
         created_at: String,
         schema_migrator: Option<&Arc<SchemaMigratorFn>>,
     ) -> Result<Checkpoint, CoreCheckpointError> {
         let raw_channel_values: serde_json::Value = deserialize_auto(channel_values_bytes)
-            .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
+            .map_err(|e| CoreCheckpointError::Storage(Box::new(e)))?;
 
         // Apply schema migration (M04-002)
         let schema_version_u32 = u32::try_from(schema_version).expect("schema_version fits in u32");
@@ -344,31 +347,31 @@ impl PostgresSaver {
         )?;
 
         let channel_versions: std::collections::HashMap<String, u64> =
-            deserialize_auto(channel_versions_bytes)
-                .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
+            serde_json::from_value(channel_versions_value)
+                .map_err(|e| CoreCheckpointError::Storage(Box::new(e)))?;
         let versions_seen: std::collections::HashMap<
             String,
             std::collections::HashMap<String, u64>,
-        > = deserialize_auto(versions_seen_bytes)
-            .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
-        let pending_tasks: Vec<CheckpointPendingTask> = pending_tasks_bytes
-            .map(|bytes| {
-                deserialize_auto::<Vec<CheckpointPendingTask>>(bytes)
-                    .map_err(|e| CoreCheckpointError::Storage(e.to_string()))
+        > = serde_json::from_value(versions_seen_value)
+            .map_err(|e| CoreCheckpointError::Storage(Box::new(e)))?;
+        let pending_tasks: Vec<CheckpointPendingTask> = pending_tasks_value
+            .map(|value| {
+                serde_json::from_value::<Vec<CheckpointPendingTask>>(value)
+                    .map_err(|e| CoreCheckpointError::Storage(Box::new(e)))
             })
             .transpose()?
             .unwrap_or_default();
-        let pending_sends: Vec<SerializedSend> = pending_sends_bytes
-            .map(|bytes| {
-                deserialize_auto::<Vec<SerializedSend>>(bytes)
-                    .map_err(|e| CoreCheckpointError::Storage(e.to_string()))
+        let pending_sends: Vec<SerializedSend> = pending_sends_value
+            .map(|value| {
+                serde_json::from_value::<Vec<SerializedSend>>(value)
+                    .map_err(|e| CoreCheckpointError::Storage(Box::new(e)))
             })
             .transpose()?
             .unwrap_or_default();
-        let pending_interrupts: Vec<InterruptSignal> = pending_interrupts_bytes
-            .map(|bytes| {
-                deserialize_auto::<Vec<InterruptSignal>>(bytes)
-                    .map_err(|e| CoreCheckpointError::Storage(e.to_string()))
+        let pending_interrupts: Vec<InterruptSignal> = pending_interrupts_value
+            .map(|value| {
+                serde_json::from_value::<Vec<InterruptSignal>>(value)
+                    .map_err(|e| CoreCheckpointError::Storage(Box::new(e)))
             })
             .transpose()?
             .unwrap_or_default();
@@ -391,8 +394,13 @@ impl PostgresSaver {
 
     /// Deserialize a single database row into a `CheckpointTuple`
     ///
-    /// Extracts raw bytes from each column, deserializes checkpoint and metadata,
+    /// Extracts data from each column, deserializes checkpoint and metadata,
     /// and assembles a complete `CheckpointTuple` without pending writes.
+    ///
+    /// `JSONB` columns (`channel_versions`, `versions_seen`, `pending_tasks`,
+    /// `pending_sends`, `pending_interrupts`, `metadata`) are read as
+    /// `serde_json::Value` for direct JSON deserialization. The `channel_values`
+    /// column uses `BYTEA` for binary data.
     fn row_to_tuple(
         row: &sqlx::postgres::PgRow,
         config: &RunnableConfig,
@@ -400,51 +408,51 @@ impl PostgresSaver {
     ) -> Result<CheckpointTuple, CoreCheckpointError> {
         let channel_values_bytes: Vec<u8> = row
             .try_get("channel_values")
-            .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
-        let channel_versions_bytes: Vec<u8> = row
+            .map_err(|e| CoreCheckpointError::Storage(Box::new(e)))?;
+        let channel_versions_value: serde_json::Value = row
             .try_get("channel_versions")
-            .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
-        let versions_seen_bytes: Vec<u8> = row
+            .map_err(|e| CoreCheckpointError::Storage(Box::new(e)))?;
+        let versions_seen_value: serde_json::Value = row
             .try_get("versions_seen")
-            .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
-        let pending_tasks_bytes: Option<Vec<u8>> = row
+            .map_err(|e| CoreCheckpointError::Storage(Box::new(e)))?;
+        let pending_tasks_value: Option<serde_json::Value> = row
             .try_get("pending_tasks")
-            .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
-        let pending_sends_bytes: Option<Vec<u8>> = row
+            .map_err(|e| CoreCheckpointError::Storage(Box::new(e)))?;
+        let pending_sends_value: Option<serde_json::Value> = row
             .try_get("pending_sends")
-            .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
-        let pending_interrupts_bytes: Option<Vec<u8>> = row
+            .map_err(|e| CoreCheckpointError::Storage(Box::new(e)))?;
+        let pending_interrupts_value: Option<serde_json::Value> = row
             .try_get("pending_interrupts")
-            .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
+            .map_err(|e| CoreCheckpointError::Storage(Box::new(e)))?;
         let schema_version: i64 = row
             .try_get("schema_version")
-            .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
-        let metadata_bytes: Vec<u8> = row
+            .map_err(|e| CoreCheckpointError::Storage(Box::new(e)))?;
+        let metadata_value: serde_json::Value = row
             .try_get("metadata")
-            .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
+            .map_err(|e| CoreCheckpointError::Storage(Box::new(e)))?;
         let checkpoint_id: String = row
             .try_get("checkpoint_id")
-            .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
+            .map_err(|e| CoreCheckpointError::Storage(Box::new(e)))?;
         let created_at: String = row
             .try_get("created_at")
-            .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
+            .map_err(|e| CoreCheckpointError::Storage(Box::new(e)))?;
 
         let checkpoint = Self::deserialize_checkpoint(
             &channel_values_bytes,
-            &channel_versions_bytes,
-            &versions_seen_bytes,
-            pending_tasks_bytes.as_deref(),
-            pending_sends_bytes.as_deref(),
-            pending_interrupts_bytes.as_deref(),
+            channel_versions_value,
+            versions_seen_value,
+            pending_tasks_value,
+            pending_sends_value,
+            pending_interrupts_value,
             schema_version,
             checkpoint_id,
             created_at,
             schema_migrator,
         )
-        .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
+        .map_err(|e| CoreCheckpointError::Storage(Box::new(e)))?;
 
-        let metadata: CheckpointMetadata = deserialize_auto(&metadata_bytes)
-            .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
+        let metadata: CheckpointMetadata = serde_json::from_value(metadata_value)
+            .map_err(|e| CoreCheckpointError::Storage(Box::new(e)))?;
 
         Ok(CheckpointTuple {
             config: config.clone(),
@@ -458,9 +466,11 @@ impl PostgresSaver {
     /// Apply `CheckpointFilter` to a list of deserialized tuples
     ///
     /// Filters by source, step range, and `checkpoint_id` position (before/after),
-    /// then applies the final limit. This runs in Rust because the metadata fields
-    /// (source, step) are stored as serialized BYTEAs that cannot be filtered at
-    /// the SQL level.
+    /// then applies the final limit.
+    ///
+    /// Note: Metadata fields (source, step) are stored as `JSONB` which enables
+    /// SQL-level filtering, but this implementation filters in Rust for consistency
+    /// with other storage backends (`MemorySaver`, `SqliteSaver`).
     fn apply_list_filter(
         tuples: Vec<CheckpointTuple>,
         filter: &CheckpointFilter,
@@ -518,22 +528,22 @@ impl PostgresSaver {
         .bind(checkpoint_id)
         .fetch_all(&*self.pool)
         .await
-        .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
+        .map_err(|e| CoreCheckpointError::Storage(Box::new(e)))?;
 
         write_rows
             .into_iter()
             .map(|row| {
                 let task_id: String = row
                     .try_get("task_id")
-                    .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
+                    .map_err(|e| CoreCheckpointError::Storage(Box::new(e)))?;
                 let channel: String = row
                     .try_get("channel")
-                    .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
+                    .map_err(|e| CoreCheckpointError::Storage(Box::new(e)))?;
                 let value_bytes: Vec<u8> = row
                     .try_get("value")
-                    .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
+                    .map_err(|e| CoreCheckpointError::Storage(Box::new(e)))?;
                 let value_json: serde_json::Value = deserialize_auto(&value_bytes)
-                    .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
+                    .map_err(|e| CoreCheckpointError::Storage(Box::new(e)))?;
 
                 Ok(PendingWrite {
                     task_id,
@@ -547,17 +557,19 @@ impl PostgresSaver {
     /// Serialize a value only when it is non-empty, returning `None` for empty slices.
     ///
     /// Avoids storing trivially empty blobs for optional columns.
-    fn serialize_optional<T: Serialize>(
-        serializer: &SerializerKind,
-        value: &Vec<T>,
-    ) -> Result<Option<Vec<u8>>, CoreCheckpointError> {
+    /// Serialize optional vector to JSON for JSONB storage
+    ///
+    /// Returns `None` for empty vectors to save space in JSONB columns.
+    /// Returns `Some(serde_json::Value)` for non-empty vectors.
+    fn serialize_optional_json<T: Serialize>(
+        value: &[T],
+    ) -> Result<Option<serde_json::Value>, CoreCheckpointError> {
         if value.is_empty() {
             return Ok(None);
         }
-        serializer
-            .serialize(value)
+        serde_json::to_value(value)
             .map(Some)
-            .map_err(|e| CoreCheckpointError::Storage(e.to_string()))
+            .map_err(|e| CoreCheckpointError::Storage(Box::new(e)))
     }
 }
 
@@ -569,7 +581,7 @@ impl juncture_core::checkpoint::CheckpointSaver for PostgresSaver {
         config: &RunnableConfig,
     ) -> Result<Option<CheckpointTuple>, CoreCheckpointError> {
         let thread_id =
-            Self::get_thread_id(config).map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
+            Self::get_thread_id(config).map_err(|e| CoreCheckpointError::Storage(Box::new(e)))?;
         let checkpoint_ns = Self::get_checkpoint_ns(config);
 
         let select_sql = format!("SELECT {CHECKPOINT_SELECT_COLUMNS} FROM checkpoints");
@@ -593,7 +605,7 @@ impl juncture_core::checkpoint::CheckpointSaver for PostgresSaver {
             .fetch_optional(&*self.pool)
             .await
         }
-        .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
+        .map_err(|e| CoreCheckpointError::Storage(Box::new(e)))?;
 
         match row {
             Some(ref row) => {
@@ -614,7 +626,7 @@ impl juncture_core::checkpoint::CheckpointSaver for PostgresSaver {
         filter: Option<CheckpointFilter>,
     ) -> Result<Vec<CheckpointTuple>, CoreCheckpointError> {
         let thread_id =
-            Self::get_thread_id(config).map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
+            Self::get_thread_id(config).map_err(|e| CoreCheckpointError::Storage(Box::new(e)))?;
         let checkpoint_ns = Self::get_checkpoint_ns(config);
 
         // When non-limit filters are active, metadata fields (source, step) require
@@ -638,7 +650,7 @@ impl juncture_core::checkpoint::CheckpointSaver for PostgresSaver {
             .bind(&checkpoint_ns)
             .fetch_all(&*self.pool)
             .await
-            .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?
+            .map_err(|e| CoreCheckpointError::Storage(Box::new(e)))?
         } else {
             let limit = i64::try_from(filter.as_ref().and_then(|f| f.limit).unwrap_or(10))
                 .expect("limit value fits in i64");
@@ -651,14 +663,14 @@ impl juncture_core::checkpoint::CheckpointSaver for PostgresSaver {
             .bind(limit)
             .fetch_all(&*self.pool)
             .await
-            .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?
+            .map_err(|e| CoreCheckpointError::Storage(Box::new(e)))?
         };
 
         let tuples: Vec<CheckpointTuple> = rows
             .iter()
             .map(|row| Self::row_to_tuple(row, config, self.schema_migrator.as_ref()))
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
+            .map_err(|e| CoreCheckpointError::Storage(Box::new(e)))?;
 
         let results = match filter {
             Some(ref f) if has_non_limit_filter => Self::apply_list_filter(tuples, f),
@@ -682,32 +694,26 @@ impl juncture_core::checkpoint::CheckpointSaver for PostgresSaver {
         metadata: CheckpointMetadata,
     ) -> Result<RunnableConfig, CoreCheckpointError> {
         let thread_id =
-            Self::get_thread_id(config).map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
+            Self::get_thread_id(config).map_err(|e| CoreCheckpointError::Storage(Box::new(e)))?;
         let checkpoint_ns = Self::get_checkpoint_ns(config);
 
-        // Serialize each field separately per design spec using the configured serializer
+        // Serialize channel_values using binary serializer (BYTEA column)
         let channel_values_bytes = self
             .serializer
             .serialize(&checkpoint.channel_values)
-            .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
-        let channel_versions_bytes = self
-            .serializer
-            .serialize(&checkpoint.channel_versions)
-            .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
-        let versions_seen_bytes = self
-            .serializer
-            .serialize(&checkpoint.versions_seen)
-            .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
-        let pending_tasks_bytes =
-            Self::serialize_optional(&self.serializer, &checkpoint.pending_tasks)?;
-        let pending_sends_bytes =
-            Self::serialize_optional(&self.serializer, &checkpoint.pending_sends)?;
-        let pending_interrupts_bytes =
-            Self::serialize_optional(&self.serializer, &checkpoint.pending_interrupts)?;
-        let metadata_bytes = self
-            .serializer
-            .serialize(&metadata)
-            .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
+            .map_err(|e| CoreCheckpointError::Storage(Box::new(e)))?;
+
+        // Serialize structured metadata fields as JSON (JSONB columns)
+        let channel_versions_json = serde_json::to_value(&checkpoint.channel_versions)
+            .map_err(|e| CoreCheckpointError::Storage(Box::new(e)))?;
+        let versions_seen_json = serde_json::to_value(&checkpoint.versions_seen)
+            .map_err(|e| CoreCheckpointError::Storage(Box::new(e)))?;
+        let pending_tasks_json = Self::serialize_optional_json(&checkpoint.pending_tasks)?;
+        let pending_sends_json = Self::serialize_optional_json(&checkpoint.pending_sends)?;
+        let pending_interrupts_json =
+            Self::serialize_optional_json(&checkpoint.pending_interrupts)?;
+        let metadata_json = serde_json::to_value(&metadata)
+            .map_err(|e| CoreCheckpointError::Storage(Box::new(e)))?;
 
         // Extract parent_checkpoint_id from metadata.parents using empty namespace key
         let parent_checkpoint_id = metadata.parents.get("").cloned();
@@ -717,7 +723,7 @@ impl juncture_core::checkpoint::CheckpointSaver for PostgresSaver {
             .pool
             .begin()
             .await
-            .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
+            .map_err(|e| CoreCheckpointError::Storage(Box::new(e)))?;
 
         // Insert or update checkpoint with new schema
         sqlx::query(
@@ -745,17 +751,17 @@ impl juncture_core::checkpoint::CheckpointSaver for PostgresSaver {
         .bind(&checkpoint.id)
         .bind(&parent_checkpoint_id)
         .bind(&channel_values_bytes)
-        .bind(&channel_versions_bytes)
-        .bind(&versions_seen_bytes)
-        .bind(&pending_tasks_bytes)
-        .bind(&pending_sends_bytes)
-        .bind(&pending_interrupts_bytes)
+        .bind(&channel_versions_json)
+        .bind(&versions_seen_json)
+        .bind(&pending_tasks_json)
+        .bind(&pending_sends_json)
+        .bind(&pending_interrupts_json)
         .bind(i64::from(checkpoint.schema_version))
-        .bind(&metadata_bytes)
+        .bind(&metadata_json)
         .bind(&checkpoint.created_at)
         .execute(&mut *tx)
         .await
-        .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
+        .map_err(|e| CoreCheckpointError::Storage(Box::new(e)))?;
 
         // Clean up old writes for this thread/namespace (crash recovery)
         // When a new checkpoint is saved, all previous pending writes are obsolete
@@ -767,11 +773,11 @@ impl juncture_core::checkpoint::CheckpointSaver for PostgresSaver {
         .bind(&checkpoint_ns)
         .execute(&mut *tx)
         .await
-        .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
+        .map_err(|e| CoreCheckpointError::Storage(Box::new(e)))?;
 
         tx.commit()
             .await
-            .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
+            .map_err(|e| CoreCheckpointError::Storage(Box::new(e)))?;
 
         let mut updated_config = config.clone();
         updated_config.checkpoint_id = Some(checkpoint.id.clone());
@@ -786,26 +792,26 @@ impl juncture_core::checkpoint::CheckpointSaver for PostgresSaver {
         task_id: &str,
     ) -> Result<(), CoreCheckpointError> {
         let thread_id =
-            Self::get_thread_id(config).map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
+            Self::get_thread_id(config).map_err(|e| CoreCheckpointError::Storage(Box::new(e)))?;
         let checkpoint_ns = Self::get_checkpoint_ns(config);
         let checkpoint_id = config
             .checkpoint_id
             .clone()
-            .ok_or_else(|| CoreCheckpointError::Storage("checkpoint_id is required".to_string()))?;
+            .ok_or_else(|| CoreCheckpointError::Storage("checkpoint_id is required".into()))?;
 
         // Begin transaction for atomic write insertion
         let mut tx = self
             .pool
             .begin()
             .await
-            .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
+            .map_err(|e| CoreCheckpointError::Storage(Box::new(e)))?;
 
         // Insert each write with its index
         for (idx, write) in writes.into_iter().enumerate() {
             let value_bytes = self
                 .serializer
                 .serialize(&write.value)
-                .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
+                .map_err(|e| CoreCheckpointError::Storage(Box::new(e)))?;
 
             sqlx::query(
                 "INSERT INTO checkpoint_writes
@@ -825,12 +831,12 @@ impl juncture_core::checkpoint::CheckpointSaver for PostgresSaver {
             .bind(i64::try_from(idx).expect("idx fits in i64"))
             .execute(&mut *tx)
             .await
-            .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
+            .map_err(|e| CoreCheckpointError::Storage(Box::new(e)))?;
         }
 
         tx.commit()
             .await
-            .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
+            .map_err(|e| CoreCheckpointError::Storage(Box::new(e)))?;
 
         Ok(())
     }

@@ -47,7 +47,7 @@ impl<T> ToCoreCheckpointError<T> for Result<T, CheckpointError> {
                 CoreCheckpointError::Other(format!("Schema migration: {from} -> {to}: {reason}"))
             }
             CheckpointError::PoolExhausted => {
-                CoreCheckpointError::Storage("Connection pool exhausted".to_string())
+                CoreCheckpointError::Storage("Connection pool exhausted".into())
             }
         })
     }
@@ -106,7 +106,7 @@ impl SqliteSaver {
         let path = db_path.into();
         let pool = sqlx::sqlite::SqlitePool::connect(&format!("sqlite:{}", path.display()))
             .await
-            .map_err(|e| CheckpointError::Database(e.to_string()))?;
+            .map_err(|e| CheckpointError::Database(Box::new(e)))?;
 
         // Run migrations
         sqlx::query(
@@ -131,7 +131,7 @@ impl SqliteSaver {
         )
         .execute(&pool)
         .await
-        .map_err(|e| CheckpointError::Database(e.to_string()))?;
+        .map_err(|e| CheckpointError::Database(Box::new(e)))?;
 
         // Create checkpoint_writes table for pending writes
         sqlx::query(
@@ -150,7 +150,7 @@ impl SqliteSaver {
         )
         .execute(&pool)
         .await
-        .map_err(|e| CheckpointError::Database(e.to_string()))?;
+        .map_err(|e| CheckpointError::Database(Box::new(e)))?;
 
         // Create indexes
         sqlx::query(
@@ -161,7 +161,7 @@ impl SqliteSaver {
         )
         .execute(&pool)
         .await
-        .map_err(|e| CheckpointError::Database(e.to_string()))?;
+        .map_err(|e| CheckpointError::Database(Box::new(e)))?;
 
         sqlx::query(
             r"
@@ -171,7 +171,7 @@ impl SqliteSaver {
         )
         .execute(&pool)
         .await
-        .map_err(|e| CheckpointError::Database(e.to_string()))?;
+        .map_err(|e| CheckpointError::Database(Box::new(e)))?;
 
         // Add pending_interrupts column for databases created before this field existed.
         // SQLite does not support IF NOT EXISTS for ALTER TABLE ADD COLUMN, so we
@@ -183,7 +183,7 @@ impl SqliteSaver {
         match alter_result {
             Ok(_) => {}
             Err(e) if e.to_string().contains("duplicate column name") => {}
-            Err(e) => return Err(CheckpointError::Database(e.to_string())),
+            Err(e) => return Err(CheckpointError::Database(Box::new(e))),
         }
 
         Ok(Self {
@@ -204,7 +204,7 @@ impl SqliteSaver {
     pub async fn from_connection_string(connection_string: &str) -> Result<Self, CheckpointError> {
         let pool = sqlx::sqlite::SqlitePool::connect(connection_string)
             .await
-            .map_err(|e| CheckpointError::Database(e.to_string()))?;
+            .map_err(|e| CheckpointError::Database(Box::new(e)))?;
 
         // Run migrations
         sqlx::query(
@@ -229,7 +229,7 @@ impl SqliteSaver {
         )
         .execute(&pool)
         .await
-        .map_err(|e| CheckpointError::Database(e.to_string()))?;
+        .map_err(|e| CheckpointError::Database(Box::new(e)))?;
 
         // Create checkpoint_writes table for pending writes
         sqlx::query(
@@ -248,7 +248,7 @@ impl SqliteSaver {
         )
         .execute(&pool)
         .await
-        .map_err(|e| CheckpointError::Database(e.to_string()))?;
+        .map_err(|e| CheckpointError::Database(Box::new(e)))?;
 
         // Create indexes
         sqlx::query(
@@ -259,7 +259,7 @@ impl SqliteSaver {
         )
         .execute(&pool)
         .await
-        .map_err(|e| CheckpointError::Database(e.to_string()))?;
+        .map_err(|e| CheckpointError::Database(Box::new(e)))?;
 
         sqlx::query(
             r"
@@ -269,7 +269,7 @@ impl SqliteSaver {
         )
         .execute(&pool)
         .await
-        .map_err(|e| CheckpointError::Database(e.to_string()))?;
+        .map_err(|e| CheckpointError::Database(Box::new(e)))?;
 
         // Add pending_interrupts column for databases created before this field existed.
         // SQLite does not support IF NOT EXISTS for ALTER TABLE ADD COLUMN, so we
@@ -281,7 +281,7 @@ impl SqliteSaver {
         match alter_result {
             Ok(_) => {}
             Err(e) if e.to_string().contains("duplicate column name") => {}
-            Err(e) => return Err(CheckpointError::Database(e.to_string())),
+            Err(e) => return Err(CheckpointError::Database(Box::new(e))),
         }
 
         Ok(Self {
@@ -339,7 +339,7 @@ impl SqliteSaver {
         config
             .thread_id
             .clone()
-            .ok_or_else(|| CheckpointError::Storage("thread_id is required".to_string()))
+            .ok_or_else(|| CheckpointError::Storage("thread_id is required".into()))
     }
 
     /// Get checkpoint namespace string from config, defaulting to empty string
@@ -430,7 +430,7 @@ impl SqliteSaver {
         schema_migrator: Option<&Arc<SchemaMigratorFn>>,
     ) -> Result<Checkpoint, CoreCheckpointError> {
         let raw_channel_values: serde_json::Value = deserialize_auto(channel_values_bytes)
-            .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
+            .map_err(|e| CoreCheckpointError::Storage(Box::new(e)))?;
 
         // Apply schema migration (M04-002)
         let schema_version_u32 = u32::try_from(schema_version).expect("schema_version fits in u32");
@@ -443,30 +443,30 @@ impl SqliteSaver {
 
         let channel_versions: std::collections::HashMap<String, u64> =
             deserialize_auto(channel_versions_bytes)
-                .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
+                .map_err(|e| CoreCheckpointError::Storage(Box::new(e)))?;
         let versions_seen: std::collections::HashMap<
             String,
             std::collections::HashMap<String, u64>,
         > = deserialize_auto(versions_seen_bytes)
-            .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
+            .map_err(|e| CoreCheckpointError::Storage(Box::new(e)))?;
         let pending_tasks: Vec<CheckpointPendingTask> = pending_tasks_bytes
             .map(|bytes| {
                 deserialize_auto::<Vec<CheckpointPendingTask>>(bytes)
-                    .map_err(|e| CoreCheckpointError::Storage(e.to_string()))
+                    .map_err(|e| CoreCheckpointError::Storage(Box::new(e)))
             })
             .transpose()?
             .unwrap_or_default();
         let pending_sends: Vec<SerializedSend> = pending_sends_bytes
             .map(|bytes| {
                 deserialize_auto::<Vec<SerializedSend>>(bytes)
-                    .map_err(|e| CoreCheckpointError::Storage(e.to_string()))
+                    .map_err(|e| CoreCheckpointError::Storage(Box::new(e)))
             })
             .transpose()?
             .unwrap_or_default();
         let pending_interrupts: Vec<InterruptSignal> = pending_interrupts_bytes
             .map(|bytes| {
                 deserialize_auto::<Vec<InterruptSignal>>(bytes)
-                    .map_err(|e| CoreCheckpointError::Storage(e.to_string()))
+                    .map_err(|e| CoreCheckpointError::Storage(Box::new(e)))
             })
             .transpose()?
             .unwrap_or_default();
@@ -498,34 +498,34 @@ impl SqliteSaver {
     ) -> Result<CheckpointTuple, CoreCheckpointError> {
         let channel_values_bytes: Vec<u8> = row
             .try_get("channel_values")
-            .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
+            .map_err(|e| CoreCheckpointError::Storage(Box::new(e)))?;
         let channel_versions_bytes: Vec<u8> = row
             .try_get("channel_versions")
-            .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
+            .map_err(|e| CoreCheckpointError::Storage(Box::new(e)))?;
         let versions_seen_bytes: Vec<u8> = row
             .try_get("versions_seen")
-            .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
+            .map_err(|e| CoreCheckpointError::Storage(Box::new(e)))?;
         let pending_tasks_bytes: Option<Vec<u8>> = row
             .try_get("pending_tasks")
-            .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
+            .map_err(|e| CoreCheckpointError::Storage(Box::new(e)))?;
         let pending_sends_bytes: Option<Vec<u8>> = row
             .try_get("pending_sends")
-            .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
+            .map_err(|e| CoreCheckpointError::Storage(Box::new(e)))?;
         let pending_interrupts_bytes: Option<Vec<u8>> = row
             .try_get("pending_interrupts")
-            .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
+            .map_err(|e| CoreCheckpointError::Storage(Box::new(e)))?;
         let schema_version: i64 = row
             .try_get("schema_version")
-            .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
+            .map_err(|e| CoreCheckpointError::Storage(Box::new(e)))?;
         let metadata_bytes: Vec<u8> = row
             .try_get("metadata")
-            .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
+            .map_err(|e| CoreCheckpointError::Storage(Box::new(e)))?;
         let checkpoint_id: String = row
             .try_get("checkpoint_id")
-            .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
+            .map_err(|e| CoreCheckpointError::Storage(Box::new(e)))?;
         let created_at: String = row
             .try_get("created_at")
-            .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
+            .map_err(|e| CoreCheckpointError::Storage(Box::new(e)))?;
 
         let checkpoint = Self::deserialize_checkpoint(
             &channel_values_bytes,
@@ -539,10 +539,10 @@ impl SqliteSaver {
             created_at,
             schema_migrator,
         )
-        .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
+        .map_err(|e| CoreCheckpointError::Storage(Box::new(e)))?;
 
         let metadata: CheckpointMetadata = deserialize_auto(&metadata_bytes)
-            .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
+            .map_err(|e| CoreCheckpointError::Storage(Box::new(e)))?;
 
         Ok(CheckpointTuple {
             config: config.clone(),
@@ -616,22 +616,22 @@ impl SqliteSaver {
         .bind(checkpoint_id)
         .fetch_all(&*self.pool)
         .await
-        .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
+        .map_err(|e| CoreCheckpointError::Storage(Box::new(e)))?;
 
         write_rows
             .into_iter()
             .map(|row| {
                 let task_id: String = row
                     .try_get("task_id")
-                    .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
+                    .map_err(|e| CoreCheckpointError::Storage(Box::new(e)))?;
                 let channel: String = row
                     .try_get("channel")
-                    .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
+                    .map_err(|e| CoreCheckpointError::Storage(Box::new(e)))?;
                 let value: String = row
                     .try_get("value")
-                    .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
+                    .map_err(|e| CoreCheckpointError::Storage(Box::new(e)))?;
                 let value_json: serde_json::Value = serde_json::from_str(&value)
-                    .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
+                    .map_err(|e| CoreCheckpointError::Storage(Box::new(e)))?;
 
                 Ok(PendingWrite {
                     task_id,
@@ -651,7 +651,7 @@ impl juncture_core::checkpoint::CheckpointSaver for SqliteSaver {
         config: &RunnableConfig,
     ) -> Result<Option<CheckpointTuple>, CoreCheckpointError> {
         let thread_id =
-            Self::get_thread_id(config).map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
+            Self::get_thread_id(config).map_err(|e| CoreCheckpointError::Storage(Box::new(e)))?;
         let checkpoint_ns = Self::get_checkpoint_ns(config);
 
         let row = if let Some(checkpoint_id) = &config.checkpoint_id {
@@ -684,7 +684,7 @@ impl juncture_core::checkpoint::CheckpointSaver for SqliteSaver {
             .fetch_optional(&*self.pool)
             .await
         }
-        .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
+        .map_err(|e| CoreCheckpointError::Storage(Box::new(e)))?;
 
         match row {
             Some(ref row) => {
@@ -705,7 +705,7 @@ impl juncture_core::checkpoint::CheckpointSaver for SqliteSaver {
         filter: Option<CheckpointFilter>,
     ) -> Result<Vec<CheckpointTuple>, CoreCheckpointError> {
         let thread_id =
-            Self::get_thread_id(config).map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
+            Self::get_thread_id(config).map_err(|e| CoreCheckpointError::Storage(Box::new(e)))?;
         let checkpoint_ns = Self::get_checkpoint_ns(config);
 
         // When non-limit filters are active, metadata fields (source, step) require
@@ -732,7 +732,7 @@ impl juncture_core::checkpoint::CheckpointSaver for SqliteSaver {
             .bind(&checkpoint_ns)
             .fetch_all(&*self.pool)
             .await
-            .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?
+            .map_err(|e| CoreCheckpointError::Storage(Box::new(e)))?
         } else {
             let limit = i64::try_from(filter.as_ref().and_then(|f| f.limit).unwrap_or(10))
                 .expect("limit value fits in i64");
@@ -751,14 +751,14 @@ impl juncture_core::checkpoint::CheckpointSaver for SqliteSaver {
             .bind(limit)
             .fetch_all(&*self.pool)
             .await
-            .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?
+            .map_err(|e| CoreCheckpointError::Storage(Box::new(e)))?
         };
 
         let tuples: Vec<CheckpointTuple> = rows
             .iter()
             .map(|row| Self::row_to_tuple(row, config, self.schema_migrator.as_ref()))
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
+            .map_err(|e| CoreCheckpointError::Storage(Box::new(e)))?;
 
         let results = match filter {
             Some(ref f) if has_non_limit_filter => Self::apply_list_filter(tuples, f),
@@ -784,38 +784,38 @@ impl juncture_core::checkpoint::CheckpointSaver for SqliteSaver {
         metadata: CheckpointMetadata,
     ) -> Result<RunnableConfig, CoreCheckpointError> {
         let thread_id =
-            Self::get_thread_id(config).map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
+            Self::get_thread_id(config).map_err(|e| CoreCheckpointError::Storage(Box::new(e)))?;
         let checkpoint_ns = Self::get_checkpoint_ns(config);
 
         // Serialize each field separately per design spec using the configured serializer
         let channel_values_bytes = self
             .serializer
             .serialize(&checkpoint.channel_values)
-            .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
+            .map_err(|e| CoreCheckpointError::Storage(Box::new(e)))?;
         let channel_versions_bytes = self
             .serializer
             .serialize(&checkpoint.channel_versions)
-            .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
+            .map_err(|e| CoreCheckpointError::Storage(Box::new(e)))?;
         let versions_seen_bytes = self
             .serializer
             .serialize(&checkpoint.versions_seen)
-            .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
+            .map_err(|e| CoreCheckpointError::Storage(Box::new(e)))?;
         let pending_tasks_bytes = self
             .serializer
             .serialize(&checkpoint.pending_tasks)
-            .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
+            .map_err(|e| CoreCheckpointError::Storage(Box::new(e)))?;
         let pending_sends_bytes = self
             .serializer
             .serialize(&checkpoint.pending_sends)
-            .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
+            .map_err(|e| CoreCheckpointError::Storage(Box::new(e)))?;
         let pending_interrupts_bytes = self
             .serializer
             .serialize(&checkpoint.pending_interrupts)
-            .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
+            .map_err(|e| CoreCheckpointError::Storage(Box::new(e)))?;
         let metadata_bytes = self
             .serializer
             .serialize(&metadata)
-            .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
+            .map_err(|e| CoreCheckpointError::Storage(Box::new(e)))?;
 
         // Extract parent_checkpoint_id from metadata.parents using empty namespace key
         let parent_checkpoint_id = metadata.parents.get("").cloned();
@@ -825,7 +825,7 @@ impl juncture_core::checkpoint::CheckpointSaver for SqliteSaver {
             .pool
             .begin()
             .await
-            .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
+            .map_err(|e| CoreCheckpointError::Storage(Box::new(e)))?;
 
         // Insert or update checkpoint with new schema
         sqlx::query(
@@ -863,7 +863,7 @@ impl juncture_core::checkpoint::CheckpointSaver for SqliteSaver {
         .bind(&checkpoint.created_at)
         .execute(&mut *tx)
         .await
-        .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
+        .map_err(|e| CoreCheckpointError::Storage(Box::new(e)))?;
 
         // Clean up old writes for this thread/namespace (crash recovery)
         // When a new checkpoint is saved, all previous pending writes are obsolete
@@ -875,11 +875,11 @@ impl juncture_core::checkpoint::CheckpointSaver for SqliteSaver {
         .bind(&checkpoint_ns)
         .execute(&mut *tx)
         .await
-        .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
+        .map_err(|e| CoreCheckpointError::Storage(Box::new(e)))?;
 
         tx.commit()
             .await
-            .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
+            .map_err(|e| CoreCheckpointError::Storage(Box::new(e)))?;
 
         let mut updated_config = config.clone();
         updated_config.checkpoint_id = Some(checkpoint.id.clone());
@@ -894,24 +894,24 @@ impl juncture_core::checkpoint::CheckpointSaver for SqliteSaver {
         task_id: &str,
     ) -> Result<(), CoreCheckpointError> {
         let thread_id =
-            Self::get_thread_id(config).map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
+            Self::get_thread_id(config).map_err(|e| CoreCheckpointError::Storage(Box::new(e)))?;
         let checkpoint_ns = Self::get_checkpoint_ns(config);
         let checkpoint_id = config
             .checkpoint_id
             .clone()
-            .ok_or_else(|| CoreCheckpointError::Storage("checkpoint_id is required".to_string()))?;
+            .ok_or_else(|| CoreCheckpointError::Storage("checkpoint_id is required".into()))?;
 
         // Begin transaction for atomic write insertion
         let mut tx = self
             .pool
             .begin()
             .await
-            .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
+            .map_err(|e| CoreCheckpointError::Storage(Box::new(e)))?;
 
         // Insert each write with its index
         for (idx, write) in writes.into_iter().enumerate() {
             let value_str = serde_json::to_string(&write.value)
-                .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
+                .map_err(|e| CoreCheckpointError::Storage(Box::new(e)))?;
 
             sqlx::query(
                 "INSERT INTO checkpoint_writes
@@ -931,12 +931,12 @@ impl juncture_core::checkpoint::CheckpointSaver for SqliteSaver {
             .bind(i64::try_from(idx).expect("idx fits in i64"))
             .execute(&mut *tx)
             .await
-            .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
+            .map_err(|e| CoreCheckpointError::Storage(Box::new(e)))?;
         }
 
         tx.commit()
             .await
-            .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
+            .map_err(|e| CoreCheckpointError::Storage(Box::new(e)))?;
 
         Ok(())
     }

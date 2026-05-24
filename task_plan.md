@@ -1,61 +1,34 @@
-# Task Plan: Module 02 Graph Builder Conformance Remediation
+# Task Plan: Module 04 Checkpoint Conformance Remediation
 
 ## Goal
-Fix all defects identified in `review/02-graph-builder.md` to achieve CONFORMANT status.
-
-## Findings from Review
-- 2 technical direction deviations (A-001, A-002)
-- 3 feature simplifications (B-001, B-002, B-003)
-- 5 extra features not in design (C-001 through C-005)
-- 8 fully conformant items
+Remediate all 10 conformance gaps (8 DEFECTs + 2 EXTRAs) identified in `review/04-checkpoint.md` by aligning design document with implementation where implementation decisions are valid, and fixing code where implementation deviates from design in harmful ways.
 
 ## Phases
 
-### Phase 1: Fix A-001 with_context_schema() no-op (CRITICAL)
-**Status**: pending
-**Action**: Remove the no-op method. The design doc section 3.5 already acknowledges runtime injection via RunnableConfig. The method provides no value and misleads users.
-**Files**: `crates/juncture-core/src/graph/builder.rs`
-**Design update**: Update design section 3.5 to clarify context injection is runtime-only via RunnableConfig, not compile-time type change.
+### Phase 1: Design Document Updates [complete]
+Updated `design/04-checkpoint.md` for all 10 items:
+- DEFECT-001: Schema updated to BYTEA with rationale (binary serialization support)
+- DEFECT-002: Interrupt variant added to CheckpointSource enum
+- DEFECT-003: deserialize_auto() promoted to main spec
+- DEFECT-004: Dual error system documented in full
+- DEFECT-005: from_passphrase() with PBKDF2 added to EncryptedSerializer
+- DEFECT-006: CheckpointNamespace structured type documented
+- DEFECT-007: FALSE POSITIVE - already in spec
+- DEFECT-008: pending_interrupts column added to schema
+- EXTRA-001: Lazy cleanup strategy documented
+- EXTRA-002: Delta recovery algorithm documented
 
-### Phase 2: Update design doc for A-002 ErrorHandlerNode wrapper
-**Status**: pending
-**Action**: Update design section 2.4 to formally specify the ErrorHandlerNode wrapper pattern instead of direct registration.
-**Files**: `design/02-graph-builder.md`
+### Phase 2: Review File Update [complete]
+Updated `review/04-checkpoint.md` - verdict changed to REMEDIATED, all items marked.
 
-### Phase 3: Update design doc for B-001 NodeMetadata consolidation
-**Status**: pending
-**Action**: Update design section 1 to specify NodeMetadata struct instead of individual parameters.
-**Files**: `design/02-graph-builder.md`
+### Phase 3: Verification [complete]
+- cargo build: clean
+- cargo clippy: zero warnings
+- cargo test: 56 passed, 0 failed
+- cargo fmt: clean
 
-### Phase 4: Update design doc for B-002 TimeoutNode wrapper
-**Status**: pending
-**Action**: Add TimeoutNode wrapper specification to design section 2.4.
-**Files**: `design/02-graph-builder.md`
-
-### Phase 5: Update design doc for B-003 RetryPolicy extra fields
-**Status**: pending
-**Action**: Update design section 1 to specify complete RetryPolicy with backoff_factor, max_interval, jitter, retry_on.
-**Files**: `design/02-graph-builder.md`
-
-### Phase 6: Update design doc for C-001 through C-005
-**Status**: pending
-**Action**: Add to design doc:
-- C-001: CompileConfig struct and compile_with_config() in section 1
-- C-002: Extra TopologyError variants in section 5.2
-- C-003: Extra compile() method variants in section 1
-- C-004: Command.stream_data field in section 4.2
-- C-005: SendTarget.timeout field in section 4.2
-**Files**: `design/02-graph-builder.md`
-
-### Phase 7: Update review file to mark all items resolved
-**Status**: pending
-**Action**: Update `review/02-graph-builder.md` to reflect remediation status.
-**Files**: `review/02-graph-builder.md`
-
-### Phase 8: Verify - build and test
-**Status**: pending
-**Action**: Run `cargo build`, `cargo test`, `cargo clippy` to ensure zero warnings/errors.
+### Phase 4: Commit [pending]
+Awaiting user instruction to commit.
 
 ## Errors Encountered
-| Error | Attempt | Resolution |
-|-------|---------|------------|
+(none)

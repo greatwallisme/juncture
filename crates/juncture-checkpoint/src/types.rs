@@ -122,7 +122,9 @@ pub fn recover_from_deltas(
                     .is_some_and(|obj| !obj.is_empty())
         })
         .ok_or_else(|| {
-            CheckpointError::Deserialize("No full snapshot found in checkpoint chain".to_string())
+            CheckpointError::deserialize_msg(
+                "No full snapshot found in checkpoint chain".to_string(),
+            )
         })?;
 
     // Clone the base checkpoint as our starting point
@@ -152,7 +154,7 @@ pub fn recover_from_deltas(
         .channel_values
         .as_object_mut()
         .ok_or_else(|| {
-            CheckpointError::Deserialize(
+            CheckpointError::deserialize_msg(
                 "Base checkpoint channel_values is not an object".to_string(),
             )
         })?;

@@ -25,15 +25,15 @@ pub const CHECKPOINT_NS_SEPARATOR: &str = "|";
 /// This type is defined in `juncture-core` for use in the `CheckpointSaver` trait.
 /// The juncture-checkpoint crate provides a compatible implementation with
 /// additional storage-specific errors.
-#[derive(Debug, Clone, thiserror::Error)]
+#[derive(Debug, thiserror::Error)]
 pub enum CheckpointError {
     /// Serialization failed
     #[error("Serialization failed: {0}")]
-    Serialize(String),
+    Serialize(#[source] Box<dyn std::error::Error + Send + Sync>),
 
     /// Deserialization failed
     #[error("Deserialization failed: {0}")]
-    Deserialize(String),
+    Deserialize(#[source] Box<dyn std::error::Error + Send + Sync>),
 
     /// Checkpoint not found
     #[error("Checkpoint not found: thread={thread_id}, id={checkpoint_id}")]
@@ -46,7 +46,7 @@ pub enum CheckpointError {
 
     /// Storage operation error
     #[error("Storage error: {0}")]
-    Storage(String),
+    Storage(#[source] Box<dyn std::error::Error + Send + Sync>),
 
     /// Other checkpoint errors
     #[error("Checkpoint error: {0}")]
@@ -55,7 +55,7 @@ pub enum CheckpointError {
 
 impl From<serde_json::Error> for CheckpointError {
     fn from(err: serde_json::Error) -> Self {
-        Self::Serialize(err.to_string())
+        Self::Serialize(Box::new(err))
     }
 }
 

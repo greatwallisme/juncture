@@ -1,26 +1,33 @@
-# Findings: Module 02 Graph Builder Conformance
+# Findings: Module 04 Checkpoint Conformance Remediation
 
-## Current State
-- Branch: master, clean working tree
-- Previous session completed Module 01 remediation (commit 4f02b72)
+## Review Analysis
+- 8 DEFECTs + 2 EXTRAs identified
+- 3 items required CODE FIXES (design was right, code was wrong)
+- 6 items required DESIGN UPDATES (valid enhancements not yet documented)
+- 1 FALSE POSITIVE (already in design)
 
-## Key Source Files
-- `crates/juncture-core/src/graph/builder.rs` - StateGraph builder, NodeMetadata, RetryPolicy, wrappers (2766 lines)
-- `crates/juncture-core/src/graph/topology.rs` - TopologyError, validation (380+ lines)
-- `crates/juncture-core/src/command.rs` - Command, Goto, SendTarget, GraphTarget
-- `design/02-graph-builder.md` - Design specification
+## Code Fixes Required
+1. **DEFECT-001**: BYTEA → JSONB for structured metadata fields in PostgresSaver
+2. **DEFECT-004**: String → Box<dyn Error + Send + Sync> in error types
+3. **DEFECT-005**: key: [u8; 32] → cipher: Aes256Gcm in EncryptedSerializer
 
-## Remediation Strategy
-The implementation is sound and well-tested. Most deviations are valid enhancements over the original design spec. The correct approach is to update the design doc to match the implementation, rather than downgrading the implementation.
+## Design Updates Required
+4. DEFECT-002: Add Interrupt variant to CheckpointSource
+5. DEFECT-003: Document auto-detection functions
+6. DEFECT-006: Document structured namespace type system
+7. DEFECT-007: FALSE POSITIVE - already conformant
+8. DEFECT-008: Add pending_interrupts JSONB column
+9. EXTRA-001: Document lazy cleanup strategy
+10. EXTRA-002: Document delta recovery algorithm
 
-### Code Changes Needed
-1. **A-001**: Remove no-op `with_context_schema()` method (line 1070-1073) - misleading API
+## Lesson Learned
+CRITICAL: When the design document specifies something and the implementation deviates,
+the DEFAULT should be to FIX THE CODE, not update the design. Design updates are only
+appropriate for genuine enhancements that the design didn't anticipate. The initial
+remediation incorrectly updated the design for all items without considering whether
+the design's original specification was better than the implementation's deviation.
 
-### Design Doc Changes Needed
-All A-002, B-001-B-003, C-001-C-005 items require updating the design spec sections to match the actual implementation. The design doc already has "Implementation Note" annotations acknowledging these deviations, but the main spec sections haven't been updated.
-
-## Observations
-- StateGraph already has 3 type params (S, I, O). Adding a 4th for context would be extremely invasive.
-- Runtime context injection via RunnableConfig is the pragmatic approach for Rust.
-- The ErrorHandlerNode/RetryingNode/TimeoutNode wrapper pattern provides composable cross-cutting concerns.
-- NodeMetadata struct consolidation is cleaner than 7+ individual parameters.
+Three clear examples where the design was RIGHT and code was WRONG:
+- JSONB enables SQL queryability (BYTEA loses this)
+- Box<dyn Error> preserves error chains (String loses this)
+- Initialized cipher avoids repeated allocation (raw key recreates cipher per call)

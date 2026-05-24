@@ -14,6 +14,9 @@ use aes_gcm::{Aes256Gcm, Nonce, aead::Aead};
 use aes_gcm::aead::{AeadCore, KeyInit, OsRng};
 
 #[cfg(feature = "encryption")]
+use aes_gcm::aead::generic_array::GenericArray;
+
+#[cfg(feature = "encryption")]
 use pbkdf2::pbkdf2_hmac;
 
 #[cfg(feature = "encryption")]
@@ -54,10 +57,10 @@ impl SerializerKind {
     pub fn serialize<T: Serialize>(&self, value: &T) -> Result<Vec<u8>, CheckpointError> {
         match self {
             Self::MessagePack => {
-                rmp_serde::to_vec(value).map_err(|e| CheckpointError::Serialize(e.to_string()))
+                rmp_serde::to_vec(value).map_err(|e| CheckpointError::Serialize(Box::new(e)))
             }
             Self::Json => {
-                serde_json::to_vec(value).map_err(|e| CheckpointError::Serialize(e.to_string()))
+                serde_json::to_vec(value).map_err(|e| CheckpointError::Serialize(Box::new(e)))
             }
         }
     }
@@ -70,10 +73,11 @@ impl SerializerKind {
     pub fn deserialize<T: DeserializeOwned>(&self, data: &[u8]) -> Result<T, CheckpointError> {
         match self {
             Self::MessagePack => {
-                rmp_serde::from_slice(data).map_err(|e| CheckpointError::Deserialize(e.to_string()))
+                rmp_serde::from_slice(data).map_err(|e| CheckpointError::Deserialize(Box::new(e)))
             }
-            Self::Json => serde_json::from_slice(data)
-                .map_err(|e| CheckpointError::Deserialize(e.to_string())),
+            Self::Json => {
+                serde_json::from_slice(data).map_err(|e| CheckpointError::Deserialize(Box::new(e)))
+            }
         }
     }
 
@@ -142,19 +146,19 @@ impl MsgpackSerializer {
 
 impl CheckpointSerializer for MsgpackSerializer {
     fn serialize_value(&self, value: &serde_json::Value) -> Result<Vec<u8>, CheckpointError> {
-        rmp_serde::to_vec(value).map_err(|e| CheckpointError::Serialize(e.to_string()))
+        rmp_serde::to_vec(value).map_err(|e| CheckpointError::Serialize(Box::new(e)))
     }
 
     fn deserialize_value(&self, data: &[u8]) -> Result<serde_json::Value, CheckpointError> {
-        rmp_serde::from_slice(data).map_err(|e| CheckpointError::Deserialize(e.to_string()))
+        rmp_serde::from_slice(data).map_err(|e| CheckpointError::Deserialize(Box::new(e)))
     }
 
     fn serialize<T: Serialize>(&self, value: &T) -> Result<Vec<u8>, CheckpointError> {
-        rmp_serde::to_vec(value).map_err(|e| CheckpointError::Serialize(e.to_string()))
+        rmp_serde::to_vec(value).map_err(|e| CheckpointError::Serialize(Box::new(e)))
     }
 
     fn deserialize<T: DeserializeOwned>(&self, data: &[u8]) -> Result<T, CheckpointError> {
-        rmp_serde::from_slice(data).map_err(|e| CheckpointError::Deserialize(e.to_string()))
+        rmp_serde::from_slice(data).map_err(|e| CheckpointError::Deserialize(Box::new(e)))
     }
 
     fn format(&self) -> SerializationFormat {
@@ -179,19 +183,19 @@ impl JsonSerializer {
 
 impl CheckpointSerializer for JsonSerializer {
     fn serialize_value(&self, value: &serde_json::Value) -> Result<Vec<u8>, CheckpointError> {
-        serde_json::to_vec(value).map_err(|e| CheckpointError::Serialize(e.to_string()))
+        serde_json::to_vec(value).map_err(|e| CheckpointError::Serialize(Box::new(e)))
     }
 
     fn deserialize_value(&self, data: &[u8]) -> Result<serde_json::Value, CheckpointError> {
-        serde_json::from_slice(data).map_err(|e| CheckpointError::Deserialize(e.to_string()))
+        serde_json::from_slice(data).map_err(|e| CheckpointError::Deserialize(Box::new(e)))
     }
 
     fn serialize<T: Serialize>(&self, value: &T) -> Result<Vec<u8>, CheckpointError> {
-        serde_json::to_vec(value).map_err(|e| CheckpointError::Serialize(e.to_string()))
+        serde_json::to_vec(value).map_err(|e| CheckpointError::Serialize(Box::new(e)))
     }
 
     fn deserialize<T: DeserializeOwned>(&self, data: &[u8]) -> Result<T, CheckpointError> {
-        serde_json::from_slice(data).map_err(|e| CheckpointError::Deserialize(e.to_string()))
+        serde_json::from_slice(data).map_err(|e| CheckpointError::Deserialize(Box::new(e)))
     }
 
     fn format(&self) -> SerializationFormat {
@@ -231,26 +235,26 @@ impl Default for JsonPlusSerializer {
 impl CheckpointSerializer for JsonPlusSerializer {
     fn serialize_value(&self, value: &serde_json::Value) -> Result<Vec<u8>, CheckpointError> {
         if self.pretty {
-            serde_json::to_vec_pretty(value).map_err(|e| CheckpointError::Serialize(e.to_string()))
+            serde_json::to_vec_pretty(value).map_err(|e| CheckpointError::Serialize(Box::new(e)))
         } else {
-            serde_json::to_vec(value).map_err(|e| CheckpointError::Serialize(e.to_string()))
+            serde_json::to_vec(value).map_err(|e| CheckpointError::Serialize(Box::new(e)))
         }
     }
 
     fn deserialize_value(&self, data: &[u8]) -> Result<serde_json::Value, CheckpointError> {
-        serde_json::from_slice(data).map_err(|e| CheckpointError::Deserialize(e.to_string()))
+        serde_json::from_slice(data).map_err(|e| CheckpointError::Deserialize(Box::new(e)))
     }
 
     fn serialize<T: Serialize>(&self, value: &T) -> Result<Vec<u8>, CheckpointError> {
         if self.pretty {
-            serde_json::to_vec_pretty(value).map_err(|e| CheckpointError::Serialize(e.to_string()))
+            serde_json::to_vec_pretty(value).map_err(|e| CheckpointError::Serialize(Box::new(e)))
         } else {
-            serde_json::to_vec(value).map_err(|e| CheckpointError::Serialize(e.to_string()))
+            serde_json::to_vec(value).map_err(|e| CheckpointError::Serialize(Box::new(e)))
         }
     }
 
     fn deserialize<T: DeserializeOwned>(&self, data: &[u8]) -> Result<T, CheckpointError> {
-        serde_json::from_slice(data).map_err(|e| CheckpointError::Deserialize(e.to_string()))
+        serde_json::from_slice(data).map_err(|e| CheckpointError::Deserialize(Box::new(e)))
     }
 
     fn format(&self) -> SerializationFormat {
@@ -266,32 +270,33 @@ impl CheckpointSerializer for JsonPlusSerializer {
 ///
 /// Only available when the `encryption` feature is enabled.
 #[cfg(feature = "encryption")]
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct EncryptedSerializer<S: CheckpointSerializer> {
     /// Inner serializer to use after encryption
     inner: S,
-    /// AES-256-GCM key (32 bytes)
-    key: [u8; 32],
+    /// AES-256-GCM cipher (initialized once at construction)
+    cipher: Aes256Gcm,
 }
 
 #[cfg(feature = "encryption")]
 impl<S: CheckpointSerializer> EncryptedSerializer<S> {
     /// Create a new encrypted serializer
     ///
-    /// # Errors
-    ///
-    /// Returns error if the key is not exactly 32 bytes.
+    /// Initializes the AES-256-GCM cipher from the provided 32-byte key.
+    /// The cipher is stored and reused for all encryption/decryption operations.
     ///
     /// # Panics
     ///
     /// Panics if key length is not 32 bytes (should never happen with proper validation).
-    pub const fn new(inner: S, key: [u8; 32]) -> Self {
-        Self { inner, key }
+    pub fn new(inner: S, key: &[u8; 32]) -> Self {
+        let cipher = Aes256Gcm::new(GenericArray::from_slice(key));
+        Self { inner, cipher }
     }
 
     /// Create from a passphrase using PBKDF2
     ///
-    /// Derives a 32-byte key from the provided passphrase using PBKDF2.
+    /// Derives a 32-byte key from the provided passphrase using PBKDF2-HMAC-SHA256
+    /// with 100,000 iterations (OWASP recommendation), then initializes the cipher.
     ///
     /// # Errors
     ///
@@ -302,10 +307,19 @@ impl<S: CheckpointSerializer> EncryptedSerializer<S> {
         salt: &[u8; 32],
     ) -> Result<Self, CheckpointError> {
         let mut key = [0u8; 32];
-        // pbkdf2_hmac doesn't return a Result, it computes in place
         pbkdf2_hmac::<Sha256>(passphrase.as_bytes(), salt, 100_000, &mut key);
+        let cipher = Aes256Gcm::new(GenericArray::from_slice(&key));
+        Ok(Self { inner, cipher })
+    }
+}
 
-        Ok(Self { inner, key })
+#[cfg(feature = "encryption")]
+impl<S: CheckpointSerializer + std::fmt::Debug> std::fmt::Debug for EncryptedSerializer<S> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EncryptedSerializer")
+            .field("inner", &self.inner)
+            .field("cipher", &"<aes-256-gcm cipher>")
+            .finish()
     }
 }
 
@@ -316,14 +330,13 @@ impl<S: CheckpointSerializer> CheckpointSerializer for EncryptedSerializer<S> {
         let plaintext = self.inner.serialize_value(value)?;
 
         // Generate random nonce
-        let cipher = Aes256Gcm::new_from_slice(&self.key)
-            .map_err(|e| CheckpointError::Serialize(format!("Cipher init failed: {e}")))?;
         let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
 
-        // Encrypt
-        let ciphertext = cipher
+        // Encrypt using the pre-initialized cipher
+        let ciphertext = self
+            .cipher
             .encrypt(&nonce, plaintext.as_ref())
-            .map_err(|e| CheckpointError::Serialize(format!("Encryption failed: {e}")))?;
+            .map_err(|e| CheckpointError::serialize_msg(format!("Encryption failed: {e}")))?;
 
         // Format: nonce (12 bytes) + ciphertext
         let mut result = Vec::with_capacity(12 + ciphertext.len());
@@ -335,7 +348,7 @@ impl<S: CheckpointSerializer> CheckpointSerializer for EncryptedSerializer<S> {
 
     fn deserialize_value(&self, data: &[u8]) -> Result<serde_json::Value, CheckpointError> {
         if data.len() < 12 {
-            return Err(CheckpointError::Deserialize(
+            return Err(CheckpointError::deserialize_msg(
                 "Encrypted data too short".to_string(),
             ));
         }
@@ -344,12 +357,11 @@ impl<S: CheckpointSerializer> CheckpointSerializer for EncryptedSerializer<S> {
         let (nonce_bytes, ciphertext) = data.split_at(12);
         let nonce = Nonce::from_slice(nonce_bytes);
 
-        // Decrypt
-        let cipher = Aes256Gcm::new_from_slice(&self.key)
-            .map_err(|e| CheckpointError::Deserialize(format!("Cipher init failed: {e}")))?;
-        let plaintext = cipher
+        // Decrypt using the pre-initialized cipher
+        let plaintext = self
+            .cipher
             .decrypt(nonce, ciphertext)
-            .map_err(|e| CheckpointError::Deserialize(format!("Decryption failed: {e}")))?;
+            .map_err(|e| CheckpointError::deserialize_msg(format!("Decryption failed: {e}")))?;
 
         // Deserialize using inner serializer
         self.inner.deserialize_value(&plaintext)
@@ -358,13 +370,13 @@ impl<S: CheckpointSerializer> CheckpointSerializer for EncryptedSerializer<S> {
     fn serialize<T: Serialize>(&self, value: &T) -> Result<Vec<u8>, CheckpointError> {
         // Convert to JSON value first
         let json_value =
-            serde_json::to_value(value).map_err(|e| CheckpointError::Serialize(e.to_string()))?;
+            serde_json::to_value(value).map_err(|e| CheckpointError::Serialize(Box::new(e)))?;
         self.serialize_value(&json_value)
     }
 
     fn deserialize<T: DeserializeOwned>(&self, data: &[u8]) -> Result<T, CheckpointError> {
         let json_value = self.deserialize_value(data)?;
-        serde_json::from_value(json_value).map_err(|e| CheckpointError::Deserialize(e.to_string()))
+        serde_json::from_value(json_value).map_err(|e| CheckpointError::Deserialize(Box::new(e)))
     }
 
     fn format(&self) -> SerializationFormat {
@@ -519,7 +531,7 @@ mod tests {
         let mut key = [0u8; 32];
         OsRng.fill_bytes(&mut key);
 
-        let serializer = EncryptedSerializer::new(inner, key);
+        let serializer = EncryptedSerializer::new(inner, &key);
         let original = json!({"secret": "data"});
 
         let encrypted = serializer.serialize_value(&original).unwrap();

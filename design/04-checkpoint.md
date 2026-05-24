@@ -75,6 +75,146 @@ DeltaSnapshot 使用祖先遍历（ancestor walk）重建完整状态：
   └─ 4. 生成完整 Checkpoint 对象
 ```
 
+#### 详细恢复算法
+
+```rust
+/// 从增量 checkpoint 列表中恢复完整的 checkpoint 状态
+///
+/// 此函数实现祖先遍历（ancestor walk）算法，通过找到最近的完整快照
+/// 并向前重放所有增量写入来重建目标 checkpoint 的完整状态。
+///
+/// # 算法步骤
+///
+/// 1. **验证输入**：在 checkpoint 列表中定位目标 checkpoint
+/// 2. **寻找基础快照**：向后遍历找到最近的一个完整 checkpoint（channel_values 非空）
+/// 3. **收集增量写入**：收集基础快照之后的所有 pending_writes
+/// 4. **重放增量**：将增量写入按顺序应用到基础快照
+/// 5. **更新元数据**：更新 channel_versions、new_versions、清零 delta 计数器
+///
+/// # 参数
+///
+/// * `checkpoints` - 按时间排序的 checkpoint 列表（最新在前）
+/// * `target_checkpoint_id` - 要恢复的目标 checkpoint ID
+///
+/// # 返回
+///
+/// * `Ok(Some(checkpoint))` - 成功重建的完整 checkpoint
+/// * `Ok(None)` - 目标 checkpoint 不在列表中
+/// * `Err(...)` - 恢复失败（例如找不到完整快照）
+pub fn recover_from_deltas(
+    checkpoints: &[CheckpointTuple],
+    target_checkpoint_id: &str,
+) -> Result<Option<Checkpoint>, CheckpointError> {
+    // Step 1: 验证输入 - 在列表中找到目标 checkpoint
+    let target_index = checkpoints
+        .iter()
+        .position(|t| t.checkpoint.id == target_checkpoint_id);
+
+    let Some(target_idx) = target_index else {
+        return Ok(None);
+    };
+
+    // 仅考虑到目标为止的 checkpoints
+    let relevant_checkpoints = &checkpoints[..=target_idx];
+
+    // Step 2: 寻找最近的完整快照
+    // 完整快照是指包含完整 channel_values 的 checkpoint
+    // 我们从目标向后迭代以找到最近的完整 checkpoint
+    let base_snapshot = relevant_checkpoints
+        .iter()
+        .rev()
+        .find(|t| {
+            !t.checkpoint.channel_values.is_null()
+                && t.checkpoint
+                    .channel_values
+                    .as_object()
+                    .is_some_and(|obj| !obj.is_empty())
+        })
+        .ok_or_else(|| {
+            CheckpointError::Deserialize("No full snapshot found in checkpoint chain".to_string())
+        })?;
+
+    // 克隆基础 checkpoint 作为起点
+    let mut reconstructed = base_snapshot.checkpoint.clone();
+
+    // 收集基础快照之后的所有 pending writes
+    let mut all_deltas: Vec<(&String, PendingWrite)> = Vec::new();
+
+    // Step 3: 向前遍历收集所有增量写入
+    for tuple in relevant_checkpoints {
+        // 跳过基础快照之前或与其同级的 checkpoints
+        if tuple.checkpoint.id <= base_snapshot.checkpoint.id {
+            continue;
+        }
+
+        // 收集此 checkpoint 的 pending writes
+        for write in &tuple.pending_writes {
+            all_deltas.push((&tuple.checkpoint.id, write.clone()));
+        }
+    }
+
+    // 按 checkpoint ID 排序增量以确保正确顺序
+    all_deltas.sort_by(|a, b| a.0.cmp(b.0));
+
+    // Step 4: 将增量写入重放到快照
+    let channel_values = reconstructed
+        .channel_values
+        .as_object_mut()
+        .ok_or_else(|| {
+            CheckpointError::Deserialize(
+                "Base checkpoint channel_values is not an object".to_string(),
+            )
+        })?;
+
+    // 跟踪哪些 channel 被修改了
+    let mut modified_channels = HashMap::<String, u64>::new();
+
+    for (_checkpoint_id, write) in all_deltas {
+        let channel = &write.channel;
+
+        // Delta channel 使用 Append 语义
+        // 在完整实现中，操作类型由 channel 的 reducer 类型配置决定
+        if let serde_json::Value::Array(values) = &write.value {
+            // 将数组值追加到现有 channel 数据
+            let entry = channel_values
+                .entry(channel.clone())
+                .or_insert(serde_json::Value::Array(vec![]));
+
+            if let Some(arr) = entry.as_array_mut() {
+                arr.extend(values.clone().into_iter());
+            }
+        } else {
+            // 非数组值使用 Replace 语义
+            channel_values.insert(channel.clone(), write.value.clone());
+        }
+
+        // 更新版本计数器（两个分支通用）
+        *modified_channels.entry(channel.clone()).or_insert(0) += 1;
+    }
+
+    // Step 5: 更新 checkpoint 元数据
+    // 为修改的 channel 更新 channel_versions
+    for (channel, delta_count) in &modified_channels {
+        let current_version = reconstructed
+            .channel_versions
+            .get(channel)
+            .copied()
+            .unwrap_or(0);
+        reconstructed
+            .channel_versions
+            .insert(channel.clone(), current_version + delta_count);
+    }
+
+    // 更新 new_versions 以反映恢复期间修改的 channel
+    reconstructed.new_versions = modified_channels;
+
+    // 清除 delta 计数器，因为我们现在有了完整快照
+    reconstructed.counters_since_delta_snapshot.clear();
+
+    Ok(Some(reconstructed))
+}
+```
+
 DeltaSnapshot 的 blob 格式：
 
 ```rust
@@ -308,19 +448,11 @@ pub enum CheckpointSource {
     Update,
     /// 从历史 checkpoint 分叉时
     Fork,
+    /// Human-in-the-loop 中断（通过 `Command::interrupt` 触发）
+    /// 字段值为触发中断的节点名称
+    /// 用于 HITL 工作流，允许 `get_state_history` 过滤器区分 HITL 暂停点和正常执行 checkpoint
+    Interrupt { node: String },
 }
-
-// > 实际实现增加了 `CheckpointSource::Interrupt` 变体用于
-// > human-in-the-loop (HITL) 工作流。当节点触发中断时（通过 `Command::interrupt`），
-// > 在该点保存的 checkpoint 被标记为 `source: Interrupt`。这允许 `get_state_history`
-// > 过滤器区分 HITL 暂停点和正常执行 checkpoint，使 UI 能够显示"等待人工输入"状态
-// > 并按中断事件过滤历史记录。
-
-// > **Implementation Note (C-04-1)**: Implementation adds `CheckpointSource::Interrupt` variant
-// > for human-in-the-loop (HITL) workflows. When a node triggers an interrupt (via `Command::interrupt`),
-// > the checkpoint saved at that point is tagged with `source: Interrupt`. This allows `get_state_history`
-// > filters to distinguish HITL pause points from normal execution checkpoints, enabling UIs to
-// > display "awaiting human input" status and filter history by interrupt events.
 ```
 
 ### 3.4 CheckpointTuple
@@ -531,6 +663,7 @@ CREATE TABLE IF NOT EXISTS checkpoints (
     versions_seen JSONB NOT NULL,
     pending_tasks JSONB,
     pending_sends JSONB,
+    pending_interrupts JSONB,
     schema_version INTEGER NOT NULL DEFAULT 1,
     metadata JSONB NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -554,8 +687,10 @@ CREATE INDEX IF NOT EXISTS idx_checkpoints_thread_time
 
 配置：
 - 连接池（sqlx::PgPool），默认 max_connections = 10
-- 使用 JSONB 存储结构化元数据（支持查询）
-- 使用 BYTEA 存储序列化的 state（避免 JSON 编码开销）
+- 使用 `JSONB` 存储结构化元数据字段（channel_versions、versions_seen、pending_tasks、pending_sends、pending_interrupts、metadata）以支持 SQL 级别查询
+- 使用 `BYTEA` 存储二进制序列化状态数据（channel_values）
+- `JSONB` 字段使用 serde_json 直接序列化/反序列化，提供 SQL 查询能力和索引支持
+- pending_interrupts 列存储 human-in-the-loop 工作流中的中断信号
 - 支持 `ON CONFLICT ... DO UPDATE` 实现 upsert 语义
 
 ### 4.4 通用实现注意事项
@@ -590,25 +725,56 @@ pub enum SerializationFormat {
     Json,
 }
 
-/// 自动检测 checkpoint 序列化格式
-impl Checkpoint {
-    pub fn detect_format(data: &[u8]) -> SerializationFormat {
-        // MessagePack 格式以特定字节开头
-        // JSON 格式以 { 或 [ 开头
-        if data.starts_with(&[0x82, 0xa7]) || data.starts_with(&[0x83]) {
-            SerializationFormat::MessagePack
-        } else {
-            SerializationFormat::Json
-        }
+/// 自动检测 checkpoint 序列化格式（独立函数）
+///
+/// 通过检查字节序列开头的魔数来区分 MessagePack 和 JSON 格式。
+/// MessagePack 常见标记：fixmap (0x80-0x8f)、fixarray (0x90-0x9f)、map16 (0xde)、map32 (0xdf)
+/// JSON 格式以 '{' (0x7b)、'[' (0x5b) 或空白字符开头
+pub fn detect_format(data: &[u8]) -> SerializationFormat {
+    if data.is_empty() {
+        return SerializationFormat::Json;
     }
+
+    let first_byte = data[0];
+
+    // JSON 格式检测
+    if first_byte == b'{' || first_byte == b'[' || first_byte.is_ascii_whitespace() {
+        return SerializationFormat::Json;
+    }
+
+    // MessagePack 格式检测（启发式）
+    if (0x80..=0x9f).contains(&first_byte)
+        || first_byte == 0xde
+        || first_byte == 0xdf
+        || first_byte == 0xdc
+        || first_byte == 0xdd
+    {
+        return SerializationFormat::MessagePack;
+    }
+
+    // 未知格式默认为 JSON
+    SerializationFormat::Json
 }
 
-// > **实现备注 (C-04-002)**: 实际实现的序列化系统比设计更为完善。除了 Msgpack 和 JSON 格式外，
-// > 实现提供了读取时自动检测序列化格式的功能（通过魔数字节检查），允许无缝从 JSON 迁移到 Msgpack
-// > 而不丢失数据。`detect_format()` 方法检查字节序列开头（Msgpack 以特定字节如 0x82/0x83 开头，
-// > JSON 以 `{` 或 `[` 开头），自动选择正确的反序列化器。`deserialize_auto()` 提供了统一的
-// > 反序列化入口，在读取时自动处理格式检测和解复用。这种三层系统（Msgpack/JSON + 加密 + 自动检测）
-// > 超出了设计中指定的双格式系统。
+/// 使用自动格式检测反序列化（独立函数）
+///
+/// 检测数据是 MessagePack 还是 JSON，然后使用相应的序列化器进行反序列化。
+/// 如果检测有歧义，则回退到 JSON 反序列化。
+///
+/// 此函数提供向后兼容性，允许读取使用不同序列化器编写的旧 checkpoint（例如，
+/// 现在默认使用 MessagePack 的系统读取旧的 JSON 数据）。
+pub fn deserialize_auto<T: DeserializeOwned>(data: &[u8]) -> Result<T, CheckpointError> {
+    let format = detect_format(data);
+    match format {
+        SerializationFormat::MessagePack => {
+            // 先尝试 msgpack，失败则回退到 JSON
+            MsgpackSerializer::new()
+                .deserialize::<T>(data)
+                .or_else(|_| JsonSerializer::new().deserialize::<T>(data))
+        }
+        SerializationFormat::Json => JsonSerializer::new().deserialize::<T>(data),
+    }
+}
 ```
 
 ### 5.2 JSON 备用（兼容性）
@@ -697,35 +863,48 @@ Checkpoint 中存储 `schema_version`。加载时：
 /// AES-256-GCM 加密序列化器
 /// 在标准序列化后增加加密层
 pub struct EncryptedSerializer<S: CheckpointSerializer> {
-    inner: S,  // 泛型参数，允许编译器单态化优化，消除虚表分发开销
+    /// 内部序列化器（泛型参数，允许编译器单态化优化）
+    inner: S,
+    /// AES-256-GCM 密码器（构造时初始化一次，后续复用）
     cipher: Aes256Gcm,
 }
 
 impl<S: CheckpointSerializer> EncryptedSerializer<S> {
+    /// 从原始 32 字节密钥创建加密序列化器
+    ///
+    /// 密码器在构造时初始化一次，后续所有加密/解密操作直接复用，
+    /// 避免每次操作重复初始化的性能开销。
     pub fn new(inner: S, key: &[u8; 32]) -> Self {
-        let cipher = Aes256Gcm::new(key.into());
+        let cipher = Aes256Gcm::new(GenericArray::from_slice(key));
         Self { inner, cipher }
     }
 
-    // > **实现备注 (C-04-004)**: 实际实现提供了增强的密钥派生功能。除了直接接受 32 字节
-    // > 密钥外，还提供 `from_passphrase(phrase: &str) -> Self` 便捷方法，通过 PBKDF2-HMAC-SHA256
-    // > 从密码短语派生加密密钥（迭代次数 100,000）。`EncryptedSerializer` 使用泛型参数
-    // > `Inner: CheckpointSerializer` 而非 `Box<dyn CheckpointSerializer>`，允许编译器进行
-    // > 单态化优化，消除虚表分发开销。加密器可以与任何内部序列化格式组合（Msgpack、JSON 等），
-    // > 提供灵活的加密策略。
+    /// 从密码短语创建加密序列化器（使用 PBKDF2 密钥派生）
+    ///
+    /// 使用 PBKDF2-HMAC-SHA256 从密码短语派生 32 字节密钥。
+    /// 迭代次数：100,000 次（符合 OWASP 推荐）。
+    ///
+    /// # Errors
+    ///
+    /// 返回 [`CheckpointError::Serialize`] 如果密钥派生失败。
+    pub fn from_passphrase(
+        inner: S,
+        passphrase: &str,
+        salt: &[u8; 32],
+    ) -> Result<Self, CheckpointError> {
+        let mut key = [0u8; 32];
+        pbkdf2_hmac::<Sha256>(passphrase.as_bytes(), salt, 100_000, &mut key);
+        let cipher = Aes256Gcm::new(GenericArray::from_slice(&key));
+        Ok(Self { inner, cipher })
+    }
 }
 
-// > **实现备注 (D-04-3)**: 实际实现中 `EncryptedSerializer` 使用泛型参数 `Inner: CheckpointSerializer`
-// > 而非 `Box<dyn CheckpointSerializer>` 进行内部序列化器组合。这允许编译器进行单态化优化，
-// > 消除虚表分发开销。此外还提供 `from_passphrase(phrase: &str) -> Self` 便捷方法，
-// > 通过 PBKDF2 或类似 KDF 从密码短语派生 32 字节密钥。
-
-impl CheckpointSerializer for EncryptedSerializer {
+impl<S: CheckpointSerializer> CheckpointSerializer for EncryptedSerializer<S> {
     fn serialize(&self, value: &impl Serialize) -> Result<Vec<u8>, CheckpointError> {
         let plaintext = self.inner.serialize(value)?;
         let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
         let ciphertext = self.cipher.encrypt(&nonce, plaintext.as_ref())
-            .map_err(|e| CheckpointError::Serialize(e.to_string()))?;
+            .map_err(|e| CheckpointError::serialize_msg(e.to_string()))?;
         // 格式: nonce (12 bytes) + ciphertext
         let mut output = nonce.to_vec();
         output.extend_from_slice(&ciphertext);
@@ -735,7 +914,7 @@ impl CheckpointSerializer for EncryptedSerializer {
     fn deserialize<T: DeserializeOwned>(&self, data: &[u8]) -> Result<T, CheckpointError> {
         let (nonce, ciphertext) = data.split_at(12);
         let plaintext = self.cipher.decrypt(nonce.into(), ciphertext)
-            .map_err(|e| CheckpointError::Serialize(format!("Decryption failed: {}", e)))?;
+            .map_err(|e| CheckpointError::deserialize_msg(e.to_string()))?;
         self.inner.deserialize(&plaintext)
     }
 }
@@ -837,11 +1016,60 @@ pub struct TtlConfig {
     /// 最多保留的 checkpoint 数量（超出时删除最旧的）
     pub max_checkpoints: Option<usize>,
 }
+
+impl TtlConfig {
+    /// 检查给定创建时间的 checkpoint 是否已过期
+    pub fn is_expired(&self, created_at: &str) -> bool {
+        let Some(ttl) = self.default_ttl else {
+            return false;
+        };
+        // 解析 created_at (ISO 8601) 并与当前时间比较
+        // 返回 true 如果 (now - created_at) > ttl
+    }
+}
 ```
 
-实现策略：
-- **惰性清理**：在 `list()` / `get_tuple()` 时检查并跳过过期项
-- **主动清理**：后台 tokio task 定期执行 `DELETE FROM checkpoints WHERE created_at < now() - interval`
+#### 惰性清理策略
+
+内存实现使用惰性清理策略，在每次访问时自动触发：
+
+```rust
+async fn lazy_cleanup(
+    &self,
+    thread_id: &str,
+    checkpoint_ns: &str,
+) -> Result<(), CheckpointError> {
+    // 1. 移除过期的 checkpoints
+    checkpoints.retain(|tuple| !ttl_config.is_expired(&tuple.checkpoint.created_at));
+
+    // 2. 强制执行 max_checkpoints 限制（删除最旧的）
+    if let Some(max) = ttl_config.max_checkpoints {
+        if checkpoints.len() > max {
+            checkpoints.truncate(max);
+        }
+    }
+
+    // 3. 清理已删除 checkpoint 的 pending_writes
+    writes.retain(|(thread, ns, id), _| {
+        thread == thread_id && ns == checkpoint_ns && checkpoint_ids.contains(id)
+    });
+}
+```
+
+**触发时机**：
+- `list()` 操作前自动调用
+- `get_tuple()` 操作前自动调用
+- 确保返回的结果不包含过期或超过数量限制的 checkpoint
+
+**优势**：
+- 无需后台任务和定时器
+- 减少锁竞争和内存占用
+- 按需清理，避免不必要的扫描
+
+#### 实现策略
+
+- **惰性清理**：在 `list()` / `get_tuple()` 时检查并跳过过期项（MemorySaver 默认）
+- **主动清理**：后台 tokio task 定期执行 `DELETE FROM checkpoints WHERE created_at < now() - interval`（PostgresSaver/SqliteSaver 可选）
 - **数量限制**：当同一 thread 的 checkpoint 数量超过 `max_checkpoints` 时，删除最旧的
 
 ---
@@ -926,22 +1154,145 @@ impl<S: State + Serialize + DeserializeOwned> CompiledGraph<S> {
 
 用于子图隔离。每个子图在独立的命名空间中存储 checkpoint，与父图不混用。
 
-命名空间格式：
+#### 结构化类型系统
+
+```rust
+/// 单个命名空间段，包含节点名称和调用 UUID
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct NamespaceSegment {
+    /// 此段的节点名称
+    pub node_name: String,
+    /// 唯一调用标识符（UUID v4）
+    pub invocation_id: String,
+}
+
+impl NamespaceSegment {
+    /// 创建新的命名空间段
+    pub const fn new(node_name: String, invocation_id: String) -> Self {
+        Self {
+            node_name,
+            invocation_id,
+        }
+    }
+
+    /// 获取段的字符串表示，格式为 `node_name:invocation_id`
+    pub fn as_str(&self) -> String {
+        format!("{}:{}", self.node_name, self.invocation_id)
+    }
+}
+
+/// Checkpoint 命名空间，用于子图执行中的隔离
+///
+/// 提供层次化命名空间隔离，防止执行嵌套子图时 checkpoint 冲突。
+///
+/// 线格式使用前导 `|` 分隔每个段，每个段格式为 `node_name:invocation_id`，
+/// 例如 `"|review:uuid1|detail:uuid2"`。根命名空间为 `""`。
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+pub struct CheckpointNamespace {
+    /// 形成层次路径的命名空间段
+    pub segments: Vec<NamespaceSegment>,
+}
+
+impl CheckpointNamespace {
+    /// 创建根命名空间（空路径）
+    pub const fn root() -> Self {
+        Self {
+            segments: Vec::new(),
+        }
+    }
+
+    /// 从段创建命名空间
+    pub const fn new(segments: Vec<NamespaceSegment>) -> Self {
+        Self { segments }
+    }
+
+    /// 通过追加新段创建子命名空间
+    ///
+    /// # 参数
+    ///
+    /// * `node_name` - 此嵌套层级的节点名称
+    /// * `invocation_id` - 唯一调用标识符（通常为 UUID v4）
+    pub fn child(&self, node_name: &str, invocation_id: &str) -> Self {
+        let mut segments = self.segments.clone();
+        segments.push(NamespaceSegment {
+            node_name: node_name.to_string(),
+            invocation_id: invocation_id.to_string(),
+        });
+        Self { segments }
+    }
+
+    /// 通过移除最后一段获取父命名空间
+    ///
+    /// 如果已经是根命名空间则返回 `None`。
+    pub fn parent(&self) -> Option<Self> {
+        if self.segments.is_empty() {
+            None
+        } else {
+            let segments = self.segments[..self.segments.len() - 1].to_vec();
+            Some(Self { segments })
+        }
+    }
+
+    /// 检查是否为根命名空间
+    pub const fn is_root(&self) -> bool {
+        self.segments.is_empty()
+    }
+
+    /// 使用设计规范线格式转换为字符串表示
+    ///
+    /// 每个段以 `|` 为前缀，格式为 `|node_name:invocation_id`。
+    /// 根产生 `""`。
+    pub fn as_str(&self) -> String {
+        self.segments.iter().fold(String::new(), |mut acc, s| {
+            acc.push('|');
+            acc.push_str(&s.node_name);
+            acc.push(':');
+            acc.push_str(&s.invocation_id);
+            acc
+        })
+    }
+
+    /// 从设计规范线格式 `|name:id|name:id` 解析
+    ///
+    /// 空字符串产生根。每个段在第一个 `:` 处分割以提取
+    /// `node_name` 和 `invocation_id`。
+    pub fn parse(s: &str) -> Self {
+        if s.is_empty() {
+            return Self::root();
+        }
+        let trimmed = s.trim_start_matches('|');
+        let segments = trimmed
+            .split('|')
+            .filter_map(|seg| {
+                let (node_name, invocation_id) = seg.split_once(':')?;
+                Some(NamespaceSegment {
+                    node_name: node_name.to_string(),
+                    invocation_id: invocation_id.to_string(),
+                })
+            })
+            .collect();
+        Self { segments }
+    }
+}
+```
+
+#### 命名空间格式约定
+
+线格式（字符串表示）：
 - `""` — 根图
-- `"node_name:uuid"` — 一级子图（uuid 标识具体的子图调用实例）
-- `"outer:uuid|inner:uuid"` — 嵌套子图
+- `"|node_name:uuid"` — 一级子图（uuid 标识具体的子图调用实例）
+- `"|outer:uuid1|inner:uuid2"` — 嵌套子图
 
-> **Implementation Note (C-04-005)**: 实际实现使用 `|`（管道符）作为命名空间层级分隔符
-> 而非上述设计中显示的 `:`（冒号）。例如，嵌套子图使用 `"node_name|uuid"` 格式表示一级，
-> 使用 `"outer|uuid1|inner|uuid2"` 表示两级。选择管道符是为了避免与 UUID v6 字符串表示中
-> 已包含的冒号产生歧义。解析或构建 checkpoint 命名空间的代码必须使用 `|`。
+**重要**: 使用 `|`（管道符）作为命名空间层级分隔符，而非 `:`（冒号）。
+这是为了避免与 UUID v6 字符串表示中已包含的冒号产生歧义。
+例如：`"node_name|uuid"` 而非 `"node_name:uuid"`。
 
-// > **实现备注 (C-04-005)**: 实际实现实现了结构化的 `CheckpointNamespace` 类型系统，
-// > 超越了简单的字符串格式。`CheckpointNamespace` 提供层次化的 `child()`、`parent()`、
-// > `is_root()` 操作，以及 `NamespaceSegment` 枚举区分不同类型的段（根、子图节点、
-// > 子图实例）。这个类型系统使命名空间操作类型安全，避免手动字符串解析错误。
-// > 例如，`ns.child("agent", uuid)` 创建子命名空间，`ns.parent()` 返回父命名空间，
-// > `ns.is_root()` 检查是否为根图命名空间。
+结构化类型系统使命名空间操作类型安全，避免手动字符串解析错误：
+- `ns.child("agent", uuid)` - 创建子命名空间
+- `ns.parent()` - 返回父命名空间
+- `ns.is_root()` - 检查是否为根图命名空间
+- `CheckpointNamespace::parse(s)` - 从字符串解析命名空间
+- `ns.as_str()` - 转换为字符串表示
 
 ### 7.3 Config 中的 checkpoint 相关字段
 
@@ -1002,35 +1353,123 @@ pub struct RunnableConfig {
 
 ## 9. 错误类型
 
+### 9.1 核心 CheckpointError（juncture-core）
+
+核心错误类型定义在 `juncture-core::checkpoint`，用于 trait 方法和公共 API：
+
 ```rust
 #[derive(Debug, thiserror::Error)]
 pub enum CheckpointError {
-    #[error("序列化失败: {0}")]
+    #[error("Serialization failed: {0}")]
     Serialize(#[source] Box<dyn std::error::Error + Send + Sync>),
 
-    #[error("反序列化失败: {0}")]
+    #[error("Deserialization failed: {0}")]
     Deserialize(#[source] Box<dyn std::error::Error + Send + Sync>),
 
-    #[error("Schema 迁移失败: 从版本 {from} 到 {to}: {reason}")]
-    SchemaMigration { from: u32, to: u32, reason: String },
+    #[error("Checkpoint not found: thread={thread_id}, id={checkpoint_id}")]
+    NotFound {
+        thread_id: String,
+        checkpoint_id: String,
+    },
 
-    #[error("存储错误: {0}")]
+    #[error("Storage error: {0}")]
     Storage(#[source] Box<dyn std::error::Error + Send + Sync>),
 
-    #[error("Checkpoint 不存在: thread={thread_id}, id={checkpoint_id}")]
-    NotFound { thread_id: String, checkpoint_id: String },
+    #[error("Checkpoint error: {0}")]
+    Other(String),
+}
+```
 
-    #[error("连接池耗尽")]
+> **注意**: 使用 `Box<dyn Error + Send + Sync>` 而非 `String` 来保留完整的错误链，
+> 通过 `#[source]` 属性支持 `std::error::Error::source()` 追踪。`Clone` 不可用，
+> 因为 boxed trait objects 不支持 `Clone`。
+
+### 9.2 Crate 特定 CheckpointError（juncture-checkpoint）
+
+checkpoint crate 提供更详细的错误类型，包含特定于存储后端的错误：
+
+```rust
+#[derive(Debug, thiserror::Error)]
+pub enum CheckpointError {
+    #[error("Serialization failed: {0}")]
+    Serialize(#[source] Box<dyn std::error::Error + Send + Sync>),
+
+    #[error("Deserialization failed: {0}")]
+    Deserialize(#[source] Box<dyn std::error::Error + Send + Sync>),
+
+    #[error("Schema migration failed: from version {from} to {to}: {reason}")]
+    SchemaMigration {
+        from: u32,
+        to: u32,
+        reason: String,
+    },
+
+    #[error("Storage error: {0}")]
+    Storage(#[source] Box<dyn std::error::Error + Send + Sync>),
+
+    #[error("Database error: {0}")]
+    Database(#[source] Box<dyn std::error::Error + Send + Sync>),
+
+    #[error("Serialization error: {0}")]
+    Serialization(#[source] Box<dyn std::error::Error + Send + Sync>),
+
+    #[error("Checkpoint not found: thread={thread_id}, id={checkpoint_id}")]
+    NotFound {
+        thread_id: String,
+        checkpoint_id: String,
+    },
+
+    #[error("Connection pool exhausted")]
     PoolExhausted,
 }
 
-// > **Implementation Note (C-04-7)**: Implementation uses dual error types for finer-grained error
-// > handling. In addition to `CheckpointError` shown above (for storage/serialization errors), the
-// > implementation introduces `CheckpointPutError` specifically for `put()` operation failures.
-// > This separation allows callers to distinguish between "checkpoint data is invalid" errors and
-// > "storage backend rejected the write" errors without inspecting error message strings, enabling
-// > more targeted retry and recovery strategies.
+// Helper methods for string-based error creation
+impl CheckpointError {
+    pub fn serialize_msg(msg: String) -> Self { Self::Serialize(Box::new(StringError(msg))) }
+    pub fn deserialize_msg(msg: String) -> Self { Self::Deserialize(Box::new(StringError(msg))) }
+    pub fn storage_msg(msg: String) -> Self { Self::Storage(Box::new(StringError(msg))) }
+    pub fn database_msg(msg: String) -> Self { Self::Database(Box::new(StringError(msg))) }
+}
 ```
+
+### 9.3 错误转换 Trait
+
+实现使用 `ToCoreCheckpointError` trait 将 crate 特定错误映射到核心错误：
+
+```rust
+trait ToCoreCheckpointError<T> {
+    fn map_checkpoint(self) -> Result<T, CoreCheckpointError>;
+}
+
+impl<T> ToCoreCheckpointError<T> for Result<T, CheckpointError> {
+    fn map_checkpoint(self) -> Result<T, CoreCheckpointError> {
+        self.map_err(|e| match e {
+            CheckpointError::Serialize(msg) | CheckpointError::Serialization(msg) => {
+                CoreCheckpointError::Serialize(msg)
+            }
+            CheckpointError::Deserialize(msg) => CoreCheckpointError::Deserialize(msg),
+            CheckpointError::NotFound {
+                thread_id,
+                checkpoint_id,
+            } => CoreCheckpointError::NotFound {
+                thread_id,
+                checkpoint_id,
+            },
+            CheckpointError::Storage(msg) | CheckpointError::Database(msg) => {
+                CoreCheckpointError::Storage(msg)
+            }
+            CheckpointError::SchemaMigration { .. } | CheckpointError::PoolExhausted => {
+                CoreCheckpointError::Other(e.to_string())
+            }
+        })
+    }
+}
+```
+
+这种双层错误系统设计使得：
+- 公共 API 使用简洁的核心错误类型
+- 存储实现可以提供更详细的错误信息
+- 调用方可以选择处理详细错误或仅处理核心错误
 
 ---
 

@@ -42,7 +42,7 @@ impl<T> ToCoreCheckpointError<T> for Result<T, CheckpointError> {
                 CoreCheckpointError::Other(format!("Schema migration: {from} -> {to}: {reason}"))
             }
             CheckpointError::PoolExhausted => {
-                CoreCheckpointError::Storage("Connection pool exhausted".to_string())
+                CoreCheckpointError::Storage("Connection pool exhausted".into())
             }
         })
     }
@@ -198,7 +198,7 @@ impl MemorySaver {
         config
             .thread_id
             .clone()
-            .ok_or_else(|| CheckpointError::Storage("thread_id is required".to_string()))
+            .ok_or_else(|| CheckpointError::Storage("thread_id is required".into()))
     }
 
     /// Sort checkpoints by creation time descending
@@ -414,9 +414,10 @@ impl CheckpointSaver for MemorySaver {
         async move {
             let thread_id = Self::get_thread_id(config).map_checkpoint()?;
             let checkpoint_ns = Self::get_checkpoint_ns(config);
-            let checkpoint_id = config.checkpoint_id.clone().ok_or_else(|| {
-                CoreCheckpointError::Storage("checkpoint_id is required".to_string())
-            })?;
+            let checkpoint_id = config
+                .checkpoint_id
+                .clone()
+                .ok_or_else(|| CoreCheckpointError::Storage("checkpoint_id is required".into()))?;
 
             let key = (thread_id, checkpoint_id, checkpoint_ns);
 

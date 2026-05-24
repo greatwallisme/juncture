@@ -12,13 +12,13 @@ pub enum CheckpointError {
     ///
     /// Occurs when converting checkpoint data to a serialized format (JSON/MessagePack).
     #[error("Serialization failed: {0}")]
-    Serialize(String),
+    Serialize(#[source] Box<dyn std::error::Error + Send + Sync>),
 
     /// Deserialization failed
     ///
     /// Occurs when parsing serialized data back into checkpoint structures.
     #[error("Deserialization failed: {0}")]
-    Deserialize(String),
+    Deserialize(#[source] Box<dyn std::error::Error + Send + Sync>),
 
     /// Schema migration failed
     ///
@@ -37,20 +37,20 @@ pub enum CheckpointError {
     ///
     /// Occurs when underlying storage backend fails (database, filesystem, etc.).
     #[error("Storage error: {0}")]
-    Storage(String),
+    Storage(#[source] Box<dyn std::error::Error + Send + Sync>),
 
     /// Database operation error
     ///
     /// Occurs when database operations fail (query, connection, transaction, etc.).
     #[error("Database error: {0}")]
-    Database(String),
+    Database(#[source] Box<dyn std::error::Error + Send + Sync>),
 
     /// Serialization error (alias for Serialize)
     ///
     /// This variant is an alias for [`Serialize`] and exists for compatibility
     /// with external code that expects this name.
     #[error("Serialization error: {0}")]
-    Serialization(String),
+    Serialization(#[source] Box<dyn std::error::Error + Send + Sync>),
 
     /// Checkpoint not found
     ///
@@ -72,14 +72,57 @@ pub enum CheckpointError {
 
 impl From<serde_json::Error> for CheckpointError {
     fn from(err: serde_json::Error) -> Self {
-        Self::Serialize(err.to_string())
+        Self::Serialize(Box::new(err))
     }
 }
 
 impl From<io::Error> for CheckpointError {
     fn from(err: io::Error) -> Self {
-        Self::Storage(err.to_string())
+        Self::Storage(Box::new(err))
     }
 }
 
-// Rust guideline compliant 2026-05-19
+impl CheckpointError {
+    /// Create a serialization error from a string message
+    #[must_use]
+    pub fn serialize_msg(msg: String) -> Self {
+        Self::Serialize(Box::new(StringError(msg)))
+    }
+
+    /// Create a deserialization error from a string message
+    #[must_use]
+    pub fn deserialize_msg(msg: String) -> Self {
+        Self::Deserialize(Box::new(StringError(msg)))
+    }
+
+    /// Create a storage error from a string message
+    #[must_use]
+    pub fn storage_msg(msg: String) -> Self {
+        Self::Storage(Box::new(StringError(msg)))
+    }
+
+    /// Create a database error from a string message
+    #[must_use]
+    pub fn database_msg(msg: String) -> Self {
+        Self::Database(Box::new(StringError(msg)))
+    }
+}
+
+/// Wrapper for String errors to convert them into Box<dyn Error>
+struct StringError(String);
+
+impl std::fmt::Debug for StringError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl std::fmt::Display for StringError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl std::error::Error for StringError {}
+
+// Rust guideline compliant 2026-05-24
