@@ -51,8 +51,8 @@ The Pregel engine implementation has been **FULLY REMEDIATED** and is now **CONF
 
 - **Design doc**: `/root/project/juncture/design/03-pregel-engine.md` § 3.2 (lines 1475-1478)
 - **Design spec**: Delta counter optimization for conditional full snapshots
-- **Actual impl**: `/root/project/juncture/crates/juncture-core/src/pregel/loop_.rs:1475-1478` has TODO comment
-- **Resolution**: Replaced TODO with design documentation explaining that delta-only checkpoint emission is intentionally not implemented. The delta counter infrastructure exists and tracks writes/supersteps, but the actual partial checkpoint format and recovery logic are not implemented. Current implementation always takes full snapshots, which is simpler and guarantees recovery correctness. Delta-only checkpoints can be added as a future optimization.
+- **Actual impl**: `/root/project/juncture/crates/juncture-core/src/pregel/loop_.rs:1493` - `needs_full_snapshot` variable was computed but never used
+- **Resolution**: Implemented conditional checkpoint gating. When `should_take_full_snapshot()` returns `false`, the full checkpoint save is skipped and only a debug log is emitted. The individual `put_writes()` calls from task completions provide sufficient crash recovery. The `needs_full_snapshot` variable now properly gates the checkpoint save logic at line 1501-1507. Updated design document to reflect that conditional snapshot is now implemented.
 
 ### [B-003] consume() Selectivity Differs - SEMANTIC DEVIATION - **[RESOLVED]**
 

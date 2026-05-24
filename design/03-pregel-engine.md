@@ -556,9 +556,10 @@ invoke(input, config)
     │     - reset(): 完整快照后重置计数器                          │
     │     - should_take_full_snapshot(): 检查是否需要完整快照      │
     │                                                              │
-    │     注意: 当前实现总是保存完整快照。Delta 计数器基础设施已就位，│
-    │     但增量快照格式和恢复逻辑需要扩展以支持部分快照。完整快照更简单，│
-    │     并保证恢复正确性。增量快照可作为未来优化添加。            │
+    │     注意: 当 should_take_full_snapshot() 返回 false 时，      │
+    │     跳过完整快照保存，仅使用 put_writes() 的增量写入。       │
+    │     这在 delta channel 写入频率低于 snapshot_frequency 时    │
+    │     避免不必要的完整快照开销。                               │
     │                                                              │
     │  f. 检查 interrupt_after                                     │
     │     当前执行的节点中有在 interrupt_after 集合中的?             │

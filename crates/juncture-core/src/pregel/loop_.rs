@@ -1482,14 +1482,6 @@ impl<S: State> PregelLoop<S> {
         // snapshot_frequency thresholds. When no delta channel has crossed
         // the threshold, the pending writes from put_writes() are sufficient
         // for crash recovery and a full snapshot is unnecessary.
-        //
-        // Note: Delta-only checkpoint emission is not currently implemented.
-        // The infrastructure for tracking delta counts is in place, but the
-        // checkpoint format and recovery logic would need to be extended to
-        // support partial checkpoints. Current implementation always takes
-        // full snapshots, which is simpler and guarantees recovery correctness.
-        // Delta-only checkpoints could be added as a future optimization for
-        // workloads with large states and infrequent full snapshots.
         let needs_full_snapshot = self.should_take_full_snapshot();
         tracing::debug!(
             name = "juncture.checkpoint.superstep.delta_decision",
@@ -1497,6 +1489,17 @@ impl<S: State> PregelLoop<S> {
             needs_full_snapshot = needs_full_snapshot,
             "Delta-channel snapshot frequency evaluation"
         );
+
+        // Skip full checkpoint if not needed - delta writes from put_writes()
+        // are sufficient for crash recovery.
+        if !needs_full_snapshot {
+            tracing::debug!(
+                name = "juncture.checkpoint.superstep.skipped",
+                step = self.step,
+                "Skipped full checkpoint - delta optimization active"
+            );
+            return;
+        }
 
         let channel_values = match serde_json::to_value(&self.state) {
             Ok(v) => v,
@@ -2609,10 +2612,12 @@ mod tests {
                 supersteps: 1,
             },
         );
+        // Set field_1's updates at the snapshot_frequency threshold (3) so that
+        // should_take_full_snapshot() returns true and the checkpoint is saved.
         loop_.delta_counters.insert(
             "field_1".to_string(),
             DeltaCounters {
-                updates: 2,
+                updates: 3,
                 supersteps: 1,
             },
         );
@@ -2656,8 +2661,8 @@ mod tests {
             .get("field_1")
             .expect("field_1 should be in delta counters");
         assert_eq!(
-            field_1.updates, 2,
-            "field_1 should have 2 updates in checkpoint"
+            field_1.updates, 3,
+            "field_1 should have 3 updates in checkpoint"
         );
 
         // After checkpoint save, delta counters should be reset
