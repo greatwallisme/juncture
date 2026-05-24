@@ -1,7 +1,5 @@
 # Store（跨线程长期记忆）
 
-<!-- Addresses finding: C-01 -->
-<!-- Addresses finding: Part3#4 -->
 
 ## 概述
 
@@ -368,8 +366,6 @@ impl Store for MemoryStore {
 
 ## 3. 向量搜索
 
-<!-- Addresses finding: M-13 -->
-
 向量为可选功能，通过 `feature = "vector"` 启用。
 
 > **Requirement**: ALL Store backends (MemoryStore, SqliteStore, PostgresStore) MUST support vector search. SQL backends use the `store_vectors` table (§6.2.2) with pgvector for PostgreSQL and a compatible approach for SQLite. The `Item.embedding` field MUST return actual embeddings for all backends.
@@ -429,7 +425,6 @@ async fn put(&self, namespace: &str, key: &str, value: Value, index: Option<Vec<
 
 ## 4. 过滤操作符
 
-<!-- Addresses finding: M-14 -->
 
 搜索时的过滤条件使用类型化的过滤表达式：
 
@@ -1128,7 +1123,7 @@ pub enum StoreError {
 
 ---
 
-## 9. TTL 与自动过期（<!-- Addresses finding: M-11 -->）
+## 9. TTL 与自动过期
 
 > 参考: `langgraph/libs/checkpoint/langgraph/store/base/__init__.py:545` — TTLConfig
 
@@ -1179,7 +1174,6 @@ pub struct Item {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 
-    /// <!-- Addresses finding: M-11 -->
     /// 过期时间（可选）
     pub expires_at: Option<DateTime<Utc>>,
 }

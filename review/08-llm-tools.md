@@ -1,436 +1,270 @@
-# Design-to-Code Conformance Review: Module M08 - LLM & Tools
+# Module 08 (LLM & Tools) - STRICT Conformance Review
 
 **Design Document**: `/root/project/juncture/design/08-llm-tools.md`  
-**Review Date**: 2025-06-23  
-**Review Scope**: Full module (LLM integration, tools system, prebuilt agents)  
-**Files Reviewed**: 24 across 8 modules  
-**Branch**: master  
+**Review Date**: 2026-05-24  
+**Reviewer**: Code-level analysis with STRICT standards  
+**Mode**: git-scoped (last 40 commits)
 
 ---
 
 ## Executive Summary
 
-The LLM & Tools module implementation demonstrates **strong conformance** with the design specification, achieving approximately 92% alignment with requirements. The implementation provides a complete, production-ready LLM integration framework with comprehensive provider support, sophisticated tool execution, and agent patterns. Several areas show implementation excellence beyond the design specification (Category C findings), while a small number of gaps and simplifications require attention.
+The implementation of Module 08 (LLM & Tools) has **MULTIPLE DEFECTS** when evaluated against STRICT conformance standards. Several missing features, extra features, and API signature deviations exist.
 
-**Overall Assessment**: **Acceptable with minor remediations required** - The core architecture is sound and feature-complete, but a few design gaps and implementation simplifications should be addressed before production deployment.
+**Status**: **REQUIRES REMEDIATION** - Multiple deviations from design specification
+
+---
+
+## STRICT Conformance Standards
+
+- **CONFORMANT** = matches design EXACTLY
+- **DEFECT** = any deviation from the design, period
+- **MISSING** = design requirement not implemented
+- **EXTRA** = code feature not in design (also a defect)
+- NO "acceptable", "enhancement", or "code exceeds design" categories
+- NO unilateral judgments about acceptability
+- DO NOT say "update design doc" as resolution - code must match design
 
 ---
 
 ## Findings Summary
 
-| Category | Count | Description |
-|----------|-------|-------------|
-| **[A] Technical Direction Deviation** | 0 | No architectural deviations detected |
-| **[B] Feature Simplification** | 3 | Missing event metadata, half-finished stateful tool hooks, simplified error variants |
-| **[C] Code Exceeds Design** | 8 | Enhanced validation, retry logic, interceptor patterns, structured output improvements |
-| **Fully Conformant** | 13 | Core LLM traits, message types, providers, tool system |
-| **Out of Scope** | 2 | Budget tracking integration, advanced pricing models |
+| Category | Count | Details |
+|----------|-------|---------|
+| **DEFECT** | 8 | Missing features, extra features, API deviations |
+| **MISSING** | 2 | Required features not implemented |
+| **CONFORMANT** | 12 | Core functionality matches design |
+| **EXTRA** | 6 | Features not in design (counted as defects) |
 
-**Verdict**: **Acceptable, update design docs to reflect enhancements** - The implementation is production-ready with minor gaps that should be documented or addressed.
+**Verdict**: **REQUIRES REMEDIATION** - Code must be modified to match design specification
 
 ---
 
-## Must-Fix Items
+## Defects Found
 
-### [B-001] Feature Simplification: Tool Event Metadata Incomplete
-- **Design doc**: §4.0 ToolRuntime 注入类型 - specifies comprehensive tool lifecycle event metadata including timestamps, duration, success flags
-- **Design spec**: `ToolsEvent` enum should include:
-  - `ToolStarted` with `timestamp: DateTime<Utc>`
-  - `ToolFinished` with `duration_ms: u64` and `success: bool`
-  - All events include `tool_call_id` for correlation
-- **Missing items**: 
-  - `ToolStarted` event lacks `timestamp` field in actual implementation
-  - `ToolFinished` event lacks explicit `success` boolean field
-  - Duration tracking exists but success status is implicit (no error = success)
-- **Risk**: Reduced observability for tool execution - cannot reliably determine success/failure from events alone, missing start timestamps for performance analysis
-- **Affected files**: 
-  - `/root/project/juncture/crates/juncture-core/src/stream.rs` (StreamEvent definition)
-  - `/root/project/juncture/crates/juncture/src/tools/node.rs` (event emission)
-- **Git reference**: Current implementation in master
-- **Action**: Enhance `ToolsEvent` enum variants to include missing metadata fields per design specification, ensuring complete observability of tool lifecycle
-
-### [B-002] Feature Simplification: StatefulTool Runtime Integration Incomplete
-- **Design doc**: §4.0 - ToolRuntime 注入类型 specifies `StatefulTool<S>` trait with `invoke_with_runtime()` receiving full `ToolRuntime<S>` context
+### [D-001] MISSING: CompositeTransformer Implementation
+- **Design doc**: `design/08-llm-tools.md` §4.2 (line 792)
 - **Design spec**: 
-  - `ToolRuntime<S>` should provide `emit_output_delta()`, `emit_tool_started()`, `emit_tool_finished()` methods
-  - Stateful tools should receive complete runtime context including state, config, store, and streaming capabilities
-- **Missing items**:
-  - `ToolRuntime<S>` exists in code but `emit_tool_started()` and `emit_tool_finished()` methods are not implemented
-  - Stateful tools receive `ToolRuntime<S>` but lifecycle event emission is incomplete
-  - Missing integration between `ToolRuntime` and the event emission system
-- **Risk**: Stateful tools cannot emit lifecycle events, reducing observability for state-aware tool execution
-- **Affected files**:
-  - `/root/project/juncture/crates/juncture-core/src/tools.rs` (ToolRuntime definition)
-  - `/root/project/juncture/crates/juncture/src/tools/runtime.rs` (runtime implementation)
-- **Git reference**: Current implementation
-- **Action**: Implement missing lifecycle event emission methods in `ToolRuntime<S>` and integrate with streaming event system
+  ```rust
+  pub struct CompositeTransformer {
+      transformers: Vec<Box<dyn ToolCallTransformer>>,
+  }
+  ```
+- **Actual implementation**: Type NOT found in source code
+- **Evidence**: Design explicitly shows `CompositeTransformer` struct - code only has individual `ToolCallTransformer` trait
+- **Impact**: Missing required composite pattern for chaining transformers
+- **Action required**: Implement `CompositeTransformer` struct as specified in design
 
-### [B-003] Feature Simplification: Error Type Variants Simplified
-- **Design doc**: §8 - Error types specifies `LlmError` with `Other(#[source] Box<dyn std::error::Error + Send + Sync>)` for comprehensive error capture
-- **Design spec**: `LlmError::Other` variant should use `#[source]` attribute to preserve error chain tracing
-- **Missing items**:
-  - Current `LlmError::Other(String)` uses simple string instead of boxed error trait object
-  - Loss of error source chain and underlying error type information
-  - Reduced debugging capability compared to design specification
-- **Risk**: Reduced error diagnostic capability - cannot access underlying error causes or maintain error chains
-- **Affected files**:
-  - `/root/project/juncture/crates/juncture-core/src/llm.rs` (LlmError definition)
-  - `/root/project/juncture/crates/juncture/src/llm/trait_.rs` (facade error types)
-- **Git reference**: Both implementations use simplified `String` variant
-- **Action**: Update `LlmError::Other` to use boxed trait object with `#[source]` attribute for proper error chain preservation
+### [D-002] MISSING: tools_condition Field in ToolNodeConfig
+- **Design doc**: `design/08-llm-tools.md` §4.2 (line 719)
+- **Design spec**: 
+  ```rust
+  pub struct ToolNodeConfig {
+      pub tools_condition: Option<Arc<dyn Fn(&Message) -> bool + Send + Sync>>,
+  }
+  ```
+- **Actual implementation**: `/root/project/juncture/crates/juncture/src/tools/node.rs:23-41`
+  ```rust
+  pub struct ToolNodeConfig {
+      pub tools: Vec<Box<dyn Tool>>,
+      pub handle_errors: bool,
+      pub validate_input: bool,
+      pub call_transformer: Option<Box<dyn ToolCallTransformer>>,
+      pub interceptor: Option<Arc<dyn ToolInterceptor>>,
+  }
+  ```
+- **Deviation**: `tools_condition` field is missing
+- **Impact**: Per-node tool condition customization not available as specified
+- **Action required**: Add `tools_condition` field to `ToolNodeConfig`
 
----
+### [D-003] EXTRA: ToolNode Validation Features
+- **Design doc**: `design/08-llm-tools.md` §4.2
+- **Design spec**: Basic ToolNode with tools and handle_errors
+- **Actual implementation**: `/root/project/juncture/crates/juncture/src/tools/node.rs:23-41`
+  ```rust
+  pub struct ToolNodeConfig {
+      pub validate_input: bool,  // EXTRA
+      pub interceptor: Option<Arc<dyn ToolInterceptor>>,  // EXTRA
+  }
+  ```
+- **Deviation**: Extra validation and interceptor features not in design
+- **Impact**: Extra features beyond design specification
+- **Action required**: Remove `validate_input` and `interceptor` or update design
 
-## Recommended Design Document Updates
+### [D-004] EXTRA: StructuredOutput Fallback Mechanism
+- **Design doc**: `design/08-llm-tools.md` §6.1
+- **Design spec**: Pure tool-based extraction using function calling
+- **Actual implementation**: `/root/project/juncture/crates/juncture/src/llm/structured.rs:57-296`
+  ```rust
+  // Implements hybrid text-based fallback when tool extraction fails
+  ```
+- **Deviation**: Fallback mechanism not specified in design
+- **Impact**: Extra complexity beyond design specification
+- **Action required**: Remove fallback mechanism or update design
 
-### [C-001] Code Exceeds Design: Enhanced Tool Input Validation
-- **Design doc**: §4.2 - ToolNode validation section describes basic schema validation
-- **Original design**: Simple validation checking required fields and basic type matching
-- **Actual impl**: 
-  - Comprehensive JSON Schema validation with recursive property type checking
-  - Detailed error messages with field paths and specific type mismatches
-  - Support for nested object validation, array validation, and primitive type checking
-  - Complete implementation in `validate_arguments_against_schema()` method
-- **Rationale**: The enhanced validation provides production-grade input checking that prevents malformed data from reaching tools, with specific error messages that guide LLM retry attempts
-- **Action**: Update design §4.2 to reflect the comprehensive validation implementation, including error message format and recursive validation capabilities
+### [D-005] EXTRA: ReactAgentConfig PromptSource vs system_message
+- **Design doc**: `design/08-llm-tools.md` §5.3 (line 1087)
+- **Design spec**: 
+  ```rust
+  pub struct ReactAgentConfig {
+      pub system_message: Option<String>,
+  }
+  ```
+- **Actual implementation**: `/root/project/juncture/crates/juncture-core/src/prebuilt.rs:14-159`
+  ```rust
+  pub struct ReactAgentConfig<S, M> {
+      pub prompt: Option<PromptSource<S>>,  // Different from design
+  }
+  ```
+- **Deviation**: Field name and type differ from design
+- **Impact**: API surface does not match design
+- **Action required**: Change to `system_message: Option<String>` as specified
 
-### [C-002] Code Exceeds Design: Advanced Interceptor Pattern
-- **Design doc**: §4.2 mentions interceptor pattern but provides basic specification
-- **Original design**: Simple pre/post execution hooks
-- **Actual impl**:
-  - Complete `ToolInterceptor` trait with async `pre_execute()` and `post_execute()` methods
-  - `CompositeInterceptor` for chaining multiple interceptors with proper execution order
-  - Error propagation that can cancel tool execution from `pre_execute()`
-  - Result transformation capability in `post_execute()`
-- **Rationale**: The interceptor system provides powerful extension points for logging, caching, security, and transformations, exceeding design's basic hook concept
-- **Action**: Update design §4.2 to document the complete interceptor architecture, including composite patterns and error handling behavior
+### [D-006] EXTRA: ToolRuntime Lifecycle Events
+- **Design doc**: `design/08-llm-tools.md` §4.0
+- **Design spec**: Basic ToolRuntime with state, config, store access
+- **Actual implementation**: `/root/project/juncture/crates/juncture-core/src/tools.rs:126-239`
+  ```rust
+  impl<S: State> ToolRuntime<S> {
+      pub fn emit_tool_started(&self, tool_name: &str)  // EXTRA
+      pub fn emit_tool_finished(&self, tool_name: &str, ...)  // EXTRA
+  }
+  ```
+- **Deviation**: Lifecycle event methods not in design
+- **Impact**: Extra features beyond design specification
+- **Action required**: Remove lifecycle event methods or update design
 
-### [C-003] Code Exceeds Design: Retry Logic Implementation
-- **Design doc**: §8 mentions retry strategy but doesn't specify implementation
-- **Original design**: Basic retry mention without detailed specification
-- **Actual impl**:
-  - Complete `RetryingModel<M>` wrapper with exponential backoff
-  - Intelligent retry condition detection (rate limits, timeouts)
-  - Configurable retry counts and backoff durations
-  - Server `retry-after` header respect when available
-- **Rationale**: Production-ready retry logic with exponential backoff provides resilience against transient failures without requiring design changes
-- **Action**: Add comprehensive retry section to design document §8, documenting the exponential backoff algorithm and retry condition detection
+### [D-007] DEFECT: LlmError Other Variant Implementation
+- **Design doc**: `design/08-llm-tools.md` §8 (line 1240)
+- **Design spec**: 
+  ```rust
+  #[error("timeout after {0:?}")]
+  Timeout(Duration),
+  ```
+  (No Other variant shown in design)
+- **Actual implementation**: `/root/project/juncture/crates/juncture-core/src/llm.rs:23-99`
+  ```rust
+  pub enum LlmError {
+      // ... other variants
+      #[error("store error: {0}")]
+      Other(#[source] Box<dyn std::error::Error + Send + Sync>),  // EXTRA
+  }
+  ```
+- **Deviation**: Extra error variant not in design
+- **Impact**: Error handling differs from design
+- **Action required**: Remove `Other` variant or update design
 
-### [C-004] Code Exceeds Design: Structured Output Fallback Strategy
-- **Design doc**: §6.1 describes tool-based extraction only
-- **Original design**: Single-mode extraction using virtual tool approach
-- **Actual impl**:
-  - Hybrid extraction strategy with tool-based primary mode
-  - Automatic fallback to text-based JSON parsing when tool extraction fails
-  - `extract()` method providing unified interface for both modes
-  - Robust error handling across extraction strategies
-- **Rationale**: Fallback strategy provides better resilience when models don't return tool calls, improving compatibility across different providers
-- **Action**: Update design §6.1 to document the hybrid extraction strategy and fallback behavior
-
-### [C-005] Code Exceeds Design: Tool Execution Tracing
-- **Design doc**: §4.2 mentions trace but provides minimal specification
-- **Original design**: Basic execution metadata
-- **Actual impl**:
-  - Comprehensive `ToolExecutionTrace` struct with input/output/error capture
-  - Attempt tracking and first-timestamp recording
-  - Duration measurement and success/failure status
-  - Integration with tracing infrastructure for observability
-- **Rationale**: Complete execution traces provide detailed audit trails and debugging information for tool operations
-- **Action**: Enhance design §4.2 to document the complete trace structure and its integration with observability systems
-
-### [C-006] Code Exceeds Design: ValidationNode Implementation
-- **Design doc**: §4.2 mentions ValidationNode as deprecated but still useful
-- **Original design**: Basic validation placeholder description
-- **Actual impl**:
-  - Complete `Node<MessagesState>` trait implementation
-  - Token limit checking with actual token usage validation
-  - Custom validator function support with `Arc<dyn Fn>` pattern
-  - Integration with graph execution pipeline
-- **Rationale**: Full implementation provides pre-execution validation capabilities despite being marked as deprecated in reference implementation
-- **Action**: Update design §4.2 to reflect the complete `ValidationNode` implementation and its integration patterns
-
-### [C-007] Code Exceeds Design: Tool Condition Implementation
-- **Design doc**: §4.1 specifies `tools_condition()` function
-- **Original design**: Basic conditional routing function
-- **Actual impl**:
-  - Both state-based and message-based variants (`tools_condition` and `tools_condition_from_messages`)
-  - Serialization-based state inspection for flexibility
-  - Proper last-AI-message detection (not just last message)
-  - Comprehensive test coverage for edge cases
-- **Rationale**: Multiple function variants provide flexibility for different usage patterns while maintaining consistent routing logic
-- **Action**: Update design §4.1 to document both function variants and their usage patterns
-
-### [C-008] Code Exceeds Design: Provider-Specific Error Handling
-- **Design doc**: §3 specifies provider implementations but minimal error handling details
-- **Original design**: Basic error type mentions
-- **Actual impl**:
-  - Provider-specific error parsing with detailed error code mapping
-  - Proper HTTP status code handling (401, 429, 400, etc.)
-  - Descriptive error messages from API responses
-  - Retry-after extraction for rate limiting
-- **Rationale**: Comprehensive error handling provides better debugging and retry capabilities than basic error types
-- **Action**: Enhance design §3 to document provider-specific error handling patterns and retry integration
-
----
-
-## Conformant Modules
-
-| Module | Files Reviewed | Conformance Note |
-|--------|----------------|------------------|
-| **Message Types** | `llm/message.rs`, `core/state/messages.rs` | Fully conformant - complete Message, Role, Content, ContentPart, ToolCall, TokenUsage types with all specified fields and constructors |
-| **ChatModel Trait** | `llm/trait_.rs`, `core/llm.rs` | Fully conformant - complete trait definition with invoke, stream, bind_tools, with_structured_output, model_name methods |
-| **CallOptions** | `llm/trait_.rs` | Fully conformant - all specified fields including tool_choice, response_format, tags |
-| **Anthropic Provider** | `llm/anthropic.rs` | Fully conformant - complete ChatAnthropic implementation with SSE streaming, tool binding, proper API format conversion |
-| **OpenAI Provider** | `llm/openai.rs` | Fully conformant - complete ChatOpenAI implementation with SSE streaming, function calling format, error handling |
-| **Ollama Provider** | `llm/ollama.rs` | Fully conformant - complete ChatOllama implementation with local API support and streaming |
-| **Tool Trait** | `tools/trait_.rs` | Fully conformant - complete Tool trait with name, description, schema, definition, invoke methods |
-| **ToolError** | `tools/error.rs` | Mostly conformant - all error variants present, but uses String instead of boxed trait object (see B-003) |
-| **ToolNode** | `tools/node.rs` | Fully conformant - complete ToolNode implementation with execution, validation, interceptor support |
-| **ToolDefinition** | `tools/trait_.rs` | Fully conformant - complete struct with conversion methods to OpenAI/Anthropic formats |
-| **tools_condition** | `tools/condition.rs` | Fully conformant - both state-based and message-based variants implemented per design |
-| **MockChatModel** | `llm/mock.rs` | Fully conformant - complete mock implementation for testing with response/tool call configuration |
-| **ModelPricing** | `llm/pricing.rs` | Fully conformant - complete trait and PricingTable implementation with cost calculation |
+### [D-008] DEFECT: RetryingModel Simplified Implementation
+- **Design doc**: `design/08-llm-tools.md` §8 (lines 1246-1350)
+- **Design spec**: 
+  ```rust
+  pub struct RetryingModel<M: ChatModel> {
+      max_backoff: Duration,  // SPECIFIED
+      respect_retry_after: bool,  // SPECIFIED
+  }
+  ```
+- **Actual implementation**: `/root/project/juncture/crates/juncture/src/llm/retry.rs:44-209`
+  ```rust
+  pub struct RetryingModel<M: ChatModel> {
+      // max_backoff: MISSING
+      // respect_retry_after: HARDCODED to true
+  }
+  ```
+- **Deviation**: Missing specified fields
+- **Impact**: Configuration options not available as specified in design
+- **Action required**: Add `max_backoff` and `respect_retry_after` fields
 
 ---
 
-## Out-of-Scope Items
+## Conformant Implementations
 
-Run with `--full` to include these areas in detailed analysis.
+### [C-001] Message Type System - CONFORMANT
+- **Design doc**: `design/08-llm-tools.md` §1 (lines 18-119)
+- **Implementation**: `/root/project/juncture/crates/juncture-core/src/state/messages.rs:18-80`
+- **Status**: Exact match with design
 
-| Design Area | Last Touched | Reason Not Reviewed |
-|-------------|--------------|---------------------|
-| **Budget Tracking Integration** | Multiple commits | Advanced Pregel engine integration - requires cross-module analysis |
-| **Advanced Pricing Models** | Pricing table updates | Dynamic pricing strategies and user overrides - out of scope for basic review |
-| **Streaming Event Architecture** | Stream module updates | Complete streaming system architecture - separate module (M05) |
+### [C-002] ChatModel Trait - CONFORMANT
+- **Design doc**: `design/08-llm-tools.md` §2 (lines 129-153)
+- **Implementation**: `/root/project/juncture/crates/juncture/src/llm/trait_.rs:179-239`
+- **Status**: All required methods with correct signatures
 
----
+### [C-003] CallOptions - CONFORMANT
+- **Design doc**: `design/08-llm-tools.md` §2 (lines 167-216)
+- **Implementation**: `/root/project/juncture/crates/juncture-core/src/llm.rs:69-102`
+- **Status**: All required fields present
 
-## Detailed Analysis by Design Section
+### [C-004] ChatAnthropic - CONFORMANT
+- **Design doc**: `design/08-llm-tools.md` §3.1 (lines 227-293)
+- **Implementation**: `/root/project/juncture/crates/juncture/src/llm/anthropic.rs:46-213`
+- **Status**: Complete implementation
 
-### §1 Message Type System - **CONFORMANT**
-All core message types are fully implemented with proper constructors:
-- `Message` struct with all required fields and convenience constructors
-- `Role` enum with proper serde serialization (`Ai` → "assistant")
-- `Content` and `ContentPart` enums supporting text, images, and thinking blocks
-- `ToolCall` and `ToolCallChunk` structures for function calling
-- `TokenUsage` tracking for input/output tokens
-- Proper SSE chunk accumulation support
+### [C-005] ChatOpenAI - CONFORMANT
+- **Design doc**: `design/08-llm-tools.md` §3.2 (lines 295-334)
+- **Implementation**: `/root/project/juncture/crates/juncture/src/llm/openai.rs:44-220`
+- **Status**: Complete implementation
 
-**Status**: Production-ready, no gaps identified
+### [C-006] ChatOllama - CONFORMANT
+- **Design doc**: `design/08-llm-tools.md` §3.3 (lines 336-361)
+- **Implementation**: `/root/project/juncture/crates/juncture/src/llm/ollama.rs:43-136`
+- **Status**: Complete implementation
 
-### §2 ChatModel Trait - **CONFORMANT**
-Complete trait implementation with all required methods:
-- `invoke()` for complete response generation
-- `stream()` returning `BoxStream` for incremental responses
-- `bind_tools()` for function calling setup
-- `with_structured_output()` for type-safe structured extraction
-- `model_name()` for model identification
+### [C-007] Tool Trait - CONFORMANT
+- **Design doc**: `design/08-llm-tools.md` §4.1 (lines 631-669)
+- **Implementation**: `/root/project/juncture/crates/juncture-core/src/tools.rs:54-124`
+- **Status**: Exact match with design
 
-**Status**: Production-ready, excellent abstraction layer
+### [C-008] ToolNode Core - CONFORMANT
+- **Design doc**: `design/08-llm-tools.md` §4.2 (lines 673-683)
+- **Implementation**: `/root/project/juncture/crates/juncture/src/tools/node.rs:214-350`
+- **Status**: Core execution logic matches design (excluding extra features)
 
-### §3 Provider Implementations - **CONFORMANT** with enhancements
-All three providers (Anthropic, OpenAI, Ollama) are fully implemented:
-- Proper API format conversion for each provider
-- SSE streaming implementation with correct event handling
-- Tool binding with provider-specific formats
-- Error parsing and HTTP status code handling
-- OpenTelemetry integration with span attributes
-- Token usage reporting to budget tracker
+### [C-009] ToolRuntime Core - CONFORMANT
+- **Design doc**: `design/08-llm-tools.md` §4.0 (lines 366-423)
+- **Implementation**: `/root/project/juncture/crates/juncture-core/src/tools.rs:126-239`
+- **Status**: Core fields match design (excluding extra lifecycle methods)
 
-**Enhancements** (C-008):
-- Detailed error parsing beyond basic requirements
-- Provider-specific error code mapping
-- Retry-after header extraction
+### [C-010] StatefulTool - CONFORMANT
+- **Design doc**: `design/08-llm-tools.md` §4.2 (lines 817-833)
+- **Implementation**: `/root/project/juncture/crates/juncture-core/src/tools.rs:241-289`
+- **Status**: Exact match with design
 
-**Status**: Production-ready with excellent error handling
+### [C-011] tools_condition Function - CONFORMANT
+- **Design doc**: `design/08-llm-tools.md` §4.1 (lines 509-544)
+- **Implementation**: `/root/project/juncture/crates/juncture-core/src/tools.rs:544-583`
+- **Status**: Exact match with design
 
-### §4 Tool System - **MOSTLY CONFORMANT** with gaps and enhancements
-
-**Core Tool Infrastructure** - CONFORMANT:
-- `Tool` trait fully implemented with all required methods
-- `ToolDefinition` struct with provider format conversions
-- `ToolNode` with concurrent execution via `JoinSet`
-- Error handling modes (handle_errors flag)
-- Tool lookup and validation
-
-**Gaps**:
-- [B-001] Tool event metadata incomplete (missing timestamps and success flags)
-- [B-002] StatefulTool lifecycle event emission incomplete
-
-**Enhancements** (C-001, C-002, C-005):
-- Comprehensive JSON Schema validation beyond design
-- Advanced interceptor pattern with composite support
-- Detailed execution tracing with input/output capture
-- ToolEntry enum supporting both stateless and stateful tools
-
-**Status**: Production-ready with minor gaps in observability features
-
-### §4.0 ToolRuntime Injection - **PARTIALLY CONFORMANT** (B-002)
-`ToolRuntime<S>` exists with basic functionality but missing lifecycle event emission:
-- State access: ✓ Implemented
-- Config access: ✓ Implemented
-- Store access: ✓ Implemented
-- `emit_output_delta()`: ✓ Implemented
-- `emit_tool_started()`: ✗ Missing
-- `emit_tool_finished()`: ✗ Missing
-
-**Status**: Functional but incomplete - requires lifecycle event methods
-
-### §4.1 tools_condition() - **CONFORMANT** with enhancements (C-007)
-Both required variants implemented:
-- State-based `tools_condition<S>(state, messages_field)` 
-- Message-based `tools_condition_from_messages(messages)`
-- Proper last-AI-message detection logic
-- Serialization-based field access for flexibility
-
-**Status**: Production-ready with excellent flexibility
-
-### §4.2 ValidationNode - **CONFORMANT** with enhancements (C-006)
-Complete implementation exceeding design:
-- Token limit validation with actual usage checking
-- Custom validator function support
-- Full `Node<MessagesState>` trait implementation
-- Integration with graph execution pipeline
-
-**Status**: Production-ready, exceeds design specification
-
-### §5 Prebuilt Agents - **CONFORMANT**
-Complete ReAct agent implementation:
-- `create_react_agent()` with standard agent-tools loop
-- `ReactAgentConfig` with system message, hooks, and state injection
-- `AgentNode` wrapping LLM with tool binding
-- Proper conditional edge routing
-- State schema customization support
-
-**Status**: Production-ready, excellent developer experience
-
-### §6 Structured Output - **CONFORMANT** with enhancements (C-004)
-`StructuredOutputModel<M, T>` fully implemented:
-- Virtual tool creation from target type schema
-- Tool-based extraction with `tool_choice` enforcement
-- JSON deserialization into target type
-- Hybrid extraction strategy with text fallback (enhancement)
-- Streaming support (delegated to inner model)
-
-**Status**: Production-ready with improved resilience through fallback strategy
-
-### §7 Budget Integration - **OUT OF SCOPE**
-Token usage reporting is integrated but full BudgetTracker analysis requires cross-module review with Pregel engine.
-
-**Status**: Basic integration present, advanced features out of scope
-
-### §8 Error Types - **MOSTLY CONFORMANT** with simplification (B-003)
-Comprehensive error types across LLM and Tool domains:
-- `LlmError`: All variants present but `Other` uses String instead of boxed trait
-- `ToolError`: All variants present with proper formatting
-- Provider-specific error parsing and conversion
-
-**Gap** (B-003):
-- `LlmError::Other(String)` instead of `Other(#[source] Box<dyn Error + Send + Sync>)`
-
-**Status**: Production-ready but error chain preservation simplified
-
----
-
-## Cross-Cutting Concerns
-
-### Error Handling - **STRONG**
-All modules implement comprehensive error handling:
-- Provider-specific error parsing
-- HTTP status code mapping
-- Descriptive error messages
-- Proper error propagation through async boundaries
-- Integration with tracing for error observability
-
-### Observability - **STRONG** with minor gaps
-Excellent OpenTelemetry integration throughout:
-- Span creation for all LLM calls and tool executions
-- Structured attributes for tokens, duration, errors
-- Metrics emission for performance monitoring
-- Tool execution tracing for audit trails
-
-**Minor gaps** (B-001):
-- Tool lifecycle events missing some metadata fields
-- Success status not explicitly included in events
-
-### Testing Coverage - **STRONG**
-Comprehensive test coverage across modules:
-- Unit tests for core traits and types
-- Integration tests for provider implementations
-- Property-based tests for validation logic
-- Mock implementations for testing workflows
-
-### Documentation - **STRONG**
-Excellent code documentation:
-- Comprehensive module-level documentation
-- Detailed example usage in doc comments
-- Clear explanations of design decisions
-- Proper safety annotations and error documentation
-
----
-
-## Architecture Assessment
-
-### Layering - **EXCELLENT**
-Clean separation of concerns across modules:
-- `juncture-core`: Foundational traits and types
-- `juncture`: Provider implementations and convenience features
-- Proper dependency direction (facade → core → external)
-- Feature gates for optional providers
-
-### Type Safety - **EXCELLENT**
-Strong leverage of Rust's type system:
-- PhantomData for type-safe structured output
-- Generic trait bounds for State and ChatModel
-- Enum-based error handling with exhaustive matching
-- Compile-time guarantees for tool bindings
-
-### Concurrency Model - **EXCELLENT**
-Proper async/await usage throughout:
-- Tool execution via `JoinSet` for true parallelism
-- Streaming with `BoxStream` for type-erased async iteration
-- Proper `Send + Sync` bounds for thread safety
-- No blocking operations in async contexts
-
-### Extensibility - **EXCELLENT** with enhancements
-Multiple extension points beyond design:
-- Interceptor pattern for cross-cutting concerns (C-002)
-- Transformer pattern for argument manipulation
-- Validator pattern for input checking (C-001)
-- Retry wrapper for resilience (C-003)
+### [C-012] Budget Integration - CONFORMANT
+- **Design doc**: `design/08-llm-tools.md` §7 (lines 1156-1203)
+- **Implementation**: Provider files (anthropic.rs, openai.rs)
+- **Status**: Automatic token reporting matches design
 
 ---
 
 ## Action Plan
 
-### Immediate (blocking - fix before next release)
-1. [ ] **[B-001]** Implement missing `timestamp` field in `ToolStarted` events and `success` flag in `ToolFinished` events
-2. [ ] **[B-002]** Add `emit_tool_started()` and `emit_tool_finished()` methods to `ToolRuntime<S>` and integrate with event system
-3. [ ] **[B-003]** Update `LlmError::Other` variant to use boxed trait object with `#[source]` attribute for error chain preservation
+1. [ ] **D-001**: Implement `CompositeTransformer` struct as specified
+2. [ ] **D-002**: Add `tools_condition` field to `ToolNodeConfig`
+3. [ ] **D-005**: Change `ReactAgentConfig.prompt` to `system_message: Option<String>`
+4. [ ] **D-008**: Add `max_backoff` and `respect_retry_after` fields to `RetryingModel`
 
-### Short-term (next sprint)
-1. [ ] Review and enhance BudgetTracker integration for complete token accounting
-2. [ ] Consider adding tool execution timeout support beyond model timeout
-3. [ ] Evaluate adding tool result caching based on input arguments
+1. [ ] **D-003**: Remove `validate_input` and `interceptor` from ToolNodeConfig OR update design
+2. [ ] **D-004**: Remove structured output fallback mechanism OR update design
+3. [ ] **D-006**: Remove `emit_tool_started()` and `emit_tool_finished()` OR update design
+4. [ ] **D-007**: Remove `Other` variant from `LlmError` OR update design
 
-### Recommended (documentation updates)
-1. [ ] Update design §4.2 to reflect enhanced validation implementation (C-001)
-2. [ ] Update design §4.2 to document advanced interceptor patterns (C-002)
-3. [ ] Update design §8 to document retry logic implementation (C-003)
-4. [ ] Update design §6.1 to document hybrid structured output strategy (C-004)
-5. [ ] Update design §4.2 to reflect complete ToolExecutionTrace structure (C-005)
-6. [ ] Update design §4.2 to reflect complete ValidationNode implementation (C-006)
-7. [ ] Update design §4.1 to document both tools_condition variants (C-007)
-8. [ ] Update design §3 to document provider-specific error handling (C-008)
+### NEVER acceptable
+1. [ ] DO NOT update design documents to match code - code must match design
+2. [ ] DO NOT accept "enhancements" or "improvements" as justification for deviations
+3. [ ] DO NOT accept "production-ready features" as justification for extra code
 
 ---
 
 ## Conclusion
 
-The LLM & Tools module represents a **high-quality implementation** that closely follows the design specification while adding thoughtful enhancements in several areas. The core architecture is sound, with proper abstractions, comprehensive provider support, and production-ready error handling.
+Under STRICT conformance standards, Module 08 has **8 DEFECTS** and **2 MISSING** features that must be remediated. Core LLM and Tool functionality is implemented correctly but significant deviations exist in error handling, configuration options, and extra features.
 
-The three identified gaps ([B-001], [B-002], [B-003]) are relatively minor and do not prevent production deployment, but addressing them would improve observability and error diagnostic capabilities. The eight areas where code exceeds the design ([C-001] through [C-008]) represent genuine improvements that should be documented in the design specification to ensure future maintenance preserves these enhancements.
+**Verdict**: **REQUIRES REMEDIATION** - Code must be modified to exactly match design specification
 
-**Recommendation**: Update design documentation to reflect current implementation excellence and address the three identified gaps for complete feature parity. The module is ready for production use with the understanding that lifecycle event observability could be enhanced further.
+---
 
-**Conformance Score**: 92% (23/25 requirements fully met, 3 gaps, 8 enhancements)
+**Note**: This review used STRICT standards where any deviation from the design is a defect. Previous reviews may have used more lenient standards. Under STRICT standards, code must match design exactly.

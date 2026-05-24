@@ -3,7 +3,6 @@
 //! A Channel wraps a value with specific update and checkpoint semantics.
 //! Different channel types control how values are updated, persisted, and consumed.
 
-use crate::error::InvalidUpdateError;
 use serde::de::DeserializeOwned;
 use serde::ser::SerializeStruct;
 use std::collections::HashSet;
@@ -14,44 +13,30 @@ use std::collections::HashSet;
 /// writes in the same superstep are combined.
 pub trait Reducer<T> {
     /// Merge a single value (fast path avoiding Vec allocation)
-    ///
-    /// # Errors
-    ///
-    /// Returns `InvalidUpdateError` if the merge violates reducer constraints.
-    fn reduce_one(current: &mut T, value: T) -> Result<(), InvalidUpdateError> {
-        Self::reduce(current, vec![value])
+    fn reduce_one(current: &mut T, value: T) {
+        Self::reduce(current, vec![value]);
     }
 
     /// Merge multiple values into current
     ///
     /// Values are provided in the order tasks completed (not task spawn order).
     /// For deterministic results, use associative reducers like `AppendReducer`.
-    ///
-    /// # Errors
-    ///
-    /// Returns `InvalidUpdateError` if the merge violates reducer constraints
-    /// (e.g., multiple writers on a replace channel).
-    fn reduce(current: &mut T, values: Vec<T>) -> Result<(), InvalidUpdateError>;
+    fn reduce(current: &mut T, values: Vec<T>);
 }
 
 /// Replace reducer: only one writer per superstep (default)
 ///
 /// Equivalent to `LangGraph`'s `LastValue` channel.
-/// Returns an error if multiple nodes write to the same field in one superstep.
+/// Panics if multiple nodes write to the same field in one superstep.
 #[derive(Debug)]
 pub struct ReplaceReducer;
 
 impl<T> Reducer<T> for ReplaceReducer {
-    fn reduce(current: &mut T, values: Vec<T>) -> Result<(), InvalidUpdateError> {
-        if values.len() > 1 {
-            return Err(InvalidUpdateError::MultipleOverwrite {
-                field: "unknown".to_string(),
-            });
-        }
+    fn reduce(current: &mut T, values: Vec<T>) {
+        assert!(values.len() <= 1, "Replace reducer: multiple writes in same superstep");
         if let Some(v) = values.into_iter().next() {
             *current = v;
         }
-        Ok(())
     }
 }
 
@@ -63,16 +48,14 @@ impl<T> Reducer<T> for ReplaceReducer {
 pub struct AppendReducer;
 
 impl<T> Reducer<Vec<T>> for AppendReducer {
-    fn reduce_one(current: &mut Vec<T>, value: Vec<T>) -> Result<(), InvalidUpdateError> {
+    fn reduce_one(current: &mut Vec<T>, value: Vec<T>) {
         current.extend(value);
-        Ok(())
     }
 
-    fn reduce(current: &mut Vec<T>, values: Vec<Vec<T>>) -> Result<(), InvalidUpdateError> {
+    fn reduce(current: &mut Vec<T>, values: Vec<Vec<T>>) {
         for v in values {
             current.extend(v);
         }
-        Ok(())
     }
 }
 
@@ -84,7 +67,7 @@ impl<T> Reducer<Vec<T>> for AppendReducer {
 pub struct AnyValueReducer;
 
 impl<T: PartialEq + Clone> Reducer<T> for AnyValueReducer {
-    fn reduce(current: &mut T, values: Vec<T>) -> Result<(), InvalidUpdateError> {
+    fn reduce(current: &mut T, values: Vec<T>) {
         if let Some(last) = values.last() {
             // Semantic check: all values should be equal
             if let Some(first) = values.first() {
@@ -95,7 +78,6 @@ impl<T: PartialEq + Clone> Reducer<T> for AnyValueReducer {
             }
             *current = last.clone();
         }
-        Ok(())
     }
 }
 
@@ -106,11 +88,10 @@ impl<T: PartialEq + Clone> Reducer<T> for AnyValueReducer {
 pub struct LastWriteWinsReducer;
 
 impl<T> Reducer<T> for LastWriteWinsReducer {
-    fn reduce(current: &mut T, values: Vec<T>) -> Result<(), InvalidUpdateError> {
+    fn reduce(current: &mut T, values: Vec<T>) {
         if let Some(v) = values.into_iter().last() {
             *current = v;
         }
-        Ok(())
     }
 }
 
@@ -288,19 +269,19 @@ where
     T: Default + Clone + Send + Sync + serde::Serialize + DeserializeOwned + 'static,
     R: Reducer<T> + Send + Sync + 'static,
 {
-    fn update(&mut self, values: Vec<T>) -> Result<bool, InvalidUpdateError> {
+    fn update(&mut self, values: Vec<T>) -> bool {
         // Channel trait update doesn't support named sources.
         // When using the generic Channel trait, we apply all values directly
         // to the channel. This is useful when the caller doesn't care about
         // named barrier tracking and just wants to update the value.
         if values.is_empty() {
-            return Ok(false);
+            return false;
         }
         // Apply the reducer to merge all values
-        R::reduce(&mut self.value, values)?;
+        R::reduce(&mut self.value, values);
         // Mark all required sources as seen since we received an update
         self.seen_sources = self.required_sources.clone();
-        Ok(true)
+        true
     }
 
     fn get(&self) -> &T {
@@ -338,28 +319,26 @@ impl<T, R: Reducer<T>> NamedBarrierChannel<T, R> {
     /// to write to the channel. The barrier completes only after all required sources
     /// have written.
     ///
-    /// # Errors
+    /// # Panics
     ///
-    /// Returns `InvalidUpdateError` if the update violates reducer constraints
-    /// or if the source name is not in the required sources set.
+    /// Panics if `source_name` is not in the set of required sources (when sources are configured).
     pub fn update(
         &mut self,
         source_name: String,
         values: Vec<T>,
-    ) -> Result<bool, InvalidUpdateError> {
-        if !self.required_sources.is_empty() && !self.required_sources.contains(&source_name) {
-            return Err(InvalidUpdateError::MultipleOverwrite {
-                field: format!("source '{source_name}' not in required sources"),
-            });
-        }
+    ) -> bool {
+        assert!(
+            self.required_sources.is_empty() || self.required_sources.contains(&source_name),
+            "NamedBarrierChannel: source '{source_name}' not in required sources"
+        );
 
         if values.is_empty() {
-            return Ok(false);
+            return false;
         }
 
-        R::reduce(&mut self.value, values)?;
+        R::reduce(&mut self.value, values);
         self.seen_sources.insert(source_name);
-        Ok(true)
+        true
     }
 }
 
@@ -453,15 +432,15 @@ impl<T> Channel<Vec<T>> for TopicChannel<T>
 where
     T: Clone + Send + Sync + serde::Serialize + DeserializeOwned + 'static,
 {
-    fn update(&mut self, values: Vec<Vec<T>>) -> Result<bool, InvalidUpdateError> {
+    fn update(&mut self, values: Vec<Vec<T>>) -> bool {
         if values.is_empty() {
-            return Ok(false);
+            return false;
         }
         // Extend messages with all new values (flatten the vec of vecs)
         for batch in values {
             self.messages.extend(batch);
         }
-        Ok(true)
+        true
     }
 
     fn get(&self) -> &Vec<T> {
@@ -494,12 +473,7 @@ where
 /// Different channel types control how values are updated, persisted, and consumed.
 pub trait Channel<T>: Send + Sync + 'static {
     /// Update the channel with new values. Returns true if the value changed.
-    ///
-    /// # Errors
-    ///
-    /// Returns `InvalidUpdateError` if the update violates reducer constraints
-    /// (e.g., multiple writers on a replace channel).
-    fn update(&mut self, values: Vec<T>) -> Result<bool, InvalidUpdateError>;
+    fn update(&mut self, values: Vec<T>) -> bool;
 
     /// Get the current value
     fn get(&self) -> &T;
@@ -546,12 +520,12 @@ impl<T, R: Reducer<T>> UntrackedChannel<T, R> {
 impl<T: Default + Send + Sync + 'static, R: Reducer<T> + Send + Sync + 'static> Channel<T>
     for UntrackedChannel<T, R>
 {
-    fn update(&mut self, values: Vec<T>) -> Result<bool, InvalidUpdateError> {
+    fn update(&mut self, values: Vec<T>) -> bool {
         if values.is_empty() {
-            return Ok(false);
+            return false;
         }
-        R::reduce(&mut self.value, values)?;
-        Ok(true)
+        R::reduce(&mut self.value, values);
+        true
     }
 
     fn get(&self) -> &T {
@@ -597,13 +571,13 @@ impl<T, R: Reducer<T>> EphemeralChannel<T, R> {
 impl<T: Default + Send + Sync + 'static, R: Reducer<T> + Send + Sync + 'static> Channel<T>
     for EphemeralChannel<T, R>
 {
-    fn update(&mut self, values: Vec<T>) -> Result<bool, InvalidUpdateError> {
+    fn update(&mut self, values: Vec<T>) -> bool {
         if values.is_empty() {
-            return Ok(false);
+            return false;
         }
         self.consumed = false;
-        R::reduce(&mut self.value, values)?;
-        Ok(true)
+        R::reduce(&mut self.value, values);
+        true
     }
 
     fn get(&self) -> &T {
@@ -666,15 +640,15 @@ where
     T: Default + Clone + Send + Sync + serde::Serialize + DeserializeOwned + 'static,
     R: Reducer<T> + Send + Sync + 'static,
 {
-    fn update(&mut self, values: Vec<T>) -> Result<bool, InvalidUpdateError> {
+    fn update(&mut self, values: Vec<T>) -> bool {
         if values.is_empty() {
-            return Ok(false);
+            return false;
         }
-        R::reduce(&mut self.value, values)?;
+        R::reduce(&mut self.value, values);
         if self.is_finished {
             self.finished_value = Some(self.value.clone());
         }
-        Ok(true)
+        true
     }
 
     fn get(&self) -> &T {
@@ -758,16 +732,12 @@ impl<T, R: Reducer<T>> DeltaChannel<T, R> {
     /// During checkpoint recovery, finds the last `Overwrite<T>` in the sequence
     /// and uses it as the baseline, then applies only the writes after it via
     /// the reducer. This implements the design specification for ancestor replay.
-    ///
-    /// # Errors
-    ///
-    /// Returns `InvalidUpdateError` if the replay violates reducer constraints.
-    pub fn replay_writes(&mut self, values: &[T]) -> Result<(), InvalidUpdateError>
+    pub fn replay_writes(&mut self, values: &[T])
     where
         T: Clone + serde::Serialize + DeserializeOwned,
     {
         if values.is_empty() {
-            return Ok(());
+            return;
         }
 
         // Find last Overwrite as baseline, only replay writes after it
@@ -800,17 +770,23 @@ impl<T, R: Reducer<T>> DeltaChannel<T, R> {
         // Apply remaining writes to baseline
         let remaining: Vec<T> = values[start_idx..].to_vec();
         if !remaining.is_empty() {
-            R::reduce(&mut base, remaining)?;
+            R::reduce(&mut base, remaining);
         }
         self.value = base;
         self.update_count_since_snapshot = 0;
-        Ok(())
     }
 
     /// Check if a snapshot is due based on the update count
     #[must_use]
     pub const fn should_snapshot(&self) -> bool {
         self.update_count_since_snapshot >= self.snapshot_frequency
+    }
+
+    /// Mark the channel as finished, forcing a snapshot on the next checkpoint call
+    ///
+    /// This ensures the state is persisted when execution completes.
+    pub const fn finish(&mut self) {
+        self.update_count_since_snapshot = self.snapshot_frequency;
     }
 }
 
@@ -819,13 +795,13 @@ where
     T: Default + Clone + Send + Sync + serde::Serialize + DeserializeOwned + 'static,
     R: Reducer<T> + Send + Sync + 'static,
 {
-    fn update(&mut self, values: Vec<T>) -> Result<bool, InvalidUpdateError> {
+    fn update(&mut self, values: Vec<T>) -> bool {
         if values.is_empty() {
-            return Ok(false);
+            return false;
         }
-        R::reduce(&mut self.value, values)?;
+        R::reduce(&mut self.value, values);
         self.update_count_since_snapshot += 1;
-        Ok(true)
+        true
     }
 
     fn get(&self) -> &T {
@@ -858,11 +834,14 @@ where
 /// `Missing` indicates no checkpoint data is available.
 /// `Snapshot` contains a full snapshot of the value.
 #[derive(Clone, Debug)]
-pub enum DeltaBlob {
+pub enum DeltaBlob<T>
+where
+    T: Clone + serde::Serialize + serde::de::DeserializeOwned,
+{
     /// No checkpoint data available
     Missing,
     /// Full snapshot of the channel value
-    Snapshot(serde_json::Value),
+    Snapshot(T),
 }
 
 /// Remove-message identifier for message deletion
@@ -882,11 +861,8 @@ mod tests {
     #[test]
     fn untracked_channel_update_returns_true_on_change() {
         let mut ch: UntrackedChannel<i32, ReplaceReducer> = UntrackedChannel::new(0);
-        assert!(!ch.update(vec![]).expect("empty update should succeed"));
-        assert!(
-            ch.update(vec![42])
-                .expect("single value update should succeed")
-        );
+        assert!(!ch.update(vec![]));
+        assert!(ch.update(vec![42]));
         assert_eq!(*ch.get(), 42);
     }
 
@@ -920,7 +896,7 @@ mod tests {
     fn ephemeral_channel_update_resets_consumed() {
         let mut ch: EphemeralChannel<i32, ReplaceReducer> = EphemeralChannel::new(0);
         assert!(!ch.consume());
-        assert!(ch.update(vec![7]).expect("update should succeed"));
+        assert!(ch.update(vec![7]));
         assert!(!ch.consume()); // consumed was reset by update
     }
 
@@ -966,8 +942,7 @@ mod tests {
     #[test]
     fn delta_channel_replay_writes_restores_state() {
         let mut ch: DeltaChannel<Vec<i32>, AppendReducer> = DeltaChannel::new(vec![], 10);
-        ch.replay_writes(&[vec![1, 2], vec![3, 4]])
-            .expect("replay should succeed");
+        ch.replay_writes(&[vec![1, 2], vec![3, 4]]);
         assert_eq!(*ch.get(), vec![1, 2, 3, 4]);
         assert_eq!(ch.update_count_since_snapshot, 0);
     }
@@ -983,22 +958,39 @@ mod tests {
     fn delta_channel_should_snapshot() {
         let mut ch: DeltaChannel<i32, ReplaceReducer> = DeltaChannel::new(0, 2);
         assert!(!ch.should_snapshot());
-        ch.update(vec![1]).expect("update should succeed");
+        ch.update(vec![1]);
         assert!(!ch.should_snapshot());
-        ch.update(vec![2]).expect("update should succeed");
+        ch.update(vec![2]);
         assert!(ch.should_snapshot());
     }
 
     #[test]
     fn delta_blob_missing_variant_exists() {
-        let blob = DeltaBlob::Missing;
+        let blob: DeltaBlob<i32> = DeltaBlob::Missing;
         assert!(matches!(blob, DeltaBlob::Missing));
     }
 
     #[test]
     fn delta_blob_snapshot_holds_value() {
-        let blob = DeltaBlob::Snapshot(serde_json::json!(42));
+        let blob: DeltaBlob<i32> = DeltaBlob::Snapshot(42);
         assert!(matches!(blob, DeltaBlob::Snapshot(_)));
+    }
+
+    #[test]
+    fn delta_blob_clone() {
+        let blob: DeltaBlob<String> = DeltaBlob::Snapshot("hello".to_string());
+        let cloned = blob.clone();
+        if let DeltaBlob::Snapshot(v) = cloned {
+            assert_eq!(v, "hello");
+        } else {
+            panic!("expected Snapshot variant");
+        }
+        // Use original to prove clone created independent copy
+        if let DeltaBlob::Snapshot(v) = blob {
+            assert_eq!(v, "hello");
+        } else {
+            panic!("expected Snapshot variant");
+        }
     }
 
     #[test]
@@ -1040,39 +1032,29 @@ mod tests {
     #[test]
     fn replace_reducer_single_value_succeeds() {
         let mut val = 0;
-        ReplaceReducer::reduce(&mut val, vec![42]).expect("single value should succeed");
+        ReplaceReducer::reduce(&mut val, vec![42]);
         assert_eq!(val, 42);
     }
 
     #[test]
     fn replace_reducer_empty_values_succeeds() {
         let mut val = 99;
-        ReplaceReducer::reduce(&mut val, vec![]).expect("empty values should succeed");
+        ReplaceReducer::reduce(&mut val, vec![]);
         assert_eq!(val, 99);
     }
 
     #[test]
-    fn replace_reducer_multiple_values_returns_error() {
+    #[should_panic(expected = "Replace reducer: multiple writes in same superstep")]
+    fn replace_reducer_multiple_values_panics() {
         let mut val = 0;
-        let result = ReplaceReducer::reduce(&mut val, vec![1, 2]);
-        assert!(result.is_err());
-        let err = result.expect_err("multiple values should error");
-        assert!(
-            matches!(err, InvalidUpdateError::MultipleOverwrite { .. }),
-            "expected MultipleOverwrite error, got {err:?}"
-        );
+        ReplaceReducer::reduce(&mut val, vec![1, 2]);
     }
 
     #[test]
-    fn untracked_channel_multiple_writes_returns_error() {
+    #[should_panic(expected = "Replace reducer: multiple writes in same superstep")]
+    fn untracked_channel_multiple_writes_panics() {
         let mut ch: UntrackedChannel<i32, ReplaceReducer> = UntrackedChannel::new(0);
-        let result = ch.update(vec![1, 2]);
-        assert!(result.is_err());
-        let err = result.expect_err("multiple writes should error");
-        assert!(
-            matches!(err, InvalidUpdateError::MultipleOverwrite { .. }),
-            "expected MultipleOverwrite error, got {err:?}"
-        );
+        ch.update(vec![1, 2]);
     }
 
     // NamedBarrierChannel tests
@@ -1094,12 +1076,10 @@ mod tests {
             );
         assert!(!ch.is_available());
 
-        ch.update("node_a".to_string(), vec![42])
-            .expect("first update should succeed");
+        ch.update("node_a".to_string(), vec![42]);
         assert!(!ch.is_available());
 
-        ch.update("node_b".to_string(), vec![100])
-            .expect("second update should succeed");
+        ch.update("node_b".to_string(), vec![100]);
         assert!(ch.is_available());
         assert_eq!(*ch.get(), 100); // Last write wins with ReplaceReducer
     }
@@ -1119,8 +1099,7 @@ mod tests {
             );
 
         assert!(!ch.has_written("node_a"));
-        ch.update("node_a".to_string(), vec![1])
-            .expect("update should succeed");
+        ch.update("node_a".to_string(), vec![1]);
         assert!(ch.has_written("node_a"));
         assert!(!ch.has_written("node_b"));
     }
@@ -1133,10 +1112,8 @@ mod tests {
                 ["node_a", "node_b"].into_iter().map(String::from),
             );
 
-        ch.update("node_a".to_string(), vec![1])
-            .expect("update should succeed");
-        ch.update("node_b".to_string(), vec![2])
-            .expect("update should succeed");
+        ch.update("node_a".to_string(), vec![1]);
+        ch.update("node_b".to_string(), vec![2]);
         assert!(ch.is_available());
 
         ch.reset();
@@ -1153,23 +1130,17 @@ mod tests {
         ch.add_required_source("node_a".to_string());
         assert!(!ch.is_available());
 
-        ch.update("node_a".to_string(), vec![42])
-            .expect("update should succeed");
+        ch.update("node_a".to_string(), vec![42]);
         assert!(ch.is_available());
     }
 
     #[test]
-    fn named_barrier_channel_unknown_source_returns_error() {
+    #[should_panic(expected = "NamedBarrierChannel: source")]
+    fn named_barrier_channel_unknown_source_panics() {
         let mut ch: NamedBarrierChannel<i32, ReplaceReducer> =
             NamedBarrierChannel::new_with_sources(0, vec!["node_a".to_string()]);
 
-        let result = ch.update("unknown_node".to_string(), vec![42]);
-        assert!(result.is_err());
-        let err = result.expect_err("unknown source should error");
-        assert!(
-            matches!(err, InvalidUpdateError::MultipleOverwrite { .. }),
-            "expected MultipleOverwrite error, got {err:?}"
-        );
+        ch.update("unknown_node".to_string(), vec![42]);
     }
 
     #[test]
@@ -1177,8 +1148,7 @@ mod tests {
         let mut ch: NamedBarrierChannel<i32, ReplaceReducer> =
             NamedBarrierChannel::new_with_sources(0, vec!["node_a".to_string()]);
 
-        ch.update("node_a".to_string(), vec![42])
-            .expect("update should succeed");
+        ch.update("node_a".to_string(), vec![42]);
 
         let checkpoint = ch.checkpoint().expect("should have checkpoint");
         // Checkpoint is a tuple (value, seen_sources)
@@ -1196,7 +1166,7 @@ mod tests {
             NamedBarrierChannel::new_with_sources(0, ["node_a".to_string(), "node_b".to_string()]);
 
         // Using the generic Channel trait update
-        Channel::update(&mut ch, vec![42]).expect("generic update should succeed");
+        Channel::update(&mut ch, vec![42]);
         assert!(ch.is_available());
         assert!(ch.has_written("node_a"));
         assert!(ch.has_written("node_b"));
@@ -1220,13 +1190,11 @@ mod tests {
     fn topic_channel_accumulates_messages() {
         let mut ch: TopicChannel<String> = TopicChannel::new();
 
-        ch.update(vec![vec!["hello".to_string()]])
-            .expect("first update should succeed");
+        ch.update(vec![vec!["hello".to_string()]]);
         assert_eq!(ch.len(), 1);
         assert_eq!(ch.get()[0], "hello");
 
-        ch.update(vec![vec!["world".to_string()]])
-            .expect("second update should succeed");
+        ch.update(vec![vec!["world".to_string()]]);
         assert_eq!(ch.len(), 2);
         assert_eq!(ch.get()[1], "world");
     }
@@ -1235,8 +1203,7 @@ mod tests {
     fn topic_channel_update_with_multiple_messages() {
         let mut ch: TopicChannel<i32> = TopicChannel::new();
 
-        ch.update(vec![vec![1, 2, 3]])
-            .expect("update should succeed");
+        ch.update(vec![vec![1, 2, 3]]);
         assert_eq!(ch.len(), 3);
         assert_eq!(ch.get(), &[1, 2, 3]);
     }
@@ -1245,8 +1212,7 @@ mod tests {
     fn topic_channel_update_with_multiple_batches() {
         let mut ch: TopicChannel<i32> = TopicChannel::new();
 
-        ch.update(vec![vec![1, 2], vec![3, 4]])
-            .expect("update should succeed");
+        ch.update(vec![vec![1, 2], vec![3, 4]]);
         assert_eq!(ch.len(), 4);
         assert_eq!(ch.get(), &[1, 2, 3, 4]);
     }
@@ -1255,8 +1221,7 @@ mod tests {
     fn topic_channel_reset_clears_messages() {
         let mut ch: TopicChannel<String> = TopicChannel::new();
 
-        ch.update(vec![vec!["test".to_string()]])
-            .expect("update should succeed");
+        ch.update(vec![vec!["test".to_string()]]);
         assert_eq!(ch.len(), 1);
 
         ch.reset();
@@ -1271,8 +1236,7 @@ mod tests {
         let had_content = ch.consume();
         assert!(!had_content); // Empty channel returns false
 
-        ch.update(vec![vec!["test".to_string()]])
-            .expect("update should succeed");
+        ch.update(vec![vec!["test".to_string()]]);
         let had_content_after = ch.consume();
         assert!(had_content_after); // Non-empty channel returns true
         assert!(ch.is_empty());
@@ -1282,8 +1246,7 @@ mod tests {
     fn topic_channel_iter_messages() {
         let mut ch: TopicChannel<i32> = TopicChannel::new();
 
-        ch.update(vec![vec![1, 2, 3]])
-            .expect("update should succeed");
+        ch.update(vec![vec![1, 2, 3]]);
 
         let mut iter = ch.iter();
         assert_eq!(iter.next(), Some(&1));
@@ -1296,8 +1259,7 @@ mod tests {
     fn topic_channel_checkpoint_persists_messages() {
         let mut ch: TopicChannel<i32> = TopicChannel::new();
 
-        ch.update(vec![vec![1, 2, 3]])
-            .expect("update should succeed");
+        ch.update(vec![vec![1, 2, 3]]);
 
         let checkpoint = ch.checkpoint().expect("should have checkpoint");
         assert_eq!(checkpoint, serde_json::json!([1, 2, 3]));
@@ -1320,7 +1282,7 @@ mod tests {
     fn last_value_after_finish_checkpoint_saves_is_finished_state() {
         let mut ch: LastValueAfterFinishChannel<i32, ReplaceReducer> =
             LastValueAfterFinishChannel::new(10);
-        ch.update(vec![42]).expect("update should succeed");
+        ch.update(vec![42]);
         ch.finish();
 
         let checkpoint = ch
@@ -1363,7 +1325,7 @@ mod tests {
     fn last_value_after_finish_checkpoint_round_trip() {
         let mut ch1: LastValueAfterFinishChannel<i32, ReplaceReducer> =
             LastValueAfterFinishChannel::new(0);
-        ch1.update(vec![123]).expect("update should succeed");
+        ch1.update(vec![123]);
         ch1.finish();
 
         let checkpoint = ch1.checkpoint().expect("should checkpoint");
@@ -1397,33 +1359,31 @@ mod tests {
     #[test]
     fn delta_channel_replay_writes_handles_empty_sequence() {
         let mut ch: DeltaChannel<i32, ReplaceReducer> = DeltaChannel::new(5, 10);
-        ch.replay_writes(&[]).expect("empty replay should succeed");
+        ch.replay_writes(&[]);
         assert_eq!(*ch.get(), 5); // Value unchanged
     }
 
     #[test]
     fn delta_channel_replay_writes_single_value() {
         let mut ch: DeltaChannel<i32, ReplaceReducer> = DeltaChannel::new(0, 10);
-        ch.replay_writes(&[42])
-            .expect("single value replay should succeed");
+        ch.replay_writes(&[42]);
         assert_eq!(*ch.get(), 42);
     }
 
     #[test]
     fn delta_channel_replay_writes_multiple_values() {
         let mut ch: DeltaChannel<Vec<i32>, AppendReducer> = DeltaChannel::new(vec![], 10);
-        ch.replay_writes(&[vec![1, 2], vec![3, 4]])
-            .expect("replay should succeed");
+        ch.replay_writes(&[vec![1, 2], vec![3, 4]]);
         assert_eq!(*ch.get(), vec![1, 2, 3, 4]);
     }
 
     #[test]
     fn delta_channel_replay_writes_resets_snapshot_counter() {
         let mut ch: DeltaChannel<i32, ReplaceReducer> = DeltaChannel::new(0, 10);
-        ch.update(vec![1]).expect("update should succeed");
+        ch.update(vec![1]);
         assert_eq!(ch.update_count_since_snapshot, 1);
 
-        ch.replay_writes(&[99]).expect("replay should succeed");
+        ch.replay_writes(&[99]);
         assert_eq!(ch.update_count_since_snapshot, 0); // Reset after replay
     }
 
@@ -1431,8 +1391,7 @@ mod tests {
     fn delta_channel_replay_writes_with_replace_reducer() {
         let mut ch: DeltaChannel<i32, ReplaceReducer> = DeltaChannel::new(0, 10);
         // ReplaceReducer only allows one value
-        ch.replay_writes(&[42])
-            .expect("single value should succeed");
+        ch.replay_writes(&[42]);
         assert_eq!(*ch.get(), 42);
     }
 
@@ -1446,8 +1405,7 @@ mod tests {
         let normal_val1 = serde_json::json!("update1");
         let normal_val2 = serde_json::json!("update2");
 
-        ch.replay_writes(&[normal_val1, overwrite_val, normal_val2.clone()])
-            .expect("replay should handle overwrite in sequence");
+        ch.replay_writes(&[normal_val1, overwrite_val, normal_val2.clone()]);
 
         // After detecting the overwrite, baseline should be "baseline",
         // then remaining values ["update1", "update2"] applied via LastWriteWinsReducer
@@ -1463,8 +1421,7 @@ mod tests {
         let overwrite_val = serde_json::json!({"__overwrite__": "new_baseline"});
         let normal_val = serde_json::json!("update");
 
-        ch.replay_writes(&[overwrite_val, normal_val.clone()])
-            .expect("replay should succeed");
+        ch.replay_writes(&[overwrite_val, normal_val.clone()]);
 
         // Overwrite sets baseline to "new_baseline", then "update" applied
         assert_eq!(ch.get(), &normal_val);
@@ -1478,12 +1435,22 @@ mod tests {
         let normal_val = serde_json::json!("update");
         let overwrite_val = serde_json::json!({"__overwrite__": "final_baseline"});
 
-        ch.replay_writes(&[normal_val, overwrite_val])
-            .expect("replay should succeed");
+        ch.replay_writes(&[normal_val, overwrite_val]);
 
         // Overwrite at end sets baseline to "final_baseline", no remaining values
         assert_eq!(ch.get(), &serde_json::json!("final_baseline"));
     }
+
+    #[test]
+    fn delta_channel_finish_forces_snapshot() {
+        let mut ch: DeltaChannel<i32, ReplaceReducer> = DeltaChannel::new(0, 10);
+        assert!(!ch.should_snapshot());
+
+        ch.finish();
+        // After finish, should_snapshot should return true
+        assert!(ch.should_snapshot());
+    }
+
 }
 
 // Rust guideline compliant 2026-05-20

@@ -41,8 +41,6 @@ class BaseChannel(Generic[Value, Update, Checkpoint], ABC):
 
 #### UntrackedValue 详解
 
-<!-- Addresses finding: H-3 -->
-
 > 源码位置: `langgraph/libs/langgraph/langgraph/channels/last_value.py` — UntrackedValue 继承自 LastValue
 
 ```rust
@@ -101,8 +99,6 @@ pub struct AgentState {
 
 #### AfterFinish 变体详解
 
-<!-- Addresses finding: M-14 -->
-
 > 参考: `langgraph/libs/langgraph/langgraph/channels/last_value.py` — LastValueAfterFinish
 > 参考: `langgraph/libs/langgraph/langgraph/channels/named_barrier_value.py` — NamedBarrierValueAfterFinish
 
@@ -141,7 +137,6 @@ impl<T: Default + Clone> Channel<T> for LastValueAfterFinishChannel<T> {
         self.value.as_ref().unwrap() // 只在 available 后调用
     }
 
-    /// <!-- Addresses finding: M-14 -->
     /// 只有在 finish() 后才标记为可用
     fn is_available(&self) -> bool {
         self.finished && self.value.is_some()
@@ -199,22 +194,19 @@ versions_seen: dict[str, dict[str, int]]   # 每个节点已消费的各 channel
 3. **低运行时开销**：proc-macro 生成的代码等价于手写，无动态分发（详见下方性能考量）
 4. **简化实现**：不需要动态 Channel Map，因为 Rust 的 struct 字段在编译期已知
 
-<!-- Addresses finding: Part2#7 -->
 
-> **性能考量**：虽然 Channel dispatch 无虚表开销，但整体执行仍存在以下成本：
-> - **State clone**：每个节点 spawn 时需要 `state.clone()`，对于大状态（长对话历史）开销显著（见 03-pregel-engine.md 的 CowState 优化）
-> - **HashMap lookups**：VersionsSeen 中的 `HashMap<NodeId, Vec<u64>>` 查找为 O(1) 均摊，但哈希计算和内存间接访问有常数因子
-> - **Vec extend**：Append reducer 的 `current.extend(v)` 在容量不足时触发堆分配
-> - **serde_json 序列化**：checkpoint 持久化时的 JSON 序列化/反序列化为主要热路径瓶颈
->
-> 综合评估：对于典型 Agent 工作负载（状态 < 100KB，节点数 < 50），这些开销在可接受范围内。对于大规模场景，需关注 CowState 优化和 MessagePack 序列化。
+**性能考量**：虽然 Channel dispatch 无虚表开销，但整体执行仍存在以下成本：
+- **State clone**：每个节点 spawn 时需要 `state.clone()`，对于大状态（长对话历史）开销显著（见 03-pregel-engine.md 的 CowState 优化）
+- **HashMap lookups**：VersionsSeen 中的 `HashMap<NodeId, Vec<u64>>` 查找为 O(1) 均摊，但哈希计算和内存间接访问有常数因子
+- **Vec extend**：Append reducer 的 `current.extend(v)` 在容量不足时触发堆分配
+- **serde_json 序列化**：checkpoint 持久化时的 JSON 序列化/反序列化为主要热路径瓶颈
+综合评估：对于典型 Agent 工作负载（状态 < 100KB，节点数 < 50），这些开销在可接受范围内。对于大规模场景，需关注 CowState 优化和 MessagePack 序列化。
 
 ### 2.2 State Trait
 
 ```rust
 // juncture-core/src/state/trait.rs
 
-// <!-- Addresses finding: L-1 -->
 // Debug bound added: enables troubleshooting, structured logging, error messages
 // that include state snapshots, and Debug StreamMode output.
 pub trait State: Clone + Send + Sync + std::fmt::Debug + 'static {
@@ -244,27 +236,81 @@ pub trait State: Clone + Send + Sync + std::fmt::Debug + 'static {
         value
     }
 
-    // > **Implementation Note (C-01-8)**: Implementation adds `finish_field(field_index: usize)` method
-    // > to support `LastValueAfterFinish` channels. When the Pregel engine detects no more nodes to
-    // > execute in a superstep, it calls `finish_field()` for each field using the `replace_after_finish`
-    // > reducer, making their values visible to subscribers. This is the Rust equivalent of LangGraph's
-    // > per-channel `finish()` call on `LastValueAfterFinish` channels.
-    //
-    // > **Implementation Note (C-01-2)**: Implementation adds comprehensive extension methods beyond design:
-    // > - `try_apply(&mut self, update: Self::Update) -> Result<FieldsChanged, InvalidUpdateError>` —
-    // >   fallible variant of `apply()` with structured error propagation
-    // > - `finish_field(&mut self, field_index: usize)` — signal `replace_after_finish` fields to become available
-    // > - `consume_field(&mut self, field_index: usize)` — clear ephemeral fields by index
-    // > - `consume_field_indices(&mut self, indices: &[usize])` — batch clear multiple ephemeral fields
-    // > - `replace_field_indices(&mut self, indices: &[usize])` — helper for Overwrite semantics
-    // > - `replace_after_finish_field_indices(&mut self, indices: &[usize])` — finish multiple after-finish fields
-    // > - `field_is_set(&self, field_index: usize) -> bool` — check if field has non-default value
-    // > - `field_count() -> usize` — return total field count (for generic code)
-    // > - `field_names() -> &'static [&'static str]` — return field name slice (for debugging/serialization)
-    // > - `delta_channel_specs() -> &[DeltaChannelSpec]` — return delta channel configuration per field
+    // Extended State trait methods for production use:
+
+    /// Fallible variant of `apply()` with structured error propagation
+    ///
+    /// Returns `InvalidUpdateError` if the update violates reducer constraints,
+    /// such as `InvalidUpdateError::MultipleOverwrite` when multiple nodes
+    /// write to a replace channel in the same superstep.
+    fn try_apply(&mut self, update: Self::Update) -> Result<FieldsChanged, InvalidUpdateError> {
+        Ok(self.apply(update))
+    }
+
+    /// Signal `replace_after_finish` fields to become available
+    ///
+    /// Called by the Pregel engine when no more nodes need to execute in a
+    /// superstep. Makes values visible to subscribers for fields using
+    /// `#[reducer(replace_after_finish)]`.
+    fn finish_field(&mut self, _field_idx: usize) {}
+
+    /// Clear a single ephemeral field by index
+    ///
+    /// Called in `after_tick()` for each field that changed in the superstep.
+    /// Ephemeral fields reset to default after consumption.
+    fn consume_field(&mut self, _field_idx: usize) {}
+
+    /// Indices of fields using the `ephemeral` reducer
+    ///
+    /// Used by Pregel engine to call `consume_field()` only for fields that
+    /// need consume semantics. Proc-macro generates from `#[reducer(ephemeral)]`.
+    fn consume_field_indices() -> &'static [usize] {
+        &[]
+    }
+
+    /// Indices of fields using the `replace` reducer
+    ///
+    /// Used by Pregel engine to detect multiple writers in a single superstep.
+    fn replace_field_indices() -> &'static [usize] {
+        &[]
+    }
+
+    /// Indices of fields using the `replace_after_finish` reducer
+    ///
+    /// Used by Pregel engine to call `finish_field()` only for fields that
+    /// need finish semantics.
+    fn replace_after_finish_field_indices() -> &'static [usize] {
+        &[]
+    }
+
+    /// Check if a specific field is set (Some) in an update
+    ///
+    /// Used by Pregel engine for multi-writer conflict detection.
+    fn field_is_set(_update: &Self::Update, _field_idx: usize) -> bool {
+        false
+    }
+
+    /// Number of fields in this state type
+    fn field_count() -> usize {
+        0
+    }
+
+    /// Names of fields in declaration order
+    ///
+    /// Used for debugging and validation error messages.
+    fn field_names() -> &'static [&'static str] {
+        &[]
+    }
+
+    /// Field indices and snapshot frequencies for DeltaChannel fields
+    ///
+    /// Returns `(field_index, snapshot_frequency)` pairs identifying which
+    /// fields use `DeltaChannel` and their configured snapshot interval.
+    fn delta_channel_specs() -> &'static [(usize, usize)] {
+        &[]
+    }
 }
 
-/// <!-- Addresses finding: R-A4-1 -->
 /// CowState: Copy-on-Write State wrapper（默认状态包装器）
 ///
 /// 对于大型 State（如包含长对话历史的 messages 字段），
@@ -357,12 +403,10 @@ impl<S: State> Clone for CowState<S> {
 
 /// 标记哪些字段被修改（位集合）
 ///
-/// <!-- Addresses finding: Part2#4 -->
 ///
 /// 默认实现使用 `u64` 位掩码，最多支持 64 个字段。
 /// 对于大多数 Agent 场景（通常 < 30 个字段），这已足够。
 ///
-/// <!-- Addresses finding: R-A1-1 -->
 /// 使用 const generics 在编译时验证字段数量不超过 u64 容量（64）。
 /// proc-macro 生成的代码会检查字段数量，如果超过 64 个字段，
 /// 必须显式启用 `wide-state` feature，否则编译失败。
@@ -428,7 +472,6 @@ impl FieldsChanged {
 pub trait Reducer<T> {
     /// 单值快速路径：合并单个写入值
     /// 避免为单个值创建 Vec 的堆分配开销
-    /// <!-- Addresses finding: Part2#5 -->
     fn reduce_one(current: &mut T, value: T) {
         // 默认实现委托给 reduce_many，具体 Reducer 可覆写以避免 Vec 分配
         Self::reduce(current, vec![value]);
@@ -437,11 +480,6 @@ pub trait Reducer<T> {
     /// 将新值合并到当前值
     /// values 是同一 superstep 内所有节点对该字段的写入（按节点注册顺序）
     fn reduce(current: &mut T, values: Vec<T>);
-
-    /// > **Implementation Note (C-01-1)**: Implementation extends beyond design with structured error
-    /// > propagation: `reduce()` and `reduce_one()` return `Result<(), InvalidUpdateError>` instead of
-    /// > panicking on invalid updates (e.g., multiple writers to replace fields). This aligns with Rust
-    /// > best practices for error handling and enables graceful recovery in the Pregel engine.
 }
 
 /// 内置 Reducer 实现
@@ -475,7 +513,6 @@ impl<T> Reducer<Vec<T>> for AppendReducer {
     }
 }
 
-/// <!-- Addresses finding: M-1 -->
 /// AnyValue：假设所有值相等的 Channel
 ///
 /// 类似 LastValue，但语义上假设所有写入者提供的值相等。
@@ -664,7 +701,6 @@ impl ::juncture_core::State for AgentState {
 
 ### 2.5 Channel 生命周期：consume() 步骤
 
-<!-- Addresses finding: C-3 -->
 
 > 源码位置: `langgraph/libs/langgraph/langgraph/channels/base.py:19` — `consume()` 方法定义
 
@@ -685,7 +721,6 @@ pub trait Channel<T> {
     /// 读取当前值
     fn get(&self) -> &T;
 
-    /// <!-- Addresses finding: C-3 -->
     /// 在 apply_writes 后调用，用于清理或版本更新
     /// EphemeralChannel 实现会清除值；其他实现为 no-op
     fn consume(&mut self) -> bool {
@@ -693,23 +728,23 @@ pub trait Channel<T> {
         false
     }
 
-    // > **实现备注 (D-01-3)**: 实际的 Channel trait 还包含两个额外方法用于自包含的 checkpoint 序列化：
-    // > `fn checkpoint() -> Option<serde_json::Value>` 和
-    // > `fn from_checkpoint(value: serde_json::Value) -> Result<Self, String>`。
-    // > 这将 checkpoint 持久化逻辑混入 Channel trait，但使每个 channel 可以独立完成序列化/反序列化，
-    // > 无需外部序列化器感知内部类型。
-    //
-    // > **Implementation Note (C-01-1)**: Implementation extends beyond design with `checkpoint()` and
-    // > `from_checkpoint()` methods directly on the Channel trait. These methods enable self-contained
-    // > serialization: each channel independently handles its own checkpoint serialization and
-    // > deserialization, rather than requiring an external serializer that knows about all channel types.
-    // > This design trades trait pollution for simplification of the checkpoint pipeline.
-    //
-    // > **Implementation Note (C-01-8)**: Implementation adds comprehensive type bounds and error propagation:
-    // > - `T: Clone + Send + Sync + 'static` — required for all channel values
-    // > - `fn checkpoint(&self) -> Option<serde_json::Value>` — serialize to JSON for checkpoint
-    // > - `fn from_checkpoint(value: serde_json::Value) -> Result<Self, String>` — restore from JSON with error handling
-    // > - serde integration ensures checkpoint compatibility with LangGraph Python format
+    // Channel self-contained checkpoint serialization:
+
+    /// Serialize the current value for checkpoint persistence
+    ///
+    /// Each channel type defines its own serialization format.
+    /// Returns `None` for channels that should not be persisted
+    /// (e.g., UntrackedChannel, EphemeralChannel).
+    fn checkpoint(&self) -> Option<serde_json::Value>;
+
+    /// Restore channel state from a checkpoint value
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the checkpoint value cannot be deserialized.
+    fn from_checkpoint(value: serde_json::Value) -> Result<Self, String>
+    where
+        Self: Sized;
 }
 
 /// EphemeralChannel 的 consume 实现
@@ -745,7 +780,6 @@ pub struct FieldVersionTracker {
 
 /// 追踪每个节点已消费的字段版本（等价于 LangGraph 的 versions_seen）
 ///
-/// <!-- Addresses finding: R-A4-2 -->
 /// 使用 IndexMap 而非 HashMap 保证确定性迭代顺序。
 /// 对于节点数很多的大型图，考虑使用 `Vec<Vec<u64>>` 优化：
 /// - 外层 Vec 索引直接对应 node_id（假设 node_id 是紧凑的 usize）
@@ -791,8 +825,6 @@ LangGraph 的纯 reactive 调度（基于 channel 版本变化触发节点）在
 这比纯 reactive 模型更容易理解和调试，同时保留了所有必要的语义。
 
 ### 2.8 输入/输出 Schema 分离
-
-<!-- Addresses finding: C-03 -->
 
 > 源码位置: `langgraph/libs/langgraph/langgraph/graph/state.py:130` — `StateGraph(state_schema, input_schema, output_schema)`
 
@@ -951,20 +983,137 @@ pub scratch: Option<String>,
 // - 用途：节点间的临时通信、触发信号
 ```
 
-### 3.4 多写入冲突处理总结
+### 3.4 Topic Channel (pub/sub accumulation)
+
+> 源码位置: `langgraph/libs/langgraph/langgraph/channels/topic.py:23` — Topic
+
+TopicChannel implements pub/sub messaging patterns. All writes are accumulated
+into a list, enabling multiple publishers to send messages to the same topic.
+
+```rust
+/// Topic channel: accumulates all published values into a list
+///
+/// Equivalent to LangGraph's `Topic` channel.
+/// All writes are extended in order, supporting multiple publishers.
+pub struct TopicChannel<T> {
+    messages: Vec<T>,
+}
+
+impl<T> TopicChannel<T> {
+    pub const fn new() -> Self { Self { messages: Vec::new() } }
+    pub const fn len(&self) -> usize { self.messages.len() }
+    pub const fn is_empty(&self) -> bool { self.messages.is_empty() }
+    pub fn reset(&mut self) { self.messages.clear(); }
+    pub fn iter(&self) -> std::slice::Iter<'_, T> { self.messages.iter() }
+}
+
+impl<T> Channel<Vec<T>> for TopicChannel<T>
+where
+    T: Clone + Send + Sync + serde::Serialize + serde::de::DeserializeOwned + 'static,
+{
+    fn update(&mut self, values: Vec<Vec<T>>) -> bool {
+        if values.is_empty() {
+            return false;
+        }
+        for batch in values {
+            self.messages.extend(batch);
+        }
+        true
+    }
+
+    fn get(&self) -> &Vec<T> { &self.messages }
+
+    fn consume(&mut self) -> bool {
+        let was_empty = self.messages.is_empty();
+        self.messages.clear();
+        !was_empty
+    }
+}
+```
+
+### 3.5 NamedBarrier Channel (wait-all synchronization)
+
+> 源码位置: `langgraph/libs/langgraph/langgraph/channels/named_barrier_value.py:13` — NamedBarrierValue
+
+NamedBarrierChannel implements barrier/wait-all semantics for parallel workflows.
+The value is only available after ALL required named sources have written to it.
+
+```rust
+/// Named barrier channel: waits for all registered named sources to write
+///
+/// Equivalent to LangGraph's `NamedBarrierValue` channel.
+/// Each source must provide a unique name for tracking.
+/// The barrier completes only after all required sources have written.
+pub struct NamedBarrierChannel<T, R: Reducer<T>> {
+    value: T,
+    required_sources: HashSet<String>,
+    seen_sources: HashSet<String>,
+    _reducer: PhantomData<R>,
+}
+
+impl<T, R: Reducer<T>> NamedBarrierChannel<T, R> {
+    /// Create with required source names
+    pub fn new_with_sources(
+        value: T,
+        required_sources: impl IntoIterator<Item = String>,
+    ) -> Self { ... }
+
+    /// Create with no required sources (immediately available)
+    pub fn new(value: T) -> Self { ... }
+
+    /// Add a required source to the barrier
+    pub fn add_required_source(&mut self, source: String) { ... }
+
+    /// Check if all required sources have written
+    pub fn is_available(&self) -> bool {
+        self.required_sources.iter()
+            .all(|source| self.seen_sources.contains(source))
+    }
+
+    /// Check if a specific source has written
+    pub fn has_written(&self, source: &str) -> bool { ... }
+
+    /// Reset barrier, clearing seen sources while keeping required sources
+    pub fn reset(&mut self) { ... }
+
+    /// Update from a named source
+    ///
+    /// Applies the reducer to merge values, then records the source.
+    /// Panics if the source name is not in the required sources set.
+    pub fn update(
+        &mut self,
+        source_name: String,
+        values: Vec<T>,
+    ) -> bool { ... }
+}
+```
+
+**使用示例**：
+
+```rust
+let mut ch: NamedBarrierChannel<i32, ReplaceReducer> =
+    NamedBarrierChannel::new_with_sources(0, ["node_a", "node_b"].map(String::from));
+
+// Not available until all sources write
+ch.update("node_a".to_string(), vec![42]);
+assert!(!ch.is_available());
+
+ch.update("node_b".to_string(), vec![100]);
+assert!(ch.is_available());
+```
+
+### 3.6 多写入冲突处理总结
 
 | Reducer | 多写入行为 | 错误处理 |
 |---|---|---|
 | `replace`（默认） | 禁止多写入 | 运行时 panic + 报告冲突节点 |
 | `last_write_wins` | 允许，最后注册的节点获胜 | 无错误 |
 | `append` | 允许，所有值追加 | 无错误 |
-| `any`（<!-- Addresses finding: M-1 -->） | 允许，假设所有值相等 | debug_assert 检查相等性 |
+| `any` | 允许，假设所有值相等 | debug_assert 检查相等性 |
 | `custom` | 允许，由用户函数决定 | 用户函数可返回 Error |
 | `ephemeral` | 允许，最后写入获胜 | 无错误 |
 
-<!-- Addresses finding: L-1 -->
-
-### 3.4.1 REMOVE_ALL_MESSAGES Sentinel
+### 3.6.1 REMOVE_ALL_MESSAGES Sentinel
 
 > 源码位置: `langgraph/libs/langgraph/langgraph/graph/message.py:161` — `RemoveAll` 类
 
@@ -1011,7 +1160,7 @@ pub fn messages_reducer(current: &mut Vec<Message>, incoming: Vec<Message>) {
 }
 ```
 
-### 3.5 apply_writes 的完整流程
+### 3.7 apply_writes 的完整流程
 
 ```rust
 // juncture-core/src/pregel/loop_.rs
@@ -1042,9 +1191,7 @@ fn apply_writes<S: State>(
 }
 ```
 
-### 3.6 Overwrite 原语（绕过 Reducer）
-
-<!-- Addresses finding: H-01 -->
+### 3.8 Overwrite 原语（绕过 Reducer）
 
 > 源码位置: `langgraph/libs/langgraph/langgraph/types.py:928` — `Overwrite` 类
 
@@ -1089,8 +1236,6 @@ fn clear_history(state: AgentState, _config: &RunnableConfig) -> Command<AgentSt
 
 #### 序列化格式
 
-<!-- Addresses finding: C-6 -->
-
 在 checkpoint JSON 中，Overwrite 值必须使用 LangGraph 兼容的 wire format 进行序列化。Rust 的 `Overwrite<T>` 类型提供编译时类型安全，但序列化时使用 `__overwrite__` 标记键：
 
 ```rust
@@ -1125,8 +1270,6 @@ impl<'de, T: Deserialize<'de>> Deserialize<'de> for Overwrite<T> {
 ```
 
 #### 替代设计：字段级属性替代包装类型
-
-<!-- Addresses finding: H-1 -->
 
 **当前方案**：使用 `Overwrite<T>` 包装类型
 ```rust
@@ -1171,9 +1314,7 @@ pub struct AgentState {
 
 **推荐**：保持当前 `Overwrite<T>` 方案，因为它提供更强的编译时保证，同时 serde 实现确保 wire format 兼容。
 
-### 3.7 InvalidUpdateError
-
-<!-- Addresses finding: M-03 -->
+### 3.9 InvalidUpdateError
 
 ```rust
 /// 当写入操作违反 Channel 约束时抛出
@@ -1449,8 +1590,6 @@ pub struct Checkpoint {
 
 ## 7. DeltaChannel 实现
 
-<!-- Addresses finding: M-17 -->
-
 > 源码位置: `langgraph/libs/langgraph/langgraph/channels/delta.py:25` — `DeltaChannel`
 
 ### 7.1 设计动机
@@ -1485,14 +1624,9 @@ pub enum DeltaBlob<T> {
     Snapshot(T),
 }
 
-// > **实现备注 (D-01-6)**: 实际实现中 `DeltaBlob` 的 `Snapshot` 变体使用 `serde_json::Value`
-// > 而非泛型 `T`：`Snapshot(serde_json::Value)`。这消除了编译时类型保证，但简化了 checkpoint
-// > 序列化——所有快照统一为 JSON 值，避免了为每个泛型 T 实现 serde trait 的约束传播。
-//
-// > **Implementation Note (C-01-7)**: Implementation simplifies `DeltaBlob` to use `serde_json::Value`
-// > instead of generic `T`: `pub enum DeltaBlob { Missing, Snapshot(serde_json::Value) }`. This eliminates
-// > compile-time type guarantees but significantly simplifies checkpoint serialization—all snapshots are
-// > uniformly JSON values, avoiding serde trait bounds propagation for every generic T.
+// The `DeltaBlob<T>` type uses a generic parameter for compile-time type safety.
+// `Snapshot(T)` preserves the concrete type, requiring `T: Clone + serde::Serialize
+// + serde::de::DeserializeOwned` for checkpoint serialization support.
 ```
 
 ### 7.3 快照策略

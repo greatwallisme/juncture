@@ -1,360 +1,290 @@
-# M03 - Pregel Execution Engine: Design-to-Code Conformance Review
+# Module 03: Pregel Engine - Strict Conformance Review
 
-**Design Document**: `/root/project/juncture/design/03-pregel-engine.md`  
-**Review Date**: 2025-01-23  
-**Reviewer**: Automated Conformance Audit  
-**Scope**: Full implementation review
+**Doc path**: `/root/project/juncture/design/03-pregel-engine.md`
+**Review date**: 2024-05-24
+**Branch**: master
+**Files reviewed**: 10 core files across juncture-core/src/pregel/
+**Review scope**: Full (execution engine, parallelism, checkpointing, scheduling, budget, interrupts)
 
 ---
 
 ## Executive Summary
 
-The Pregel Execution Engine implementation demonstrates **STRONG CONFORMANCE** to the design specification, with **12 Category C findings** (code exceeds design) and **ZERO Category A/B gaps**. The implementation successfully translates LangGraph's Python Pregel algorithm into Rust's async model while maintaining semantic equivalence.
+The Pregel engine implementation has **CRITICAL TIMING DEFECTS** that violate the design specification. While the core execution model is generally correct, there are significant deviations in timing semantics, missing functionality, and extra architectural elements not specified in the design. The versions_seen timing defect is particularly serious as it changes node activation semantics.
 
-**Key Achievements**:
-- ✅ Complete superstep parallel execution with bounded concurrency
-- ✅ Path-based sorting for deterministic merge order matching LangGraph semantics  
-- ✅ Full budget tracking with atomic operations and task-local reporting
-- ✅ Sophisticated interrupt handling with multi-interrupt matching and null-resume
-- ✅ Comprehensive error recovery with per-node retry/timeout policies
-- ✅ Delta checkpoint optimization with per-channel write tracking
-
-**Verdict**: **ACCEPTABLE** - Update design docs to reflect 12 implementation enhancements.
+**Overall Assessment: NON-CONFORMANT** - Requires immediate remediation of critical timing defects.
 
 ---
 
 ## Findings Summary
 
-| Category | Count | Description |
-|----------|-------|-------------|
-| [C] Acceptable - Code exceeds design | 12 | Implementation goes beyond design in beneficial ways |
-| [A] Unacceptable - Technical direction deviation | 0 | No architectural violations found |
-| [B] Unacceptable - Feature simplification | 0 | All required features fully implemented |
-| Fully conformant | 85+ | Core design requirements fully satisfied |
+| Category                                         | Count |
+|--------------------------------------------------|-------|
+| [A] Technical direction deviation                | 1     |
+| [B] Feature simplification                       | 3     |
+| [C] Extra features not in design                 | 8     |
+| Fully conformant                                 | 12    |
 
-**Overall Assessment**: The implementation is production-ready with zero critical gaps. All 12 Category C findings represent defensive engineering that should be formalized in the design documentation.
+**Verdict**: NON-CONFORMANT - Critical timing defects require immediate fixes.
 
 ---
 
-## Category C Findings: Code Exceeds Design
+## Critical Defects
 
-### [C-03-001] TaskOutput Includes `triggered_fields` Field
-- **Design Doc**: §2.1 - `TaskOutput<S>` struct definition  
-- **Original Design**: `TaskOutput` only includes `task_id`, `node_name`, `command`, `duration`, `trigger`
-- **Actual Implementation**: 
+### [A-001] versions_seen Update Timing - CRITICAL TIMING DEVIATION
+
+- **Design doc**: `/root/project/juncture/design/03-pregel-engine.md` § 5.1 (lines 806-811)
+- **Design spec**: "versions_seen must be updated at the **beginning** of apply_writes, before any channel updates"
   ```rust
-  pub struct TaskOutput<S: State> {
-      pub task_id: String,
-      pub node_name: String,
-      pub command: crate::Command<S>,
-      pub duration: Duration,
-      pub trigger: TaskTrigger,
-      pub triggered_fields: Vec<usize>,  // EXTRA FIELD
-      pub error: Option<crate::JunctureError>,  // EXTRA FIELD
-  }
+  // Step 0: Before any updates, record current version to versions_seen
+  versions_seen[node] = current channel_versions (snapshot before mutation)
   ```
-- **Rationale**: 
-  - `triggered_fields` tracks which specific field updates caused task scheduling, enabling fine-grained channel consumption
-  - `error` field supports error recovery workflow when nodes have registered error handlers
-- **Benefit**: Enables precise `consume_triggered_channels()` instead of broad `reset_ephemeral()`, and allows graceful error recovery
-- **Action**: Update design §2.1, §5.4 to include `triggered_fields` and explain its role in targeted channel consumption
+- **Actual impl**: `/root/project/juncture/crates/juncture-core/src/pregel/loop_.rs:808` updates versions_seen **after** apply_writes() and field_versions.bump_all()
+- **Risk**: **CRITICAL** - Changes node activation semantics from LangGraph. Nodes activate based on post-superstep versions instead of pre-superstep versions as designed. This is a fundamental scheduling algorithm deviation.
+- **Affected files**: 
+  - `/root/project/juncture/crates/juncture-core/src/pregel/loop_.rs:808`
+  - `/root/project/juncture/crates/juncture-core/src/pregel/scheduler.rs` (apply_writes function)
+- **Git reference**: Implementation uses post-merge timing
+- **Action**: **CRITICAL** - Fix versions_seen update timing to match design (before apply_writes) or update design to specify post-merge semantics with LangGraph compatibility analysis
 
----
+### [B-001] finish() Call Timing Gap - FEATURE SIMPLIFICATION
 
-### [C-03-002] LoopStatus Uses Actual Interrupt Signals (Not Unit Variants)
-- **Design Doc**: §2.1 - `LoopStatus` enum definition  
-- **Original Design**: `InterruptBefore` and `InterruptAfter` as unit variants
-- **Actual Implementation**:
+- **Design doc**: `/root/project/juncture/design/03-pregel-engine.md` § 5.5 (lines 940-965)
+- **Design spec**: "finish() should be called when compute_next_tasks() returns empty"
+- **Actual impl**: `/root/project/juncture/crates/juncture-core/src/pregel/loop_.rs:1008` checks pending_tasks.is_empty() after several other operations
+- **Missing items**: 
+  - finish_all_channels() may not be called when compute_next_tasks() returns empty but pending interrupts exist
+  - Timing differs from specification
+- **Risk**: MEDIUM - Normal paths all call finish_all_channels(), but edge case with empty tasks + pending interrupts may not
+- **Affected files**: 
+  - `/root/project/juncture/crates/juncture-core/src/pregel/loop_.rs:1008`
+- **Git reference**: Implementation uses different timing logic
+- **Action**: Verify edge case behavior and either fix timing or update design to reflect actual implementation
+
+### [B-002] Delta Checkpoint Optimization Not Fully Implemented - MISSING FEATURE
+
+- **Design doc**: `/root/project/juncture/design/03-pregel-engine.md` § 3.2 (lines 1475-1478)
+- **Design spec**: Delta counter optimization for conditional full snapshots
+- **Actual impl**: `/root/project/juncture/crates/juncture-core/src/pregel/loop_.rs:1475-1478` has TODO comment
   ```rust
-  pub enum LoopStatus {
-      InterruptBefore(Vec<InterruptSignal>),
-      InterruptAfter(Vec<InterruptSignal>),
-      // ... other variants
-  }
+  // TODO: use this decision to emit delta-only checkpoints when false
   ```
-- **Rationale**: Carrying actual interrupt signals allows downstream consumers to inspect which specific interrupts triggered without re-consulting the checkpoint
-- **Benefit**: Richer diagnostic information in stream events and error messages
-- **Implementation Note**: Design §291 acknowledges this with `D-03-3` note
-- **Action**: Update design §2.1 to show non-unit variants and explain signal propagation
+- **Missing items**: 
+  - Delta-only checkpoint emission not implemented
+  - Always saves full snapshots
+- **Risk**: LOW-MEDIUM - Performance gap, not correctness. Design optimization not implemented.
+- **Affected files**: 
+  - `/root/project/juncture/crates/juncture-core/src/pregel/loop_.rs:1475-1478`
+- **Git reference**: Feature never completed
+- **Action**: Implement delta-only checkpoint saving or remove from design specification
+
+### [B-003] consume() Selectivity Differs - SEMANTIC DEVIATION
+
+- **Design doc**: `/root/project/juncture/design/03-pregel-engine.md` § 5.4 (lines 916-937)
+- **Design spec**: "consume channels triggered by tasks in the current superstep"
+- **Actual impl**: `/root/project/juncture/crates/juncture-core/src/pregel/loop_.rs:805` consumes previous_superstep_changed_fields
+- **Missing items**: 
+  - Consumes channels from previous superstep, not current superstep
+  - Semantic difference from design specification
+- **Risk**: LOW - Functionally correct but wording ambiguity in design
+- **Affected files**: 
+  - `/root/project/juncture/crates/juncture-core/src/pregel/loop_.rs:805`
+- **Git reference**: Implementation uses different semantic interpretation
+- **Action**: Clarify design doc wording or fix implementation to match design semantics
+
+### [C-001] Heartbeat Mechanism - EXTRA ARCHITECTURAL ELEMENT
+
+- **Design doc**: Not mentioned in design document
+- **Design spec**: No heartbeat mechanism specified
+- **Actual impl**: `/root/project/juncture/crates/juncture-core/src/runtime.rs` - Heartbeat types and mechanism
+- **Extra items**: 
+  - Heartbeat and HeartbeatWatcher types
+  - ping() signaling mechanism
+  - Not in design specification
+- **Risk**: LOW - Useful idle timeout mechanism but exceeds design
+- **Affected files**: 
+  - `/root/project/juncture/crates/juncture-core/src/runtime.rs`
+- **Git reference**: Feature added for idle detection (implementation note C-03-005)
+- **Action**: Add heartbeat mechanism to design document § 11.2
+
+### [C-002] SyncAsyncFuture Result Wrapping - SIGNATURE DEVIATION
+
+- **Design doc**: `/root/project/juncture/design/03-pregel-engine.md` § 13.2 (lines 2088-2133)
+- **Design spec**: SyncAsyncFuture<T> with result() returning T
+- **Actual impl**: `/root/project/juncture/crates/juncture-core/src/pregel/types.rs:460-536` - result() returns Result<T, JunctureError>
+- **Extra items**: 
+  - Result wrapping not in design
+  - Error propagation differs from specification
+- **Risk**: LOW - Better error handling but deviates from design signature
+- **Affected files**: 
+  - `/root/project/juncture/crates/juncture-core/src/pregel/types.rs:460-536`
+- **Git reference**: Implementation committed as error handling improvement (implementation note D-03-8)
+- **Action**: Update design to specify Result return type
+
+### [C-003] TaskOutput Extra Fields - EXTRA FEATURES
+
+- **Design doc**: `/root/project/juncture/design/03-pregel-engine.md` § 2.1 (lines 301-312)
+- **Design spec**: TaskOutput with task_id, node_name, command, duration, trigger
+- **Actual impl**: `/root/project/juncture/crates/juncture-core/src/pregel/types.rs:103-136` adds:
+  - triggered_fields: Vec<usize>
+  - error: Option<JunctureError>
+- **Extra items**: 
+  - Two extra fields not in design
+  - Enables fine-grained consumption and error recovery
+- **Risk**: LOW - Useful features but exceed design specification
+- **Affected files**: 
+  - `/root/project/juncture/crates/juncture-core/src/pregel/types.rs:103-136`
+- **Git reference**: Fields added for enhanced error recovery
+- **Action**: Add extra fields to design document § 2.1
+
+### [C-004] SuperstepResult BubbleUps - EXTRA FEATURE
+
+- **Design doc**: `/root/project/juncture/design/03-pregel-engine.md` § 2.1 (lines 294-299)
+- **Design spec**: SuperstepResult with task_outputs only
+- **Actual impl**: `/root/project/juncture/crates/juncture-core/src/pregel/types.rs:88-101` adds bubble_ups field
+- **Extra items**: 
+  - bubble_ups: Vec<BubbleUp<S>> for subgraph-to-parent event propagation
+  - Not specified in design
+- **Risk**: LOW - Useful for subgraph communication but exceeds design
+- **Affected files**: 
+  - `/root/project/juncture/crates/juncture-core/src/pregel/types.rs:88-101`
+- **Git reference**: Feature added for subgraph event propagation
+- **Action**: Add bubble_ups to design document § 2.1
+
+### [C-005] channels_finished Flag - EXTRA FEATURE
+
+- **Design doc**: Not mentioned in design document
+- **Design spec**: No flag to prevent duplicate finish_all_channels() calls
+- **Actual impl**: `/root/project/juncture/crates/juncture-core/src/pregel/loop_.rs:227-237` - channels_finished flag
+- **Extra items**: 
+  - channels_finished: bool field
+  - Prevents duplicate finish calls
+  - Not in design specification
+- **Risk**: LOW - Useful safety mechanism but exceeds design
+- **Affected files**: 
+  - `/root/project/juncture/crates/juncture-core/src/pregel/loop_.rs:227-237`
+- **Git reference**: Flag added for safety (implementation note C-03-008)
+- **Action**: Add channels_finished flag to design document § 5.5
+
+### [C-006] TriggerToNodes Optimization - EXTRA FEATURE
+
+- **Design doc**: `/root/project/juncture/design/03-pregel-engine.md` § 6.1 (lines 976-1031)
+- **Design spec**: Mention of trigger_to_nodes optimization but not detailed specification
+- **Actual impl**: `/root/project/juncture/crates/juncture-core/src/pregel/scheduler.rs:622-672` - Full TriggerToNodes implementation
+- **Extra items**: 
+  - Complete reverse mapping implementation
+  - O(triggered_nodes) optimization
+  - Beyond design specification
+- **Risk**: LOW - Performance optimization but exceeds design detail
+- **Affected files**: 
+  - `/root/project/juncture/crates/juncture-core/src/pregel/scheduler.rs:622-672`
+- **Git reference**: Optimization fully implemented (design note acknowledges integration)
+- **Action**: Add detailed TriggerToNodes specification to design document § 6.1
+
+### [C-007] Delta Counter Infrastructure - EXTRA FEATURE
+
+- **Design doc**: `/root/project/juncture/design/03-pregel-engine.md` § 3.2
+- **Design spec**: Delta counter optimization mentioned but implementation details not specified
+- **Actual impl**: `/root/project/juncture/crates/juncture-core/src/pregel/loop_.rs:221-225` - Full DeltaCounters tracking
+- **Extra items**: 
+  - Complete delta counter infrastructure
+  - update(), reset(), should_take_full_snapshot() methods
+  - Beyond design specification
+- **Risk**: LOW - Infrastructure complete but actual delta emission is TODO (B-002)
+- **Affected files**: 
+  - `/root/project/juncture/crates/juncture-core/src/pregel/loop_.rs:221-225`
+- **Git reference**: Infrastructure implemented (implementation note C-03-007)
+- **Action**: Add delta counter infrastructure to design document § 3.2
+
+### [C-008] Enhanced LoopStatus Variants - EXTRA FEATURES
+
+- **Design doc**: `/root/project/juncture/design/03-pregel-engine.md` § 2.1 (lines 270-289)
+- **Design spec**: Basic LoopStatus variants (Running, Done, OutOfSteps, InterruptBefore, InterruptAfter, BudgetExceeded, Cancelled, Drained)
+- **Actual impl**: `/root/project/juncture/crates/juncture-core/src/pregel/types.rs` includes all specified variants
+- **Extra items**: All variants match design - this is conformant
+- **Risk**: NONE - Implementation matches design exactly
+- **Affected files**: 
+  - `/root/project/juncture/crates/juncture-core/src/pregel/types.rs`
+- **Git reference**: Implementation matches design specification
+- **Action**: No action needed - fully conformant
 
 ---
 
-### [C-03-003] BubbleUp Enum Fully Implemented for Subgraph Control Flow
-- **Design Doc**: §10.1b - `GraphBubbleUp` exception types  
-- **Original Design**: Conceptual description of bubble-up signals
-- **Actual Implementation**:
-  ```rust
-  pub enum BubbleUp<S: State> {
-      Interrupt(GraphInterrupt),
-      Drained(GraphDrained),
-      ParentCommand(crate::Command<S>),
-  }
-  ```
-- **Rationale**: Provides type-safe control flow for subgraph execution, allowing clean separation between errors and normal termination
-- **Benefit**: Subgraphs can exit cleanly without error pollution in checkpoints
-- **Action**: Update design §10.1b with actual enum definition and usage patterns
+## Conformant Implementations
+
+### [CONF-001] Core Execution Model - Fully Conformant
+- **File**: `/root/project/juncture/crates/juncture-core/src/pregel/loop_.rs:503-1026`
+- **Evidence**: tick(), execute_superstep(), after_tick() match design three-phase loop
+
+### [CONF-002] Parallel Execution - Fully Conformant
+- **File**: `/root/project/juncture/crates/juncture-core/src/pregel/runner.rs:110-532`
+- **Evidence**: tokio::spawn + JoinSet + Semaphore bounded concurrency matches design
+
+### [CONF-003] Path-Based Deterministic Merge - Fully Conformant
+- **File**: `/root/project/juncture/crates/juncture-core/src/pregel/scheduler.rs:554-606`
+- **Evidence**: PULL < PUSH sorting with name/index ordering matches design
+
+### [CONF-004] Field Version Tracking - Fully Conformant
+- **File**: `/root/project/juncture/crates/juncture-core/src/pregel/scheduler.rs:16-344`
+- **Evidence**: FieldVersionTracker with global_max bumping matches design
+
+### [CONF-005] Checkpoint Integration - Fully Conformant
+- **File**: Multiple files
+- **Evidence**: Two-phase persistence (immediate put_writes + checkpoint put) matches design
+
+### [CONF-006] Interrupt Handling - Fully Conformant
+- **File**: `/root/project/juncture/crates/juncture-core/src/pregel/loop_.rs:606-634, 936-1003`
+- **Evidence**: interrupt_before in tick(), interrupt_after in after_tick() matches design
+
+### [CONF-007] Budget Tracking - Fully Conformant
+- **File**: `/root/project/juncture/crates/juncture-core/src/pregel/budget.rs:1-785`
+- **Evidence**: Atomic counters for tokens, cost, steps, duration match design
+
+### [CONF-008] Recursion Limit - Fully Conformant
+- **File**: `/root/project/juncture/crates/juncture-core/src/pregel/loop_.rs:516-532`
+- **Evidence**: Check at tick() start, default 25 matches design
+
+### [CONF-009] Node Scheduling - Fully Conformant
+- **File**: `/root/project/juncture/crates/juncture-core/src/pregel/scheduler.rs:381-523`
+- **Evidence**: compute_next_tasks with goto > edges > Send priority matches design
+
+### [CONF-010] Stream Protocol - Fully Conformant
+- **File**: `/root/project/juncture/crates/juncture-core/src/pregel/loop_.rs:818-878`
+- **Evidence**: All events emitted (TaskStart, TaskEnd, Custom, Updates, Values, SuperstepEnd)
+
+### [CONF-011] Send() Command - Fully Conformant
+- **File**: Multiple files
+- **Evidence**: PUSH tasks with state overrides, no deduplication matches design
+
+### [CONF-012] Error Propagation - Fully Conformant
+- **File**: `/root/project/juncture/crates/juncture-core/src/pregel/runner.rs:465-523`
+- **Evidence**: CancellationToken cancels sibling tasks on error matches design
 
 ---
 
-### [C-03-004] RetryPolicy with Exponential Backoff and Jitter
-- **Design Doc**: §11.1 - Retry strategy design  
-- **Original Design**: Basic retry configuration
-- **Actual Implementation**:
-  ```rust
-  pub struct RetryPolicy {
-      pub max_attempts: usize,
-      pub initial_interval: Duration,
-      pub backoff_factor: f64,
-      pub max_interval: Duration,
-      pub jitter: bool,
-      pub retry_on: Option<Arc<dyn Fn(&JunctureError) -> bool + Send + Sync>>,
-  }
-  ```
-- **Rationale**: Exponential backoff with jitter prevents thundering herd in concurrent retry scenarios
-- **Benefit**: Production-ready retry behavior matching industry best practices
-- **Implementation Note**: Design §1705 acknowledges with implementation details
-- **Action**: Update design §11.1 to include jitter and custom retry predicate
+## Action Plan
 
----
+1. [ ] **CRITICAL**: Fix A-001 - Move versions_seen update to before apply_writes() as designed
+2. [ ] Verify B-001 - Test edge case with empty compute_next_tasks() + pending interrupts
+3. [ ] Implement B-002 - Complete delta-only checkpoint emission or remove from design
 
-### [C-03-005] TimeoutPolicy with Heartbeat-Based Idle Detection
-- **Design Doc**: §11.2 - Timeout policy design  
-- **Original Design**: Simple `run_timeout` duration
-- **Actual Implementation**:
-  ```rust
-  pub struct TimeoutPolicy {
-      pub run_timeout: Duration,
-      pub idle_timeout: Option<Duration>,
-      pub refresh_on: Option<Arc<dyn Fn(&serde_json::Value) -> bool + Send + Sync>>,
-  }
-  ```
-- **Rationale**: Heartbeat-based idle timeout detects stale tasks more accurately than total runtime
-- **Benefit**: Distinguishes between "working slowly" (acceptable) and "stuck" (timeout)
-- **Implementation Note**: Design §1767 acknowledges layered timeout mechanism
-- **Action**: Update design §11.2 to describe heartbeat-based idle detection
+1. [ ] Resolve B-003 - Clarify consume() semantics in design or fix implementation
+2. [ ] Add heartbeat mechanism to design document § 11.2
+3. [ ] Update SyncAsyncFuture specification to include Result wrapping
+4. [ ] Add TaskOutput extra fields to design document § 2.1
 
----
-
-### [C-03-006] Error Recovery with Two-Phase Scheduling
-- **Design Doc**: §11.5 - Node-level error handlers  
-- **Original Design**: Conceptual error recovery flow
-- **Actual Implementation**:
-  ```rust
-  pub fn schedule_error_handlers<S: State>(
-      task_outputs: &[TaskOutput<S>],
-      nodes: &IndexMap<String, Arc<dyn Node<S>>>,
-      error_handler_map: &HashMap<String, String>,
-  ) -> Vec<PendingTask<S>>
-  ```
-- **Rationale**: Two-phase error recovery (scan for errors, then schedule handlers) ensures all node failures in a superstep are processed together
-- **Benefit**: Deterministic error recovery ordering and batched handler execution
-- **Action**: Update design §11.5 with two-phase algorithm and `schedule_error_handlers` signature
-
----
-
-### [C-03-007] TriggerToNodes Optimization for Efficient Scheduling
-- **Design Doc**: §6.1 - Main path: edge-driven scheduling  
-- **Original Design**: Conceptual reverse mapping optimization
-- **Actual Implementation**:
-  ```rust
-  pub struct TriggerToNodes {
-      mapping: HashMap<String, HashSet<String>>,
-  }
-  
-  impl TriggerToNodes {
-      pub fn from_trigger_table<S: State>(table: &TriggerTable<S>) -> Self { ... }
-      pub fn triggered_nodes(&self, updated_channels: &[String]) -> HashSet<String> { ... }
-  }
-  ```
-- **Rationale**: Reduces scheduling complexity from O(nodes) to O(triggered_nodes)
-- **Benefit**: Significant performance improvement for large graphs
-- **Implementation Note**: Design §1027 confirms optimization is fully integrated
-- **Action**: Update design §6.1 with actual `TriggerToNodes` struct and complexity analysis
-
----
-
-### [C-03-008] Delta Checkpoint Optimization with Per-Channel Counters
-- **Design Doc**: §3.2e - Delta Counter optimization  
-- **Original Design**: Conceptual delta tracking
-- **Actual Implementation**:
-  ```rust
-  pub struct DeltaCounters {
-      pub writes_since_last_snapshot: u64,
-      pub supersteps_since_last_snapshot: u64,
-  }
-  
-  // In PregelLoop:
-  delta_counters: HashMap<String, DeltaCounters>,
-  ```
-- **Rationale**: Per-channel counters enable selective full snapshots based on write frequency
-- **Benefit**: Reduces checkpoint overhead for high-frequency channels
-- **Action**: Update design §3.2e with actual `DeltaCounters` struct and trigger logic
-
----
-
-### [C-03-009] Multi-Interrupt Matching with Scratchpad Null-Resume
-- **Design Doc**: §3.2e - Multi-interrupt matching algorithm  
-- **Original Design**: Basic interrupt before/after
-- **Actual Implementation**:
-  ```rust
-  fn match_resume_to_interrupts(
-      resume_value: &Option<ResumeValue>,
-      pending_interrupts: &[InterruptSignal],
-      scratchpad: &Scratchpad,
-  ) -> Vec<Option<serde_json::Value>>
-  ```
-- **Rationale**: Supports Single/ById/ByNamespace matching with null-resume to prevent duplicate interrupt processing
-- **Benefit**: Enables complex HITL workflows like "approve all remaining" without re-triggering handled interrupts
-- **Action**: Update design §3.2e with complete matching algorithm and scratchpad role
-
----
-
-### [C-03-010] Task-Local Budget Reporting via BUDGET_TRACKER
-- **Design Doc**: §8.2 - Budget control integration points  
-- **Original Design**: Conceptual budget tracking
-- **Actual Implementation**:
-  ```rust
-  tokio::task_local! {
-      pub static BUDGET_TRACKER: Arc<BudgetTracker>;
-  }
-  
-  pub fn try_report_model_call(input_tokens: u64, output_tokens: u64) -> Result<(), BudgetReportError>
-  ```
-- **Rationale**: Task-local storage allows LLM providers to report usage without explicit parameter passing through ChatModel trait
-- **Benefit**: Cleaner API surface for LLM integrations
-- **Action**: Update design §8.2 with task-local architecture and `try_report_model_call` usage
-
----
-
-### [C-03-011] SyncAsyncFuture for Functional API
-- **Design Doc**: §13 - SyncAsyncFuture design motivation  
-- **Original Design**: Conceptual unified sync/async result
-- **Actual Implementation**:
-  ```rust
-  pub enum SyncAsyncFuture<T> {
-      Ready(Option<T>),
-      Future(BoxFuture<'static, Result<T, JunctureError>>),
-  }
-  ```
-- **Rationale**: Enables @task decorator to return cached results synchronously or computed results asynchronously
-- **Benefit**: Transparent performance optimization for cached values
-- **Action**: Update design §13 with actual enum definition and `.await` usage pattern
-
----
-
-### [C-03-012] Path-Based Sorting in apply_writes
-- **Design Doc**: §5.1 - Merge phase implementation  
-- **Original Design**: Referenced as "path-based sorting"
-- **Actual Implementation**:
-  ```rust
-  sorted_indices.sort_by(|&a, &b| {
-      match (&task_outputs[a].trigger, &task_outputs[b].trigger) {
-          (TaskTrigger::Pull, TaskTrigger::Pull) => 
-              task_outputs[a].node_name.cmp(&task_outputs[b].node_name),
-          (TaskTrigger::Push { index: idx_a }, TaskTrigger::Push { index: idx_b }) => 
-              idx_a.cmp(idx_b),
-          (TaskTrigger::Pull, TaskTrigger::Push { .. }) => 
-              std::cmp::Ordering::Less,
-          (TaskTrigger::Push { .. }, TaskTrigger::Pull) => 
-              std::cmp::Ordering::Greater,
-      }
-  });
-  ```
-- **Rationale**: Ensures deterministic merge order matching LangGraph's `prepare_single_task` semantics
-- **Benefit**: Reproducible execution across runs regardless of task completion order
-- **Implementation Note**: Design §869 acknowledges with `D-03-9` note
-- **Action**: Update design §5.1 with complete sorting algorithm
-
----
-
-## Conformant Requirements (Sample)
-
-### Architecture & Structure ✅
-- **Design §2.1**: `PregelLoop<S>` with execution state, nodes, trigger table, version tracking - **CONFORMANT**
-- **Design §2.1**: `ExecutionContext<S>` and `ExecutionConfig` separation - **CONFORMANT** (implemented as inline fields with accessor methods per `D-03-1` note)
-- **Design §2.1**: `FieldVersionTracker` with `bump_all()` global max versioning - **CONFORMANT**
-- **Design §2.1**: `VersionsSeen` with `should_activate()` and `mark_consumed()` - **CONFORMANT**
-
-### Superstep Execution ✅
-- **Design §4.1**: `execute_superstep()` with `tokio::spawn` + `JoinSet` parallelism - **CONFORMANT**
-- **Design §4.1**: `Semaphore`-bounded concurrency via `max_parallel_tasks` - **CONFORMANT**
-- **Design §4.1**: `tokio::select! { biased }` for cancellation priority - **CONFORMANT**
-- **Design §4.2**: No shared mutable state (each task gets state clone) - **CONFORMANT**
-
-### Merge Phase ✅
-- **Design §5.1**: `apply_writes()` with path-based sorting - **CONFORMANT** (see `C-03-012`)
-- **Design §5.2**: `check_replace_conflicts()` for multiple writer detection - **CONFORMANT**
-- **Design §5.3**: `reset_ephemeral()` after each superstep - **CONFORMANT**
-- **Design §5.4**: `consume_triggered_channels()` for fine-grained consumption - **CONFORMANT** (enhanced by `C-03-001`)
-
-### Scheduling ✅
-- **Design §6.1**: `compute_next_tasks()` with Command.goto priority - **CONFORMANT**
-- **Design §6.3**: PULL task deduplication, PUSH tasks never deduplicated - **CONFORMANT**
-- **Design §6.1**: `TriggerToNodes` reverse mapping optimization - **CONFORMANT** (see `C-03-007`)
-
-### Error Handling ✅
-- **Design §10.1**: `JunctureError` with comprehensive error types - **CONFORMANT**
-- **Design §10.2**: Partial failure handling with cancellation propagation - **CONFORMANT**
-- **Design §11.5**: Error handler scheduling with `schedule_error_handlers()` - **CONFORMANT** (see `C-03-006`)
-
-### Budget Control ✅
-- **Design §8.1**: `BudgetTracker` with atomic counters - **CONFORMANT**
-- **Design §8.1**: `BudgetConfig` with token/cost/duration/step limits - **CONFORMANT**
-- **Design §8.2**: Task-local budget reporting via `try_report_model_call()` - **CONFORMANT** (see `C-03-010`)
-
-### Resilience ✅
-- **Design §11.1**: `RetryPolicy` with exponential backoff and jitter - **CONFORMANT** (see `C-03-004`)
-- **Design §11.2**: `TimeoutPolicy` with heartbeat-based idle detection - **CONFORMANT** (see `C-03-005`)
-- **Design §11.3**: `Durability` modes (Sync/Async/Exit) - **CONFORMANT**
-- **Design §11.4**: `RunControl` for graceful shutdown - **CONFORMANT**
-
----
-
-## Out-of-Scope Items
-
-The following design areas have no corresponding implementation files in the Pregel module and are reviewed separately:
-
-- **§14 - Previous Result Injection**: Functional API feature reviewed in `02-graph-builder.md`
-- **§1.1 - LangGraph Source Analysis**: Reference material only, no implementation required
-- **§12 - Key Differences**: Comparative analysis, no implementation impact
-
----
-
-## Recommended Actions
-
-### Documentation Updates (Priority: MEDIUM)
-1. **[D-03-1]** Update design §2.1 to reflect `TaskOutput.triggered_fields` field and its role in fine-grained channel consumption
-2. **[D-03-2]** Update design §2.1 to show `LoopStatus` with non-unit interrupt variants carrying signals
-3. **[D-03-3]** Update design §10.1b with actual `BubbleUp<S>` enum definition and subgraph control flow
-4. **[D-03-4]** Update design §11.1 with `RetryPolicy` including jitter and custom retry predicate
-5. **[D-03-5]** Update design §11.2 with `TimeoutPolicy` heartbeat-based idle timeout mechanism
-6. **[D-03-6]** Update design §11.5 with two-phase error recovery algorithm
-7. **[D-03-7]** Update design §6.1 with `TriggerToNodes` struct and complexity analysis
-8. **[D-03-8]** Update design §3.2e with `DeltaCounters` struct and trigger logic
-9. **[D-03-9]** Update design §3.2e with complete multi-interrupt matching algorithm
-10. **[D-03-10]** Update design §8.2 with task-local budget tracking architecture
-11. **[D-03-11]** Update design §13 with `SyncAsyncFuture<T>` enum definition
-12. **[D-03-12]** Update design §5.1 with complete path-based sorting algorithm
-
-### Code Verification (Priority: NONE)
-No code changes required. All findings are Category C (exceeds design).
+1. [ ] Add SuperstepResult bubble_ups to design document § 2.1
+2. [ ] Add channels_finished flag to design document § 5.5
+3. [ ] Add detailed TriggerToNodes specification to design document § 6.1
+4. [ ] Add delta counter infrastructure to design document § 3.2
+5. [ ] Document all extra features in appropriate design sections
 
 ---
 
 ## Conclusion
 
-The Pregel Execution Engine implementation is **EXEMPLARY** in its adherence to the design specification while adding substantial production-ready enhancements. The zero-gap status across all critical requirements (superstep execution, merge phase, scheduling, error handling, budget control, resilience) demonstrates mature engineering discipline.
+The Pregel engine implementation has a **CRITICAL TIMING DEFECT** in versions_seen update timing that changes node activation semantics from the design specification. While the core execution model is generally correct, this timing deviation is a fundamental algorithmic change that affects node scheduling behavior.
 
-**Key Success Metrics**:
-- ✅ 100% conformance on core Pregel algorithm semantics
-- ✅ 12 defensive engineering enhancements identified
-- ✅ Zero architectural deviations or feature simplifications
-- ✅ Production-ready error recovery and resilience policies
-- ✅ Comprehensive test coverage across all modules
+Additionally, there are several missing features (delta checkpoint optimization), semantic deviations (consume() timing), and extensive extra features not specified in the design (heartbeat mechanism, enhanced error recovery, bubble-up propagation, etc.).
 
-**Recommendation**: **APPROVE** with design documentation updates to reflect 12 Category C enhancements.
-
----
-
-**Review Completed**: 2025-01-23  
-**Next Review**: After design documentation updates
+**Overall assessment**: NON-CONFORMANT - Requires immediate remediation of the critical versions_seen timing defect and comprehensive design document updates to reflect production implementation decisions.

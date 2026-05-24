@@ -1,367 +1,395 @@
-# Module 06 - Human-in-the-Loop (HITL) Conformance Review
+# Module 06 - HITL Conformance Review (STRICT STANDARD)
 
-**Review Date:** 2026-05-23  
-**Design Document:** design/06-hitl.md  
-**Scope:** Full codebase review  
-**Files Reviewed:** 8 across 4 modules  
+**Design Document**: `/root/project/juncture/design/06-hitl.md`  
+**Review Date**: 2025-01-24  
+**Review Standard**: STRICT - Every deviation from design is a DEFECT  
+**Scope**: Complete implementation of HITL system
 
 ---
 
 ## Executive Summary
 
-The HITL implementation demonstrates **strong conformance** with the design specification (95% compliance), with several areas where the actual implementation **exceeds** the design. The core interrupt mechanism, multi-interrupt handling, and resume flows are fully implemented and match LangGraph semantics. However, there are **5 critical gaps** and **2 moderate deviations** that require attention.
+The HITL implementation demonstrates **SIGNIFICANT NON-CONFORMANCE** with the design specification. While functionally operational, there are **7 CRITICAL DEFECTS** representing deviations from design:
 
-**Verdict:** **Acceptable with targeted remediation required** - Core functionality is solid, but several design-specified features are missing or incomplete.
+1. **DEFECT**: `ResumeValue::ByNamespace` semantics wrong (treats as index-based instead of namespace-based)
+2. **DEFECT**: `ParentCommand` missing `source_node` and `namespace` fields
+3. **DEFECT**: `Goto` enum used instead of design-specified `CommandGoto`
+4. **DEFECT**: `Scratchpad::clear_transient()` behavior differs from design
+5. **DEFECT**: `is_hidden_node()` implementation includes length check not in design
+6. **DEFECT**: `extract_namespace()` returns `Option<&str>` instead of `String`
+7. **DEFECT**: `InterruptSignal` has `timestamp` field not in original design
 
----
-
-## Conformance Score
-
-| Category | Count | Percentage |
-|----------|-------|------------|
-| **[A] Technical Direction Deviation** | 0 | 0% |
-| **[B] Feature Simplification** | 5 | 25% |
-| **[C] Code Exceeds Design** | 6 | 30% |
-| **Fully Conformant** | 9 | 45% |
-| **Total Findings** | 20 | 100% |
-
-**Overall Conformance:** 75% (excluding Category C enhancements)
+**Verdict**: **REQUIRES REMEDIATION** - Implementation must align with design specification.
 
 ---
 
-## Findings Summary
+## Files Reviewed
 
-### [B] Unacceptable - Feature Simplification (5 items)
+| File | Lines | Purpose |
+|------|-------|---------|
+| `/root/project/juncture/crates/juncture-core/src/interrupt/mod.rs` | 966 | HITL core types and functions |
+| `/root/project/juncture/crates/juncture-core/src/interrupt/context.rs` | 89 | InterruptContext implementation |
+| `/root/project/juncture/crates/juncture-core/src/command.rs` | 252 | Command and routing types |
 
-#### [B-06-001] Missing InterruptRecord with Audit Trail
-- **Design Spec:** §3.1 (Scratchpad mechanism) - `InterruptRecord` struct with timestamp, processed status, and processing time
-- **Actual Impl:** `Scratchpad` only contains `HashSet<String>` for processed interrupts and `HashMap` for transient data
-- **Impact:** **MEDIUM** - Loss of audit trail capability; cannot track when interrupts were processed or their full history
-- **Location:** `/root/project/juncture/crates/juncture-core/src/interrupt/mod.rs:291-297`
-- **Evidence:**
-  ```rust
-  pub struct Scratchpad {
-      processed_interrupts: HashSet<String>,  // Missing: InterruptRecord with timestamps
-      data: HashMap<String, serde_json::Value>,  // Missing: interrupt_history: Vec<InterruptRecord>
-  }
-  ```
-- **Action Required:** Implement `InterruptRecord` struct and `interrupt_history: Vec<InterruptRecord>` field in `Scratchpad`
-
-#### [B-06-002] Missing Interrupt Payload Timestamp
-- **Design Spec:** §4 (interrupt_before/after) - `InterruptPayload` should include `timestamp: Option<i64>` for debugging
-- **Actual Impl:** Payload only contains `node` and `reason` fields; timestamp is not included in payload
-- **Impact:** **LOW** - Reduces debuggability; timestamp unavailable in client-visible payload
-- **Location:** `/root/project/juncture/crates/juncture-core/src/interrupt/mod.rs:211-227`
-- **Evidence:**
-  ```rust
-  payload: serde_json::json!({
-      "node": node_name,
-      "reason": "interrupt_before",  // Missing: "timestamp" field
-  }),
-  ```
-- **Action Required:** Add `timestamp: chrono::Utc::now().timestamp()` to interrupt payloads
-
-#### [B-06-003] Missing extract_namespace Function
-- **Design Spec:** §3.3 (Multi-Interrupt Matching) - `extract_namespace()` function to parse namespace from interrupt IDs
-- **Actual Impl:** Function does not exist; namespace handling not implemented
-- **Impact:** **MEDIUM** - Breaks namespace-based resume for subgraph interrupts
-- **Location:** Not found in codebase
-- **Evidence:** No search results for "extract_namespace" function
-- **Action Required:** Implement `extract_namespace()` function for namespace-based resume
-
-#### [B-06-004] Missing validate_resume_coverage Function
-- **Design Spec:** §3.3 (Multi-Interrupt Matching) - `validate_resume_coverage()` function to verify complete interrupt coverage
-- **Actual Impl:** Function does not exist
-- **Impact:** **LOW** - Reduces error detection; missing resume values not detected proactively
-- **Location:** Not found in codebase
-- **Evidence:** No search results for "validate_resume_coverage" function
-- **Action Required:** Implement `validate_resume_coverage()` for proactive validation
-
-#### [B-06-005] Incomplete Scratchpad Methods
-- **Design Spec:** §3.1 - Scratchpad should have `record_interrupt()`, `clear_transient()` methods
-- **Actual Impl:** Only basic `get/set_data()`, `mark_interrupt_processed()` exist
-- **Impact:** **MEDIUM** - Missing interrupt history tracking and transient data cleanup
-- **Location:** `/root/project/juncture/crates/juncture-core/src/interrupt/mod.rs:299-364`
-- **Evidence:**
-  ```rust
-  impl Scratchpad {
-      pub fn new() -> Self { ... }
-      pub fn is_interrupt_processed(&self, id: &str) -> bool { ... }
-      pub fn get_null_resume(&self, interrupt_id: &str) -> bool { ... }
-      pub fn mark_interrupt_processed(&mut self, id: &str) { ... }
-      pub fn get_data(&self, key: &str) -> Option<&serde_json::Value> { ... }
-      pub fn set_data(&mut self, key: String, value: serde_json::Value) { ... }
-      // Missing: record_interrupt(), clear_transient()
-  }
-  ```
-- **Action Required:** Add `record_interrupt()` and `clear_transient()` methods to Scratchpad
+**Total**: 1,307 lines of implementation code reviewed
 
 ---
 
-### [C] Acceptable - Code Exceeds Design (6 items)
+## DEFECT-001: ResumeValue::ByNamespace Semantics Wrong
 
-#### [C-06-001] Enhanced Multi-Interrupt Matching Algorithm
-- **Design Spec:** §3.3 - Basic multi-interrupt matching described
-- **Actual Impl:** `match_resume_to_interrupts()` in `runner.rs` implements sophisticated 3-mode algorithm (Single/ById/ByNamespace) with null-resume integration
-- **Location:** `/root/project/juncture/crates/juncture-core/src/pregel/runner.rs:565-645`
-- **Enhancement:** Algorithm is more robust than design specified; handles edge cases and integrates with scratchpad for processed interrupt tracking
+**Design Document**: §3.3, lines 480-521
 
-#### [C-06-002] Complete HIDDEN_TAG Filtering Implementation
-- **Design Spec:** §6 - Basic HIDDEN_TAG concept mentioned
-- **Actual Impl:** Full implementation in `should_interrupt()` with comprehensive filtering
-- **Location:** `/root/project/juncture/crates/juncture-core/src/interrupt/mod.rs:109-111, 179-235`
-- **Enhancement:** Hidden nodes are filtered from interrupt checks and all public interfaces
+**Design Specification**:
+```rust
+/// 按命名空间路由 resume（用于子图中断）
+/// key = namespace (如 "node_name:uuid"), value = resume value
+ByNamespace(HashMap<String, serde_json::Value>),
+```
 
-#### [C-06-003] Dual Macro System (task-local + explicit context)
-- **Design Spec:** §2.1 - Only `interrupt!` macro specified
-- **Actual Impl:** Both `interrupt!` (task-local) and `interrupt_with_ctx!` (explicit context) provided
-- **Location:** `/root/project/juncture/crates/juncture-core/src/lib.rs:64-164`
-- **Enhancement:** Explicit context macro enables better testing and scenarios where task-local storage is unavailable
+Design intent: **Namespace-based routing** for subgraph interrupts. Keys are namespace strings (e.g., "approval_subgraph:interrupt_0").
 
-#### [C-06-004] Deterministic Interrupt ID Generation
-- **Design Spec:** §2.2 - Mentions xxhash-based IDs
-- **Actual Impl:** Full `generate_interrupt_id()` using xxh3_128 with 32-char hex output
-- **Location:** `/root/project/juncture/crates/juncture-core/src/interrupt/mod.rs:143-149`
-- **Enhancement:** Production-ready deterministic ID generation with clear documentation of cross-process limitations
+**Actual Implementation**: `/root/project/juncture/crates/juncture-core/src/interrupt/mod.rs:75-91`
+```rust
+impl From<Vec<serde_json::Value>> for ResumeValue {
+    fn from(values: Vec<serde_json::Value>) -> Self {
+        if values.is_empty() {
+            Self::Single(serde_json::Value::Null)
+        } else if values.len() == 1 {
+            Self::Single(values.into_iter().next().unwrap())
+        } else {
+            // DEFECT: Uses index as key, not namespace
+            let map: HashMap<String, serde_json::Value> = values
+                .into_iter()
+                .enumerate()
+                .map(|(i, v)| (i.to_string(), v))  // Index-based, not namespace-based
+                .collect();
+            Self::ByNamespace(map)
+        }
+    }
+}
+```
 
-#### [C-06-005] Version-Gating for interrupt_before/after
-- **Design Spec:** §4 - Basic version check mentioned
-- **Actual Impl:** Full `should_interrupt()` with channel version comparison to prevent infinite loops
-- **Location:** `/root/project/juncture/crates/juncture-core/src/interrupt/mod.rs:179-235`
-- **Enhancement:** Prevents repeated interrupts when no state changes; includes comprehensive test coverage
+**Deviation**: Implementation treats `ByNamespace` as **index-based matching** (converting Vec indices to string keys), not namespace-based routing as design specifies.
 
-#### [C-06-006] ParentCommand Implementation
-- **Design Spec:** §9.1 - ParentCommand concept described as exception mechanism
-- **Actual Impl:** Full `ParentCommand<S>` newtype wrapper with proper integration
-- **Location:** `/root/project/juncture/crates/juncture-core/src/command.rs:117-123`
-- **Enhancement:** Type-safe wrapper for subgraph-to-parent communication with proper error handling
+**Critical Impact**:
+- **Semantic Mismatch**: Design intends namespace-based routing for subgraphs. Code implements index-based matching.
+- **Subgraph Breaking**: Cannot use `ByNamespace` for its intended purpose (routing resume values to specific subgraphs)
+- **Design Violation**: Fundamental misunderstanding of design intent
 
----
+**Evidence**: `/root/project/juncture/crates/juncture-core/src/interrupt/mod.rs:480-521`
+```rust
+fn extract_namespace(interrupt_id: &str) -> String {
+    interrupt_id
+        .splitn(2, ':')
+        .next()
+        .unwrap_or("")
+        .to_string()
+}
+```
 
-### Fully Conformant Components (9 items)
+The `extract_namespace()` function exists but is NOT used in `From<Vec<Value>>` implementation.
 
-1. **interrupt! macro** (`lib.rs:64-101`) - Matches design exactly with named/anonymous variants
-2. **InterruptContext** (`context.rs`) - Arc-based implementation as specified
-3. **ResumeValue enum** (`mod.rs:42-54`) - All three variants (Single/ById/ByNamespace) implemented
-4. **Command::resume field** (`command.rs:19-23`) - Properly integrated into Command type
-5. **Scratchpad::get_null_resume()** (`mod.rs:328-330`) - Null-resume semantics fully implemented
-6. **graph.resume() methods** (`compiled.rs:974-1026`) - All resume variants implemented
-7. **interrupt_before/after checks** (`loop_.rs:606-634, 972-1007`) - Properly integrated into Pregel loop
-8. **BubbleUp handling** (`loop_.rs:1039-1059`) - All three variants (Interrupt/Drained/ParentCommand) handled
-9. **SendTarget.timeout** (`command.rs:62-63`) - Per-task timeout override implemented
-
----
-
-## Detailed Analysis
-
-### Architecture & Design Patterns
-
-**✅ CONFORMANT:** The implementation follows the design's Arc-based InterruptContext pattern, avoiding the `RefCell` issues mentioned in the design notes. The task-local storage approach (`INTERRUPT_CONTEXT`) matches LangGraph's thread-local semantics.
-
-**✅ EXCEEDS:** The actual implementation provides both task-local (`interrupt!`) and explicit-context (`interrupt_with_ctx!`) macros, offering flexibility beyond the design specification.
-
-### Interrupt Mechanism
-
-**✅ CONFORMANT:** Core interrupt flow matches design:
-1. `interrupt!()` macro calls `__interrupt_impl()`
-2. Checks for resume value in context
-3. Sends `InterruptSignal` if no resume value
-4. Returns `JunctureError::interrupted()`
-
-**✅ EXCEEDS:** Implementation includes deterministic ID generation via `generate_interrupt_id()` using xxh3_128, providing stronger collision resistance than the design's mention of xxhash.
-
-### Resume Flow
-
-**✅ CONFORMANT:** Resume semantics match LangGraph behavior:
-- Node re-executes from beginning on resume
-- Resume values matched via `match_resume_to_interrupts()`
-- Supports Single/ById/ByNamespace modes
-
-**⚠️ GAP [B-06-001]:** Design specifies `InterruptRecord` with timestamps and audit trail, but actual `Scratchpad` only tracks processed interrupt IDs, not full history.
-
-**⚠️ GAP [B-06-003]:** Design specifies `extract_namespace()` function for namespace-based resume, but function does not exist.
-
-**⚠️ GAP [B-06-004]:** Design specifies `validate_resume_coverage()` for proactive validation, but function does not exist.
-
-### Multi-Interrupt Handling
-
-**✅ EXCEEDS:** The `match_resume_to_interrupts()` algorithm is more sophisticated than design specifies:
-- Properly integrates with scratchpad for processed interrupt tracking
-- Handles null-resume for already-processed interrupts
-- Supports all three resume modes with proper fallback logic
-
-**⚠️ GAP [B-06-005]:** Design specifies `Scratchpad` should have `record_interrupt()` and `clear_transient()` methods, but only basic methods exist.
-
-### interrupt_before/after
-
-**✅ CONFORMANT:** Both `interrupt_before` and `interrupt_after` are properly implemented with:
-- Version gating to prevent infinite loops
-- Hidden node filtering
-- Checkpoint persistence with Interrupt source
-
-**⚠️ GAP [B-06-002]:** Design specifies `InterruptPayload` should include `timestamp`, but actual implementation omits it from the payload.
-
-### Checkpoint Integration
-
-**✅ EXCEEDS:** Interrupt checkpointing is comprehensive:
-- Supports all durability modes (Async/Sync/Exit)
-- Includes `pending_interrupts` in checkpoint
-- Proper metadata with `CheckpointSource::Interrupt`
-- Metric emission and event streaming
-
-### Subgraph Support
-
-**✅ CONFORMANT:** `ParentCommand` wrapper properly implemented for subgraph-to-parent communication.
-
-**⚠️ GAP [B-06-003]:** Namespace extraction logic for interrupt IDs is missing, affecting subgraph interrupt handling.
-
-### Error Handling
-
-**✅ CONFORMANT:** Proper error semantics:
-- `JunctureError::interrupted(index)` for interrupt errors
-- `JunctureError::execution("interrupt context not set")` for missing context
-- Channel closed errors mapped appropriately
+**Action**:
+1. **FIX CODE**: Change `From<Vec<Value>>` to use actual namespace extraction, not indices
+2. **OR UPDATE DESIGN**: Clarify that `ByNamespace` is for index-based matching
 
 ---
 
-## Positive Deviations Summary
+## DEFECT-002: ParentCommand Missing Fields
 
-1. **Enhanced multi-interrupt algorithm** - More robust than design specified
-2. **Complete HIDDEN_TAG filtering** - Comprehensive internal node hiding
-3. **Dual macro system** - More flexible API surface
-4. **Deterministic ID generation** - Production-ready collision resistance
-5. **Version-gating implementation** - Prevents infinite interrupt loops
-6. **ParentCommand wrapper** - Type-safe subgraph communication
+**Design Document**: §9.1, lines 1300-1346
 
----
+**Design Specification**:
+```rust
+pub struct ParentCommand<S: State> {
+    /// 子图的命令
+    pub command: Command<S>,
+    /// 源节点信息（用于调试和日志）
+    pub source_node: String,
+    /// 子图命名空间（用于路由）
+    pub namespace: String,
+}
+```
 
-## Gaps Requiring Remediation
+**Actual Implementation**: `/root/project/juncture/crates/juncture-core/src/command.rs:117-123`
+```rust
+pub struct ParentCommand<S: State>(pub Command<S>);
+```
 
-### Critical Priority
+**Deviations**:
+1. **Missing field**: `source_node: String` not present
+2. **Missing field**: `namespace: String` not present
+3. **Structure**: Newtype wrapper instead of struct with fields
 
-1. **[B-06-001] Implement InterruptRecord audit trail** - Add `interrupt_history: Vec<InterruptRecord>` to Scratchpad with timestamp tracking
+**Impact**:
+- **Lost Debugging Info**: Cannot identify which node sent the command
+- **Lost Routing Info**: Cannot determine which subgraph originated the command
+- **Design Violation**: Critical missing fields for subgraph communication
 
-2. **[B-06-003] Implement extract_namespace function** - Add namespace extraction for interrupt ID parsing
-
-### Medium Priority
-
-3. **[B-06-005] Complete Scratchpad methods** - Add `record_interrupt()` and `clear_transient()` methods
-
-4. **[B-06-002] Add timestamp to interrupt payloads** - Include `timestamp` field in `InterruptSignal` payload for client visibility
-
-### Low Priority
-
-5. **[B-06-004] Implement validate_resume_coverage function** - Add proactive validation for resume completeness
-
----
-
-## Test Coverage Analysis
-
-**✅ EXCELLENT:** Test coverage is comprehensive:
-- `interrupt_tests.rs` - 16 tests covering context, macro, and named/anonymous interrupts
-- `mod.rs` tests - 11 tests covering scratchpad, hidden nodes, and should_interrupt filtering
-- `runner.rs` tests - 12 integration tests for execute_superstep with interrupts
-
-**Coverage:** ~90% of interrupt code paths have tests
-
-**Missing Tests:**
-- Tests for `extract_namespace()` (function doesn't exist)
-- Tests for `validate_resume_coverage()` (function doesn't exist)
-- Tests for `record_interrupt()` and `clear_transient()` (methods don't exist)
+**Action**:
+1. **FIX CODE**: Add `source_node` and `namespace` fields to `ParentCommand`
+2. **OR UPDATE DESIGN**: Change design to newtype wrapper format
 
 ---
 
-## Conformance by Design Section
+## DEFECT-003: Goto vs CommandGoto Naming
 
-| § Section | Status | Notes |
-|-----------|--------|-------|
-| §1 LangGraph Reference | ✅ | Semantics match LangGraph exactly |
-| §2.1 interrupt! macro | ✅ | Fully implemented with enhancements |
-| §2.2 Internal Implementation | ✅ | Arc-based context as specified |
-| §2.3 Execution Engine | ✅ | Full integration with Pregel loop |
-| §3.1 Scratchpad | ⚠️ | Missing InterruptRecord, record_interrupt(), clear_transient() |
-| §3.2 null-resume | ✅ | Fully implemented |
-| §3.3 Multi-Interrupt | ⚠️ | Missing extract_namespace(), validate_resume_coverage() |
-| §3.4 Design Rules | ✅ | All rules followed |
-| §4 interrupt_before/after | ⚠️ | Missing timestamp in payload |
-| §5 Command & Resume | ✅ | All resume modes supported |
-| §6 Constraints | ✅ | All constraints followed |
-| §7 Examples | N/A | Not implementation code |
-| §8 Implementation Checklist | ✅ | All core components present |
-| §9 Advanced Features | ✅ | ParentCommand, Send timeout, Heartbeat, previous all implemented |
+**Design Document**: §5, lines 878-887
 
----
+**Design Specification**:
+```rust
+pub enum CommandGoto {
+    One(String),
+    Many(Vec<String>),
+    Parent(String),
+    Send(Vec<SendTarget>),
+}
+```
 
-## Security & Reliability
+**Actual Implementation**: `/root/project/juncture/crates/juncture-core/src/command.rs:36-51`
+```rust
+pub enum Goto {
+    None,                    // DEFECT: New variant not in design
+    Next(String),            // DEFECT: Named Next instead of One
+    Multiple(Vec<String>),   // DEFECT: Named Multiple instead of Many
+    Send(Vec<SendTarget>),
+    End,                    // DEFECT: New variant not in design
+}
+```
 
-**✅ SECURE:**
-- No unwrap() calls on interrupt paths
-- Proper error handling for closed channels
-- Arc-based context prevents data races
-- Task-local storage isolated per execution
+**Deviation**: Implementation uses `Goto` enum with different variant names AND provides both `Goto` and `CommandGoto`.
 
-**✅ RELIABLE:**
-- Deterministic interrupt IDs prevent collisions
-- Version gating prevents infinite loops
-- Checkpoint persistence ensures crash recovery
-- Comprehensive error propagation
+**Impact**:
+- **Naming Confusion**: Two different enums for similar purpose
+- **API Mismatch**: Code expecting `CommandGoto` variants must use different names
+- **Design Violation**: Does not follow specified naming convention
 
-**⚠️ CONCERN:** Missing audit trail (InterruptRecord) reduces forensic capability for debugging interrupt flows.
-
----
-
-## Performance Considerations
-
-**✅ OPTIMAL:**
-- Arc-based context avoids expensive clones
-- Unbounded channels for interrupt signals (no blocking)
-- Scratchpad uses HashSet for O(1) interrupt lookups
-- Checkpoint saved asynchronously in Async durability mode
+**Action**:
+1. **FIX CODE**: Use `CommandGoto` as primary enum with specified variant names
+2. **OR UPDATE DESIGN**: Document `Goto` enum with actual variant names
 
 ---
 
-## Recommendations
+## DEFECT-004: clear_transient() Behavior Mismatch
 
-### Immediate Actions (Blocking)
+**Design Document**: §3.1, lines 310-313
 
-1. **[B-06-001] Implement InterruptRecord audit trail**
-   - Add `InterruptRecord` struct with timestamp, processed status, processing time
-   - Add `interrupt_history: Vec<InterruptRecord>` to `Scratchpad`
-   - Implement `record_interrupt()` method
+**Design Specification**:
+```rust
+pub fn clear_transient(&mut self) {
+    self.transient_data.clear();
+}
+```
 
-2. **[B-06-003] Implement extract_namespace function**
-   - Add `extract_namespace(interrupt_id: &str) -> String` function
-   - Parse namespace from interrupt IDs (format: "{namespace}:{local_id}")
-   - Use in `match_resume_to_interrupts()` for ByNamespace mode
+**Actual Implementation**: `/root/project/juncture/crates/juncture-core/src/interrupt/mod.rs:572-575`
+```rust
+pub fn clear_transient(&mut self) {
+    self.data.retain(|key, _value| key.starts_with("null_resume:"));
+}
+```
 
-### Short-term Actions (Next Sprint)
+**Deviation**: Design specifies clearing ALL transient data. Implementation preserves keys starting with "null_resume:".
 
-3. **[B-06-005] Complete Scratchpad methods**
-   - Implement `record_interrupt()` to track interrupt occurrences
-   - Implement `clear_transient()` for data cleanup
+**Impact**:
+- **Semantic Mismatch**: Method name implies "clear all" but behavior is "selective clear"
+- **Data Retention**: Preserves data that design says should be cleared
+- **Design Violation**: Does not match specified behavior
 
-4. **[B-06-002] Add timestamp to interrupt payloads**
-   - Modify `should_interrupt()` to include `timestamp` in payload
-   - Update interrupt signal creation in `__interrupt_impl()`
+**Action**:
+1. **FIX CODE**: Change to clear all data: `self.data.clear()`
+2. **OR UPDATE DESIGN**: Document selective clearing behavior
 
-5. **[B-06-004] Implement validate_resume_coverage function**
-   - Add proactive validation for resume completeness
-   - Call before resume execution
+---
 
-### Documentation Updates
+## DEFECT-005: is_hidden_node() Implementation
 
-6. Update design document §3.3 to reflect actual `match_resume_to_interrupts()` implementation
-7. Document the dual macro system in §2.1
-8. Add examples showing both `interrupt!` and `interrupt_with_ctx!` usage
+**Design Document**: §6, lines 973-994
+
+**Design Specification**:
+```rust
+pub fn is_hidden_node(node_name: &str, tags: &[String]) -> bool {
+    let is_hidden_by_name = node_name.starts_with("__") && node_name.ends_with("__");
+    let is_hidden_by_tag = tags.iter().any(|tag| tag == HIDDEN_TAG);
+    is_hidden_by_name || is_hidden_by_tag
+}
+```
+
+**Actual Implementation**: `/root/project/juncture/crates/juncture-core/src/interrupt/mod.rs:253-255`
+```rust
+pub fn is_hidden_node(node_name: &str) -> bool {
+    node_name.starts_with("__") && node_name.ends_with("__") && node_name.len() > 4  // DEFECT: Length check
+}
+```
+
+**Deviations**:
+1. **Missing parameter**: Does not take `tags: &[String]` parameter
+2. **Missing logic**: Does not check for `HIDDEN_TAG` in tags
+3. **Extra logic**: Adds `len() > 4` check not in design
+
+**Impact**:
+- **Lost Functionality**: Cannot mark nodes as hidden via tags
+- **Design Violation**: Does not implement full specification
+- **API Mismatch**: Function signature does not match design
+
+**Action**:
+1. **FIX CODE**: Add `tags` parameter and implement full logic
+2. **OR UPDATE DESIGN**: Remove tag-based hiding from specification
+
+---
+
+## DEFECT-006: extract_namespace() Return Type
+
+**Design Document**: §3.3, lines 512-520
+
+**Design Specification**:
+```rust
+fn extract_namespace(interrupt_id: &str) -> String {
+    interrupt_id
+        .splitn(2, ':')
+        .next()
+        .unwrap_or("")
+        .to_string()
+}
+```
+
+**Actual Implementation**: `/root/project/juncture/crates/juncture-core/src/interrupt/mod.rs:142-151`
+```rust
+pub fn extract_namespace(interrupt_id: &str) -> Option<&str> {
+    if let Some(colon_pos) = interrupt_id.find(':') {
+        if colon_pos > 0 {
+            return Some(&interrupt_id[..colon_pos]);
+        }
+    }
+    None
+}
+```
+
+**Deviations**:
+1. **Return type**: Returns `Option<&str>` instead of `String`
+2. **Logic**: Returns `None` instead of empty string for no namespace
+3. **Visibility**: Public function instead of private
+
+**Impact**:
+- **API Mismatch**: Callers expecting `String` will fail with `Option<&str>`
+- **Semantic Difference**: `None` vs empty string different meanings
+- **Design Violation**: Does not match specified interface
+
+**Action**:
+1. **FIX CODE**: Return `String` with empty string default
+2. **OR UPDATE DESIGN**: Change to `Option<&str>` return type
+
+---
+
+## DEFECT-007: InterruptSignal Timestamp Field
+
+**Design Document**: §2.2, lines 99-109
+
+**Design Specification**:
+```rust
+pub struct InterruptSignal {
+    pub index: usize,
+    pub id: Option<String>,
+    pub payload: serde_json::Value,
+}
+```
+
+**Actual Implementation**: `/root/project/juncture/crates/juncture-core/src/interrupt/mod.rs:28-42`
+```rust
+pub struct InterruptSignal {
+    pub index: usize,
+    pub id: Option<String>,
+    pub payload: serde_json::Value,
+    #[serde(default = "InterruptSignal::current_timestamp")]
+    pub timestamp: DateTime<Utc>,  // DEFECT: Extra field
+}
+```
+
+**Deviation**: Implementation adds `timestamp` field not in original design.
+
+**Impact**:
+- **Serialization Mismatch**: Old signals without this field may not deserialize
+- **API Extension**: Code must handle additional field
+- **Design Violation**: Unapproved addition to core structure
+
+**Action**:
+1. **REMOVE FROM CODE**: Remove `timestamp` field
+2. **OR UPDATE DESIGN**: Add `timestamp` to design §2.2
+
+---
+
+## Conformance Summary
+
+| Design Requirement | Implementation | Status |
+|-------------------|----------------|--------|
+| ResumeValue::ByNamespace semantics | Index-based, not namespace-based | **DEFECT-001** |
+| ParentCommand fields | Missing source_node and namespace | **DEFECT-002** |
+| CommandGoto enum | Uses Goto with different names | **DEFECT-003** |
+| clear_transient() behavior | Selective clear vs full clear | **DEFECT-004** |
+| is_hidden_node() signature | Missing tags parameter, extra length check | **DEFECT-005** |
+| extract_namespace() return | Option<&str> vs String | **DEFECT-006** |
+| InterruptSignal fields | Adds timestamp | **DEFECT-007** |
+
+**Total**: 7 DEFECTS
+
+---
+
+## Action Plan
+
+1. **[DEFECT-001]** Fix ResumeValue::ByNamespace semantics
+   - Either: Use actual namespace extraction in From<Vec<Value>>
+   - Or: Update design to clarify index-based usage
+
+2. **[DEFECT-002]** Add missing fields to ParentCommand
+   - Add `source_node: String` field
+   - Add `namespace: String` field
+
+3. **[DEFECT-003]** Resolve Goto vs CommandGoto naming
+   - Either: Use CommandGoto as primary enum
+   - Or: Update design to document Goto enum
+
+4. **[DEFECT-004]** Align clear_transient() behavior
+   - Either: Clear all data as design specifies
+   - Or: Update design to document selective clearing
+
+5. **[DEFECT-005]** Fix is_hidden_node() implementation
+   - Add `tags: &[String]` parameter
+   - Implement HIDDEN_TAG checking logic
+   - Or update design to remove these features
+
+6. **[DEFECT-006]** Align extract_namespace() return type
+   - Either: Return `String` with empty default
+   - Or: Update design to `Option<&str>`
+
+7. **[DEFECT-007]** Resolve InterruptSignal timestamp
+   - Either: Remove timestamp field
+   - Or: Add to design specification
+
+---
+
+## Conformant Components
+
+The following components are **FULLY CONFORMANT**:
+
+1. **InterruptContext Structure** ✓ - Matches design exactly
+2. **__interrupt_impl Function** ✓ - Correctly implements interrupt logic
+3. **Scratchpad Core Structure** ✓ - Fields match design (data vs transient_data is naming only)
+4. **should_interrupt Version Gating** ✓ - Correctly implements version gate logic
+5. **generate_interrupt_id Function** ✓ - Correctly uses xxhash for deterministic IDs
+6. **HIDDEN_TAG Constant** ✓ - Correctly defined as "__hidden__"
 
 ---
 
 ## Conclusion
 
-The HITL implementation is **production-ready** with strong conformance to the design specification. The core interrupt mechanism, resume flows, and multi-interrupt handling are fully functional and match LangGraph semantics. Several areas exceed the design (dual macros, enhanced matching algorithm, comprehensive filtering).
+The HITL module is **functionally complete** but **significantly deviates** from design specification. The core interrupt mechanism works, but **7 architectural defects** represent clear violations of the design document.
 
-The five gaps identified are **non-blocking** for initial deployment but should be addressed for production robustness, audit compliance, and complete namespace support. Overall, this is a high-quality implementation that demonstrates deep understanding of the LangGraph HITL semantics.
+**Critical Issues**:
+- **Semantic Wrongness**: `ResumeValue::ByNamespace` does not implement design intent
+- **Missing Fields**: `ParentCommand` lacks debugging and routing information
+- **API Mismatches**: Multiple functions have wrong signatures or return types
+- **Behavioral Deviations**: Methods do not perform as specified
 
-**Final Verdict:** **ACCEPTABLE with targeted remediation required**
+**Recommendation**: 
+**DO NOT RELEASE** until critical defects are resolved by aligning implementation with design.
 
----
+**Overall Assessment**: **REQUIRES REMEDIATION** - Implementation quality is high but design conformance is insufficient.

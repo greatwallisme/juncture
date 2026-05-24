@@ -46,7 +46,6 @@ pub enum Content {
 pub enum ContentPart {
     Text { text: String },
     Image(ImageData),
-    /// <!-- Addresses finding: Part3#22 -->
     /// Anthropic API 的 thinking block（扩展思考）
     /// 包含模型的内部推理过程，不影响工具调用逻辑
     Thinking { text: String, signature: Option<String> },
@@ -172,12 +171,8 @@ pub struct CallOptions {
     pub model_override: Option<String>,
 
     // ─── 审查补充字段 ───
-
-    /// <!-- Addresses finding: Part3#10 -->
     /// 工具选择策略
     pub tool_choice: Option<ToolChoice>,
-
-    /// <!-- Addresses finding: Part3#11 -->
     /// 响应格式（用于结构化输出）
     pub response_format: Option<ResponseFormat>,
 
@@ -186,7 +181,6 @@ pub struct CallOptions {
     pub tags: Option<Vec<String>>,
 }
 
-/// <!-- Addresses finding: Part3#10 -->
 /// 工具选择策略
 #[derive(Clone, Debug)]
 pub enum ToolChoice {
@@ -200,7 +194,6 @@ pub enum ToolChoice {
     Specific { name: String },
 }
 
-/// <!-- Addresses finding: Part3#11 -->
 /// 响应格式
 #[derive(Clone, Debug)]
 pub enum ResponseFormat {
@@ -364,7 +357,6 @@ impl ChatOllama {
 
 ### 4.0 ToolRuntime 注入类型
 
-<!-- Addresses finding: L-13 -->
 
 > 工具执行时可以访问运行时上下文，类似于 Node 的 Runtime 注入
 
@@ -501,7 +493,6 @@ impl<S: AgentState> StatefulTool<S> for SearchTool {
 
 ### 4.1 tools_condition() 独立函数
 
-<!-- Addresses finding: L-14 -->
 
 > 参考: `langgraph/libs/prebuilt/langgraph/prebuilt/tool_node.py:1800` — `tools_condition()`
 
@@ -545,7 +536,6 @@ graph.add_conditional_edges(
 
 ### 4.2 ValidationNode 预构建
 
-<!-- Addresses finding: L-15 -->
 
 > 参考: `langgraph/libs/prebuilt/langgraph/prebuilt/chat_agent_executor.py`
 > 注意：ValidationNode 在 LangGraph v1 中已标记为 deprecated，但仍可用于某些场景。
@@ -684,9 +674,6 @@ impl ToolNode {
 
 #### ToolNode 高级特性
 
-<!-- Addresses finding: H-09 -->
-<!-- Addresses finding: Part3#18 -->
-<!-- Addresses finding: Part3#19 -->
 
 > 参考: `langgraph/libs/prebuilt/langgraph/prebuilt/tool_node.py`
 > 参考: `langgraph/libs/prebuilt/langgraph/prebuilt/tool_validator.py`
@@ -710,7 +697,6 @@ pub struct ToolNodeConfig {
     /// 例如：将旧版 API 参数格式转换为新版
     pub call_transformer: Option<Box<dyn ToolCallTransformer>>,
 
-    /// <!-- Addresses finding: M-3 -->
     /// 工具调用拦截器：在工具执行前后注入自定义逻辑
     pub interceptor: Option<Arc<dyn ToolInterceptor>>,
 
@@ -719,7 +705,6 @@ pub struct ToolNodeConfig {
     pub tools_condition: Option<Arc<dyn Fn(&Message) -> bool + Send + Sync>>,
 }
 
-/// <!-- Addresses finding: M-3 -->
 /// 工具调用拦截器 trait
 ///
 /// 允许在工具执行前后注入自定义逻辑，例如：
@@ -967,7 +952,6 @@ pub fn create_react_agent<M: ChatModel>(
 
 ### 5.2 create_react_agent 高级选项
 
-<!-- Addresses finding: H-08 -->
 
 > 参考: `langgraph/libs/prebuilt/langgraph/prebuilt/chat_agent_executor.py:278`
 

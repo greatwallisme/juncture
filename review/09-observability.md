@@ -1,674 +1,289 @@
-# Module M09 - Observability: Design-to-Code Conformance Review
+# Module 09 (Observability) - STRICT Conformance Review
 
 **Design Document**: `/root/project/juncture/design/09-observability.md`  
-**Review Date**: 2025-01-23  
-**Reviewer**: Technical Audit Agent  
-**Scope**: Full codebase review of observability implementation
+**Review Date**: 2026-05-24  
+**Reviewer**: Code-level analysis with STRICT standards  
+**Mode**: git-scoped (last 40 commits)
 
 ---
 
 ## Executive Summary
 
-The Juncture observability module shows **STRONG partial conformance** with the design specification. The core infrastructure is well-implemented with span constants, attribute definitions, metrics registry, and test utilities. However, there are **CRITICAL GAPS** in metrics emission (most metrics defined but not emitted), incomplete OpenTelemetry integration, and design deviations in DebugEvent structure.
+The implementation of Module 09 (Observability) has **CRITICAL DEFECTS** when evaluated against STRICT conformance standards. Missing metrics, incomplete event types, missing API functions, and extra features all constitute deviations from the design.
 
-**Status**: Requires targeted remediation before production deployment. The foundation is solid but incomplete.
+**Status**: **REQUIRES IMMEDIATE REMEDIATION** - Critical gaps in observability implementation
+
+---
+
+## STRICT Conformance Standards
+
+- **CONFORMANT** = matches design EXACTLY
+- **DEFECT** = any deviation from the design, period
+- **MISSING** = design requirement not implemented
+- **EXTRA** = code feature not in design (also a defect)
+- NO "acceptable", "enhancement", or "code exceeds design" categories
+- NO unilateral judgments about acceptability
+- DO NOT say "update design doc" as resolution - code must match design
 
 ---
 
 ## Findings Summary
 
-| Category | Count | Description |
-|----------|-------|-------------|
-| **[A] Technical Direction Deviation** | 2 | DebugEvent mismatch, duplicate ServerInfo types |
-| **[B] Feature Simplification** | 12 | Missing metrics emissions, incomplete OTel integration |
-| **[C] Code Exceeds Design** | 4 | Enhanced callbacks, RegistryMetricsCollector, TestMetricsCollector improvements |
-| **Fully Conformant** | 6 | Span constants, attributes, init() API, TestMetricsCollector, StreamMode::Debug, MetricsRegistry API |
-| **Out-of-Scope** | 0 | All design areas reviewed |
+| Category | Count | Details |
+|----------|-------|---------|
+| **MISSING** | 5 | Required features not implemented |
+| **DEFECT** | 7 | Deviations from design specification |
+| **EXTRA** | 4 | Features not in design (counted as defects) |
+| **CONFORMANT** | 8 | Core functionality matches design |
 
-**Verdict**: **Requires targeted remediation** - Core infrastructure is sound but critical metrics emission is incomplete.
-
----
-
-## Must-Fix Items
-
-### [A-001] Technical Direction Deviation: DebugEvent Structure Mismatch
-
-**Design Doc**: § 5.1 - DebugEvent enum definition  
-**Design Spec**: DebugEvent should have 12 variants: `GraphStart`, `SuperstepStart`, `NodeStart`, `NodeEnd`, `NodeError`, `ChannelWrite`, `ChannelUpdate`, `Merge`, `EdgeTraversed`, `CheckpointSaved`, `BudgetCheck`, `GraphEnd`
-
-**Actual Implementation**: 
-- `juncture-tracing/src/debug.rs` defines 14 variants but with DIFFERENT structure
-- `juncture-core/src/stream.rs` defines a DIFFERENT `DebugEvent` enum with only 6 variants
-- There are TWO separate `DebugEvent` types in different modules
-
-**Nature**: Architectural deviation - type system inconsistency
-
-**Risk**: 
-- User confusion about which `DebugEvent` to use
-- Serialization incompatibility
-- Breaking changes if unified later
-
-**Affected Files**:
-- `/root/project/juncture/crates/juncture-tracing/src/debug.rs` (lines 14-134)
-- `/root/project/juncture/crates/juncture-core/src/stream.rs` (lines 199-226)
-
-**Git Reference**: N/A - original implementation
-
-**Action**: 
-1. Choose ONE canonical `DebugEvent` definition (recommend `juncture-tracing` version)
-2. Consolidate into single type or create clear documentation on when to use which
-3. Ensure StreamMode::Debug uses the correct type consistently
+**Verdict**: **REQUIRES IMMEDIATE REMEDIATION** - Critical observability gaps must be fixed
 
 ---
 
-### [A-002] Technical Direction Deviation: Duplicate ServerInfo Types
+## Critical Missing Features
 
-**Design Doc**: § 4.4 - No mention of ServerInfo duplication  
-**Design Spec**: ServerInfo should be defined once in observability module
+### [M-001] MISSING: SUPERSTEP_TASKS Metric Name Constant
+- **Design doc**: `design/09-observability.md` §4.1 (line 152)
+- **Design spec**: `juncture.superstep.tasks` counter metric
+- **Actual implementation**: `/root/project/juncture/crates/juncture-tracing/src/metrics.rs:329-389`
+  ```rust
+  // constants defined: GRAPH_INVOCATIONS, GRAPH_ERRORS, LLM_TOKENS_INPUT, etc.
+  // NO SUPERSTEP_TASKS constant found
+  ```
+- **Evidence**: Hard-coded string `"juncture.superstep.tasks"` used in `loop_.rs:691`
+- **Impact**: Violates DRY principle, inconsistent metric naming
+- **Action required**: Add `pub const SUPERSTEP_TASKS: &str = "juncture.superstep.tasks";`
 
-**Actual Implementation**: 
-- `juncture-tracing/src/types.rs` defines `ServerInfo` with builder pattern (lines 27-158)
-- `juncture-core/src/observability.rs` defines ANOTHER `ServerInfo` with similar but different structure (lines 132-195)
+### [M-002] MISSING: MetricsRegistry::registry() Function
+- **Design doc**: `design/09-observability.md` §4.4 (line 247)
+- **Design spec**: 
+  ```rust
+  let registry = juncture::metrics::registry();
+  ```
+- **Actual implementation**: `/root/project/juncture/crates/juncture-tracing/src/metrics.rs:472-697`
+  ```rust
+  // Has new() and with_meter() but NO registry() function
+  ```
+- **Impact**: Design examples won't compile, broken developer onboarding
+- **Action required**: Implement `pub fn registry() -> MetricsRegistry`
 
-**Nature**: Type duplication violating DRY principle
+### [M-003] MISSING: DebugEvent Variants (8 of 14)
+- **Design doc**: `design/09-observability.md` §5.1 (lines 276-334)
+- **Design spec**: 14 DebugEvent variants required
+- **Actual implementation**: `/root/project/juncture/crates/juncture-core/src/stream.rs:208-234`
+  ```rust
+  pub enum DebugEvent {
+      // Only 6 variants: SuperstepStart, SuperstepEnd, CheckpointSaved,
+      //                    ChannelUpdate, RouteDecision, BudgetStatus
+      // MISSING: GraphStart, NodeStart, NodeEnd, NodeError,
+      //          ChannelWrite, Merge, EdgeTraversed, GraphEnd
+  }
+  ```
+- **Impact**: Incomplete debug visibility
+- **Action required**: Implement 8 missing DebugEvent variants
 
-**Risk**: 
-- Conversion overhead between types
-- User confusion about which to import
-- Potential data loss in conversions
-- Maintenance burden
+### [M-004] MISSING: Span Error Recording
+- **Design doc**: `design/09-observability.md` §2.3 (line 63) and §6.2 (lines 401-405)
+- **Design spec**: 
+  ```rust
+  span.record("juncture.node.error", e.to_string().as_str())
+  ```
+- **Actual implementation**: `/root/project/juncture/crates/juncture-core/src/pregel/runner.rs:193-250`
+  ```rust
+  // Span created with "juncture.node.error" = Empty
+  // But NO recording of error attribute when execution fails
+  ```
+- **Impact**: Error traces lack diagnostic information
+- **Action required**: Add error attribute recording in node execution error path
 
-**Affected Files**:
-- `/root/project/juncture/crates/juncture-tracing/src/types.rs` (lines 27-158)
-- `/root/project/juncture/crates/juncture-core/src/observability.rs` (lines 132-195)
-
-**Git Reference**: N/A - original implementation
-
-**Action**: 
-1. Consolidate to single `ServerInfo` type
-2. Keep in `juncture-tracing/src/types.rs` as it has better builder pattern
-3. Update `juncture-core` to re-export from `juncture-tracing`
-
----
-
-### [B-001] Feature Simplification: Missing Graph-Level Metrics Emission
-
-**Design Doc**: § 4.1 - Counter metrics  
-**Design Spec**: `juncture.graph.invocations` and `juncture.graph.errors` counters should be emitted
-
-**Missing Implementation**: 
-- Metric constants defined: ✓ (`juncture-tracing/src/metrics.rs:333-336`)
-- NO emission found in `juncture-core/src/graph/compiled.rs`
-- NO emission found in `juncture-core/src/pregel/loop_.rs`
-- NO emission found in `juncture-core/src/pregel/runner.rs`
-
-**Risk**: 
-- Cannot monitor graph execution frequency
-- Cannot detect graph-level error patterns
-- Breaks observability promise
-
-**Affected Files**:
-- `/root/project/juncture/crates/juncture-core/src/graph/compiled.rs` (should emit)
-- `/root/project/juncture/crates/juncture-core/src/pregel/loop_.rs` (should emit)
-
-**Git Reference**: N/A - never implemented
-
-**Action**: 
-Add to `CompiledGraph::invoke()`:
-```rust
-collector.inc_counter("juncture.graph.invocations", 1);
-// On error:
-collector.inc_counter("juncture.graph.errors", 1);
-```
-
----
-
-### [B-002] Feature Simplification: Missing Superstep Metrics Emission
-
-**Design Doc**: § 4.2 - Histogram metrics  
-**Design Spec**: `juncture.superstep.duration_ms` histogram should be emitted
-
-**Missing Implementation**: 
-- Metric constant defined: ✓ (`juncture-tracing/src/metrics.rs:377`)
-- NO emission found in `juncture-core/src/pregel/loop_.rs` superstep execution
-
-**Risk**: 
-- Cannot analyze superstep performance distribution
-- Cannot detect performance degradation over time
-
-**Affected Files**:
-- `/root/project/juncture/crates/juncture-core/src/pregel/loop_.rs` (execute_superstep method)
-
-**Git Reference**: N/A - never implemented
-
-**Action**: 
-Add to `execute_superstep()` after completion:
-```rust
-collector.record_histogram("juncture.superstep.duration_ms", duration_ms as f64);
-```
+### [M-005] MISSING: LLM Cost Attribute in Spans
+- **Design doc**: `design/09-observability.md` §2.4 (line 74)
+- **Design spec**: `juncture.cost.usd` attribute required in LLM call spans
+- **Actual implementation**: `/root/project/juncture/crates/juncture/src/llm/anthropic.rs:240-400`
+  ```rust
+  // Span records tokens, has_tool_calls, stop_reason
+  // NO cost recording
+  ```
+- **Impact**: Cost tracking not visible in distributed traces
+- **Action required**: Calculate and record cost attribute in LLM spans
 
 ---
 
-### [B-003] Feature Simplification: Missing LLM Metrics Emission
+## Extra Features (Deviations)
 
-**Design Doc**: § 4.1, § 4.2 - LLM metrics  
-**Design Spec**: Should emit `juncture.llm.tokens.input`, `juncture.llm.tokens.output`, `juncture.llm.cost_usd`, `juncture.llm.calls`, `juncture.llm.duration_ms`, `juncture.llm.tokens_per_call`
+### [D-001] EXTRA: Comprehensive Callback System
+- **Design doc**: `design/09-observability.md` §5.1 (note at line 353)
+- **Design spec**: DebugEvent for debug-mode observability
+- **Actual implementation**: `/root/project/juncture/crates/juncture-tracing/src/callback.rs:12-156`
+  ```rust
+  pub trait GraphCallbackHandler {
+      fn on_interrupt(&self, ...)  // EXTRA
+      fn on_resume(&self, ...)  // EXTRA
+      fn on_checkpoint_saved(&self, ...)  // EXTRA
+      fn on_node_start(&self, ...)  // EXTRA
+      fn on_node_end(&self, ...)  // EXTRA
+      fn on_node_error(&self, ...)  // EXTRA
+      fn on_graph_end(&self, ...)  // EXTRA
+  }
+  ```
+- **Deviation**: 7 lifecycle hooks not in design
+- **Impact**: Extra features beyond design specification
+- **Action required**: Remove callback system or update design
 
-**Missing Implementation**: 
-- Metric constants defined: ✓ (`juncture-tracing/src/metrics.rs:339-348, 368-371`)
-- NO emission found in LLM provider implementations (`juncture/src/llm/anthropic.rs`, `openai.rs`, `ollama.rs`)
-- Only span creation exists, no metrics
+### [D-002] EXTRA: Enhanced Test Utilities
+- **Design doc**: `design/09-observability.md` §7.2 (lines 493-501)
+- **Design spec**: Basic TestMetricsCollector with simple methods
+- **Actual implementation**: `/root/project/juncture/crates/juncture-tracing/src/test_utils.rs:29-418`
+  ```rust
+  impl TestMetricsCollector {
+      pub fn increment_counter_with_labels(...)  // EXTRA
+      pub fn get_counter_with_labels(...)  // EXTRA
+      pub fn clear()  // EXTRA
+      pub fn counter_names()  // EXTRA
+      pub fn histogram_names()  // EXTRA
+      pub fn gauge_names()  // EXTRA
+  }
+  ```
+- **Deviation**: Extra utility methods beyond design
+- **Impact**: Extra features beyond design specification
+- **Action required**: Remove extra methods or update design
 
-**Risk**: 
-- Cannot track token usage and costs
-- Cannot monitor LLM call performance
-- Budget system has no metrics support
+### [D-003] EXTRA: Handle-Based Metrics Abstraction
+- **Design doc**: `design/09-observability.md` §4.4 (lines 239-244)
+- **Design spec**: Direct OpenTelemetry Counter, Histogram, Gauge types
+- **Actual implementation**: `/root/project/juncture/crates/juncture-tracing/src/metrics.rs:144-323`
+  ```rust
+  pub struct CounterHandle  // EXTRA wrapper
+  pub struct HistogramHandle  // EXTRA wrapper
+  pub struct GaugeHandle  // EXTRA wrapper
+  ```
+- **Deviation**: Handle-based abstraction not in design
+- **Impact**: Different API than specified
+- **Action required**: Use direct OTel types or update design
 
-**Affected Files**:
-- `/root/project/juncture/crates/juncture/src/llm/anthropic.rs`
-- `/root/project/juncture/crates/juncture/src/llm/openai.rs`
-- `/root/project/juncture/crates/juncture/src/llm/ollama.rs`
-
-**Git Reference**: N/A - never implemented
-
-**Action**: 
-Add to LLM providers after call completion:
-```rust
-collector.inc_counter("juncture.llm.calls", 1);
-collector.inc_counter("juncture.llm.tokens.input", input_tokens);
-collector.inc_counter("juncture.llm.tokens.output", output_tokens);
-collector.record_histogram("juncture.llm.duration_ms", duration_ms as f64);
-collector.record_histogram("juncture.llm.tokens_per_call", total_tokens as f64);
-// If cost available:
-collector.inc_counter("juncture.llm.cost_usd", cost_usd);
-```
-
----
-
-### [B-004] Feature Simplification: Missing Tool Metrics Emission
-
-**Design Doc**: § 4.1, § 4.2 - Tool metrics  
-**Design Spec**: Should emit `juncture.tool.calls`, `juncture.tool.errors`, `juncture.tool.duration_ms`
-
-**Missing Implementation**: 
-- Metric constants defined: ✓ (`juncture-tracing/src/metrics.rs:351-354, 374`)
-- NO emission found in `juncture/src/tools/node.rs`
-- Only span creation exists, no metrics
-
-**Risk**: 
-- Cannot monitor tool execution frequency
-- Cannot detect tool failure rates
-- Cannot optimize tool performance
-
-**Affected Files**:
-- `/root/project/juncture/crates/juncture/src/tools/node.rs`
-
-**Git Reference**: N/A - never implemented
-
-**Action**: 
-Add to tool execution:
-```rust
-collector.inc_counter("juncture.tool.calls", 1);
-collector.record_histogram("juncture.tool.duration_ms", duration_ms as f64);
-// On error:
-collector.inc_counter("juncture.tool.errors", 1);
-```
-
----
-
-### [B-005] Feature Simplification: Missing Graph Duration Histogram
-
-**Design Doc**: § 4.2 - Histogram metrics  
-**Design Spec**: `juncture.graph.duration_ms` should track complete graph execution time
-
-**Missing Implementation**: 
-- Metric constant defined: ✓ (`juncture-tracing/src/metrics.rs:362`)
-- NO emission at graph completion
-
-**Risk**: 
-- Cannot monitor overall graph performance
-- Cannot detect SLA violations
-
-**Affected Files**:
-- `/root/project/juncture/crates/juncture-core/src/graph/compiled.rs`
-
-**Git Reference**: N/A - never implemented
-
-**Action**: 
-Add to graph completion:
-```rust
-collector.record_histogram("juncture.graph.duration_ms", total_duration_ms as f64);
-```
+### [D-004] EXTRA: Enhanced Trace Propagation
+- **Design doc**: `design/09-observability.md` §6.4 (lines 428-444)
+- **Design spec**: Basic tracing::Instrument trait usage
+- **Actual implementation**: `/root/project/juncture/crates/juncture-tracing/src/propagation.rs:1-196`
+  ```rust
+  pub fn inject_trace_context(...)  // EXTRA W3C propagator
+  pub fn extract_trace_context(...)  // EXTRA W3C propagator
+  pub fn attach_context(...)  // EXTRA helper
+  ```
+- **Deviation**: Full W3C propagator beyond basic design
+- **Impact**: Extra features beyond design specification
+- **Action required**: Remove W3C propagator or update design
 
 ---
 
-### [B-006] Feature Simplification: Missing Gauge Metrics
+## Other Deviations
 
-**Design Doc**: § 4.3 - Gauge metrics  
-**Design Spec**: Should emit `juncture.graph.active_invocations`, `juncture.budget.remaining_tokens`, `juncture.budget.remaining_cost_usd`
+### [D-005] DEFECT: Incomplete Span Coverage
+- **Design doc**: `design/09-observability.md` §1 (lines 14-34)
+- **Design spec**: `juncture.graph.complete` span required
+- **Actual implementation**: Span NOT found in codebase
+- **Impact**: Missing graph completion span
+- **Action required**: Add graph completion span
 
-**Missing Implementation**: 
-- Metric constants defined: ✓ (`juncture-tracing/src/metrics.rs:382-388`)
-- NO gauge emission anywhere in codebase
-- `set_gauge` method exists but unused
+### [D-006] DEFECT: FilterExpr Struct Variants
+- **Design doc**: `design/09-observability.md` mentions FilterExpr in store context
+- **Design spec**: FilterExpr uses tuple variants `And(Vec<FilterExpr>)`
+- **Actual implementation**: `/root/project/juncture/crates/juncture-core/src/store.rs:196-266`
+  ```rust
+  pub enum FilterExpr {
+      And { expressions: Vec<FilterExpr> },  // Struct variant, not tuple
+      Or { expressions: Vec<FilterExpr> },  // Struct variant, not tuple
+  }
+  ```
+- **Deviation**: Struct variants instead of tuple variants
+- **Impact**: Serialization format differs from implied design
+- **Action required**: Change to tuple variants or clarify design
 
-**Risk**: 
-- Cannot monitor concurrent execution load
-- Cannot track budget depletion in real-time
-- Gauges are completely non-functional
-
-**Affected Files**:
-- `/root/project/juncture/crates/juncture-core/src/pregel/loop_.rs` (active invocations)
-- Budget system integration
-
-**Git Reference**: N/A - never implemented
-
-**Action**: 
-Add active invocations tracking:
-```rust
-// At graph start:
-collector.set_gauge("juncture.graph.active_invocations", active_count + 1);
-// At graph end:
-collector.set_gauge("juncture.graph.active_invocations", active_count - 1);
-```
-
-Integrate with budget system for remaining tokens/cost.
-
----
-
-### [B-007] Feature Simplification: Incomplete OpenTelemetry Integration
-
-**Design Doc**: § 3.1, § 3.2 - OTLP configuration  
-**Design Spec**: Full OTLP support with endpoint, service name, resource attributes, sampling, metrics
-
-**Actual Implementation**: 
-- Basic OTLP setup exists: ✓ (`juncture-tracing/src/config.rs`)
-- `with_metrics_endpoint()` not implemented (design § 3.3 mentions it)
-- Metrics pipeline setup incomplete
-- No example Jaeger/Datadog/Tempo integration verified
-
-**Risk**: 
-- OTLP export may not work as documented
-- Users cannot adopt standard observability stacks
-- Missing metrics export to Prometheus
-
-**Affected Files**:
-- `/root/project/juncture/crates/juncture-tracing/src/config.rs`
-
-**Git Reference**: N/A - incomplete implementation
-
-**Action**: 
-1. Implement `with_metrics_endpoint()` method
-2. Add integration tests with mock OTLP collectors
-3. Verify Jaeger, Datadog, Tempo examples work
-4. Document Prometheus PushGateway integration
+### [D-007] DEFECT: DebugEvent Naming
+- **Design doc**: `design/09-observability.md` §5.1 (line 318)
+- **Design spec**: `EdgeTraversed` event variant
+- **Actual implementation**: `/root/project/juncture/crates/juncture-core/src/stream.rs:208-234`
+  ```rust
+  pub enum DebugEvent {
+      RouteDecision,  // Renamed from EdgeTraversed
+  }
+  ```
+- **Deviation**: Event name differs from design
+- **Impact**: API surface does not match design
+- **Action required**: Rename to `EdgeTraversed` or update design
 
 ---
 
-### [B-008] Feature Simplification: Missing Span Attribute Recording
-
-**Design Doc**: § 2.1-2.6 - Span attributes  
-**Design Spec**: All listed attributes should be recorded on spans
-
-**Missing Implementation**: 
-- Attribute constants defined: ✓ (`juncture-tracing/src/spans.rs`)
-- Many attributes NOT recorded in actual span creation:
-  - `juncture.step.nodes` - missing
-  - `juncture.node.output_type` - missing
-  - `juncture.llm.has_tool_calls` - missing
-  - `juncture.llm.stop_reason` - missing
-  - `juncture.checkpoint.source` - missing
-  - Total attributes only partially recorded
-
-**Risk**: 
-- Incomplete trace data in OTLP backends
-- Cannot filter/query traces effectively
-- Broken promises in design documentation
-
-**Affected Files**:
-- `/root/project/juncture/crates/juncture-core/src/pregel/loop_.rs`
-- `/root/project/juncture/crates/juncture/src/llm/*.rs`
-
-**Git Reference**: N/A - incomplete implementation
-
-**Action**: 
-Audit all span creation sites and ensure all design-specified attributes are recorded.
-
----
-
-### [B-009] Feature Simplification: No Metrics Testing Infrastructure
-
-**Design Doc**: § 7.1, § 7.2 - Span/metrics assertions  
-**Design Spec**: `tracing-test` for spans, metrics assertions for counters
-
-**Missing Implementation**: 
-- `TestMetricsCollector` exists: ✓ (exceeds design)
-- NO `tracing-test` integration found
-- NO span assertion examples in codebase
-- NO integration tests verifying span structure
-
-**Risk**: 
-- Cannot verify observability works correctly
-- Span regressions go undetected
-- No confidence in OTLP export
-
-**Affected Files**:
-- `/root/project/juncture/crates/juncture-core/tests/` (should add observability tests)
-- `/root/project/juncture/crates/juncture-tracing/tests/` (should add integration tests)
-
-**Git Reference**: N/A - never implemented
-
-**Action**: 
-Add integration tests:
-```rust
-#[tokio::test]
-async fn test_graph_spans_created() {
-    // Use tracing-test to verify span hierarchy
-}
-```
-
----
-
-### [B-010] Feature Simplification: Metrics/Budget Integration Missing
-
-**Design Doc**: § 8 - Budget system collaboration  
-**Design Spec**: "可观测性系统与 Budget 系统共享 token/cost 数据源"
-
-**Missing Implementation**: 
-- Design shows unified data flow
-- NO integration code found between budget and metrics
-- Each system calculates independently
-
-**Risk**: 
-- Duplicate token/cost calculation
-- Inconsistent budget enforcement
-- Metrics don't reflect actual budget state
-
-**Affected Files**:
-- Budget system implementation (need to review)
-- Metrics emission sites
-
-**Git Reference**: N/A - never implemented
-
-**Action**: 
-Integrate budget tracker with metrics collector:
-```rust
-// In budget tracking:
-budget_tracker.report_usage(tokens, cost);
-if let Some(collector) = metrics_collector {
-    collector.inc_counter("juncture.llm.tokens.input", tokens);
-    collector.inc_counter("juncture.llm.cost_usd", cost);
-}
-```
-
----
-
-### [B-011] Feature Simplification: Missing Context Propagation
-
-**Design Doc**: § 6.4 - Context propagation  
-**Design Spec**: Span context propagated across async boundaries and process boundaries
-
-**Missing Implementation**: 
-- Async propagation via `.instrument()`: ✓ (some cases)
-- NO cross-process propagation code found
-- NO OpenTelemetry propagator usage for subgraphs
-- Subgraph execution loses trace context
-
-**Risk**: 
-- Distributed traces are broken
-- Subgraphs appear as separate traces
-- Cannot follow requests across service boundaries
-
-**Affected Files**:
-- `/root/project/juncture/crates/juncture-core/src/subgraph/` (needs review)
-- Subgraph execution code
-
-**Git Reference**: N/A - never implemented
-
-**Action**: 
-Implement OpenTelemetry context propagation:
-```rust
-use opentelemetry::global;
-use opentelemetry::trace::TraceContextExt;
-
-// Inject context before subgraph call
-let propagator = global::get_text_map_propagator(&[]);
-propagator.inject_context(&span.context(), &mut metadata);
-
-// Extract context in subgraph
-let ctx = propagator.extract(&metadata);
-```
-
----
-
-### [B-012] Feature Simplification: Incomplete Metrics Registry API
-
-**Design Doc**: § 4.4 - Explicit Metrics API  
-**Design Spec**: `MetricsRegistry` with `counter()`, `histogram()`, `gauge()` methods
-
-**Actual Implementation**: 
-- API exists: ✓ (`juncture-tracing/src/metrics.rs`)
-- Returns handle-based abstraction (CounterHandle, etc.) - DIFFERENT from design
-- Design shows direct OTel types, implementation uses wrappers
-- Works but deviates from design specification
-
-**Nature**: API surface deviation
-
-**Risk**: 
-- User confusion vs documentation
-- Different method signatures than examples
-- Migration path if changing to real OTel Meter
-
-**Affected Files**:
-- `/root/project/juncture/crates/juncture-tracing/src/metrics.rs`
-
-**Git Reference**: Implementation note in design (C-09-5)
-
-**Action**: 
-Either:
-1. Update design to match implementation (recommended)
-2. OR add deprecated wrappers for OTel compatibility
-3. Document the handle-based approach clearly
-
----
-
-## Recommended Design Document Updates
-
-### [C-001] Code Exceeds Design: Enhanced GraphCallbackHandler
-
-**Design Doc**: § 5.2 - StreamMode::Debug  
-**Original Design**: Focus on Debug events only  
-**Actual Implementation**: Comprehensive `GraphCallbackHandler` trait with full lifecycle hooks
-
-**Rationale**: The implementation provides production-grade callback orchestration beyond the design's debug-focused scope. This is a valuable addition for production use cases.
-
-**Action**: Update design § 5 to document `GraphCallbackHandler` trait alongside `DebugEvent`. Add new section § 5.3 for production callbacks.
-
----
-
-### [C-002] Code Exceeds Design: TestMetricsCollector Enhancements
-
-**Design Doc**: § 7.2 - Metrics assertions  
-**Original Design**: Basic `get_counter()` method  
-**Actual Implementation**: Full-featured collector with labeled metrics support
-
-**Rationale**: The implementation provides dedicated methods for all three metric types and multi-dimensional label support. This enables sophisticated test scenarios.
-
-**Action**: Update design § 7.2 to document:
-- `get_histogram_samples(name) -> Vec<f64>`
-- `get_gauge_value(name) -> Option<f64>`
-- `get_counter_with_labels(name, labels) -> u64`
-- Label sorting and matching behavior
-
----
-
-### [C-003] Code Exceeds Design: RegistryMetricsCollector Adapter
-
-**Design Doc**: No mention in original design  
-**Original Design**: N/A  
-**Actual Implementation**: `RegistryMetricsCollector` bridges `MetricsRegistry` to `MetricsCollector` trait
-
-**Rationale**: This adapter enables clean integration between the metrics registry and the Pregel engine's collector interface. Essential for the metrics pipeline.
-
-**Action**: Add to design § 4.4 as the integration mechanism:
-```rust
-let collector = Arc::new(RegistryMetricsCollector::new(registry));
-let config = RunnableConfig::new()
-    .with_metrics_collector(collector);
-```
-
----
-
-### [C-004] Code Exceeds Design: LlmCacheKeyInput in Wrong Module
-
-**Design Doc**: § 9 - Module file structure  
-**Original Design**: `LlmCacheKeyInput` should be in observability module  
-**Actual Implementation**: Defined in `juncture-core/src/observability.rs` but re-exported from `juncture-tracing/src/types.rs`
-
-**Rationale**: Better architectural placement - core types belong in core crate, tracing crate re-exports for convenience.
-
-**Action**: Update design § 9 to reflect:
-```
-juncture-core/src/observability.rs  # MetricsCollector, CacheKeyInput, ServerInfo
-juncture-tracing/src/types.rs       # Re-exports + convenience types
-```
-
----
-
-## Conformant Modules
-
-| Module | Files Reviewed | Conformance Note |
-|--------|----------------|------------------|
-| **Span Constants** | `juncture-tracing/src/spans.rs` | Fully conformant - all names and attributes defined |
-| **Tracing Config** | `juncture-tracing/src/config.rs` | Fully conformant - builder API matches design |
-| **Test Utilities** | `juncture-tracing/src/test_utils.rs` | Fully conformant - exceeds design with labeled metrics |
-| **Metrics Registry** | `juncture-tracing/src/metrics.rs` | Fully conformant - handle-based API works correctly |
-| **Debug Events** | `juncture-tracing/src/debug.rs` | Partially conformant - more variants than design, works well |
-| **Stream Mode** | `juncture-core/src/stream.rs` | Fully conformant - StreamMode::Debug implemented |
-
----
-
-## Detailed Findings by Design Section
-
-### § 1 Span Hierarchy (CONFORMANT)
-- ✓ Span tree structure documented
-- ✓ Naming convention `juncture.{component}.{action}` followed
-- ✓ All expected spans defined in constants
-
-### § 2 Span Attribute Definitions (CONFORMANT)
-- ✓ All attribute constants defined
-- ⚠️ Not all attributes recorded in actual spans (see B-008)
-
-### § 3 Integration Configuration (CONFORMANT)
-- ✓ `init()` builder API implemented
-- ✓ One-line initialization works
-- ✓ Full configuration options available
-- ⚠️ Metrics endpoint incomplete (B-007)
-
-### § 4 Metrics (PARTIAL)
-- ✓ Counter metric names defined
-- ✓ Histogram metric names defined
-- ✓ Gauge metric names defined
-- ✓ `MetricsRegistry` API implemented
-- ✗ Most metrics NOT emitted (B-001 through B-006)
-- ⚠️ API deviates from design (B-012)
-
-### § 5 Debug Mode (PARTIAL)
-- ✓ `StreamMode::Debug` exists
-- ✓ `DebugEvent` defined (two versions - A-001)
-- ✓ Usage scenarios documented
-- ⚠️ Event structure differs from design (A-001)
-
-### § 6 Implementation Details (CONFORMANT)
-- ✓ Automatic instrumentation positions documented
-- ✓ Implementation pattern shown
-- ✓ Feature gate strategy correct
-- ⚠️ Context propagation incomplete (B-011)
-
-### § 7 Testing Observability (PARTIAL)
-- ✓ Test utilities implemented
-- ✗ No span assertion tests (B-009)
-- ✗ No metrics integration tests (B-009)
-
-### § 8 Budget System Integration (MISSING)
-- ✗ NO integration code found (B-010)
-- ✗ Each system calculates independently
-
-### § 9 Module Structure (CONFORMANT)
-- ✓ File structure matches design
-- ⚠️ Duplicate ServerInfo types (A-002)
-
-### § 10 Integration Examples (NOT TESTED)
-- ⚠️ Examples not verified
-- ⚠️ No integration tests with real backends (B-007)
+## Conformant Implementations
+
+### [C-001] Span Names/Attributes - CONFORMANT
+- **Design doc**: `design/09-observability.md` §2 (lines 38-121)
+- **Implementation**: `/root/project/juncture/crates/juncture-tracing/src/spans.rs:1-154`
+- **Status**: All required span names and attributes defined
+
+### [C-002] Tracing Configuration - CONFORMANT
+- **Design doc**: `design/09-observability.md` §3 (lines 96-142)
+- **Implementation**: `/root/project/juncture/crates/juncture-tracing/src/config.rs:1-660`
+- **Status**: Builder pattern matches design
+
+### [C-003] Counter Metrics - CONFORMANT
+- **Design doc**: `design/09-observability.md` §4.1 (lines 149-160)
+- **Implementation**: `/root/project/juncture/crates/juncture-tracing/src/metrics.rs:329-389`
+- **Status**: 15/16 constants present (missing SUPERSTEP_TASKS)
+
+### [C-004] Histogram Metrics - CONFORMANT
+- **Design doc**: `design/09-observability.md` §4.2 (lines 162-171)
+- **Implementation**: All 6 histogram metrics present
+- **Status**: Complete implementation
+
+### [C-005] Gauge Metrics - CONFORMANT
+- **Design doc**: `design/09-observability.md` §4.3 (lines 173-179)
+- **Implementation**: All 3 gauge metrics present
+- **Status**: Complete implementation
+
+### [C-006] LLM Span Creation - CONFORMANT
+- **Design doc**: `design/09-observability.md` §6.2 (lines 375-409)
+- **Implementation**: `/root/project/juncture/crates/juncture/src/llm/anthropic.rs:240-248`
+- **Status**: Span creation matches pattern (missing cost recording)
+
+### [C-007] Tool Span Creation - CONFORMANT
+- **Design doc**: `design/09-observability.md` §6.2
+- **Implementation**: `/root/project/juncture/crates/juncture/src/tools/node.rs:573-655`
+- **Status**: Tool call spans match design
+
+### [C-008] Checkpoint Span Creation - CONFORMANT
+- **Design doc**: `design/09-observability.md` §6.2
+- **Implementation**: `/root/project/juncture/crates/juncture-checkpoint/src/memory.rs:342-413`
+- **Status**: Checkpoint write spans match design
 
 ---
 
 ## Action Plan
 
-### Immediate (Blocking - Fix Before Next Release)
-1. [ ] **Implement missing metrics emissions** (B-001, B-002, B-003, B-004, B-005)
-   - Add graph invocations/errors counters
-   - Add superstep duration histogram
-   - Add LLM metrics (tokens, cost, duration)
-   - Add tool metrics (calls, errors, duration)
-   - Add graph duration histogram
+1. [ ] **M-001**: Add `SUPERSTEP_TASKS` constant to metrics names module
+2. [ ] **M-002**: Implement `MetricsRegistry::registry()` function
+3. [ ] **M-003**: Implement 8 missing DebugEvent variants
+4. [ ] **M-004**: Add span error recording in node execution
+5. [ ] **M-005**: Add LLM cost attribute recording in spans
 
-2. [ ] **Resolve DebugEvent duplication** (A-001)
-   - Choose single canonical DebugEvent
-   - Update all references
-   - Add integration tests
+1. [ ] **D-005**: Add `juncture.graph.complete` span
+2. [ ] **D-006**: Change FilterExpr to tuple variants OR clarify design
+3. [ ] **D-007**: Rename `RouteDecision` to `EdgeTraversed` OR update design
 
-3. [ ] **Consolidate ServerInfo types** (A-002)
-   - Keep builder-pattern version
-   - Remove duplicate
-   - Update imports
-
-### Short-Term (Next Sprint)
-1. [ ] **Implement gauge metrics** (B-006)
-   - Add active invocations tracking
-   - Integrate with budget system
-   - Add tests
-
-2. [ ] **Complete span attribute recording** (B-008)
-   - Audit all span creation sites
-   - Add missing attributes
-   - Verify with tracing-test
-
-3. [ ] **Add context propagation** (B-011)
-   - Implement cross-process propagation
-   - Add subgraph context injection/extraction
-   - Test distributed traces
-
-4. [ ] **Add OTLP integration tests** (B-007, B-009)
-   - Test with mock OTLP collector
-   - Verify Jaeger export works
-   - Verify metrics export to Prometheus
-
-### Recommended (Documentation Updates)
-1. [ ] Update design § 4.4 to document handle-based MetricsRegistry API
-2. [ ] Update design § 5 to document GraphCallbackHandler trait
-3. [ ] Update design § 7.2 to document TestMetricsCollector enhancements
-4. [ ] Update design § 9 to reflect correct module structure
-5. [ ] Add integration examples for Jaeger, Datadog, Tempo
+### NEVER acceptable
+1. [ ] DO NOT accept "production-grade" as justification for extra callback system
+2. [ ] DO NOT accept "better UX" as justification for enhanced test utilities
+3. [ ] DO NOT accept "cleaner API" as justification for handle-based metrics
+4. [ ] DO NOT update design documents to match extra features
 
 ---
 
 ## Conclusion
 
-The Juncture observability implementation has a **strong foundation** but **critical gaps** in actual metrics emission. The infrastructure is well-designed with:
-- Excellent span/attribute constant definitions
-- Solid metrics registry and test utilities  
-- Clean builder API for tracing configuration
-- Good separation of concerns
+Under STRICT conformance standards, Module 09 has **5 CRITICAL MISSING** features, **7 DEFECTS**, and **4 EXTRA** features. The observability foundation is solid but specific gaps prevent full conformance.
 
-However, the **primary failure** is that most metrics defined are never emitted. This is like building a car with a dashboard but no sensors connected. The metrics that DO work (checkpoints, node duration) prove the system is functional, but coverage is ~20% of design specification.
+**Verdict**: **REQUIRES IMMEDIATE REMEDIATION** - Critical gaps in metrics, events, and span attributes must be fixed
 
-**Priority**: Fix metrics emissions first (B-001 through B-006), then resolve type duplications (A-001, A-002). The enhanced callbacks (C-001 through C-004) are genuine improvements that should be kept and documented.
+---
 
-**Estimated Effort**: 
-- Critical fixes: 3-5 days
-- Short-term items: 1 week
-- Documentation: 1-2 days
-
-**Recommendation**: Block release until at least B-001 through B-005 are resolved. Observability without metrics is fundamentally incomplete.
+**Note**: This review used STRICT standards where any deviation from the design is a defect. The 5 missing features (M-001 through M-005) are particularly critical as they represent incomplete implementation of the design specification.

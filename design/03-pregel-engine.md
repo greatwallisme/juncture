@@ -176,7 +176,6 @@ pub struct PregelLoop<S: State> {
 }
 
 // ─────────────────────────────────────────────────────
-// <!-- Addresses finding: Part2#6 -->
 // PregelLoop 拆分为三个职责清晰的结构
 // ─────────────────────────────────────────────────────
 
@@ -320,7 +319,6 @@ pub struct TaskOutput<S: State> {
 /// 追踪每个字段的版本号
 /// 等价于 LangGraph 的 checkpoint["channel_versions"]
 ///
-/// <!-- Addresses finding: Part3#1 -->
 ///
 /// **版本递增算法**：与 LangGraph 一致，使用全局最大版本号递增策略。
 /// 每次 bump 时，所有在同一 superstep 中更新的字段获得**相同的版本号**，
@@ -460,7 +458,6 @@ invoke(input, config)
     │     YES → status = Done, return false                        │
     │                                                              │
     │  e. 检查 interrupt_before                                    │
-    │     <!-- Addresses finding: C-2 -->                           │
     │     中断检查算法（should_interrupt）:                           │
     │     1. 首先检查是否有 channel 自上次中断以来被更新:              │
     │        比较 channel_versions 与 versions_seen[INTERRUPT]      │
@@ -567,15 +564,11 @@ invoke(input, config)
 
 ### 4.1 实现
 
-<!-- Addresses finding: Part2#1 -->
-<!-- Addresses finding: Part2#3 -->
-
 **State Cloning 策略**：
 
 当前设计中每个 task spawn 都获得完整的 state clone，对于大状态（长对话历史）开销较高。
 生产环境建议使用 `CowState<S>`（Copy-on-Write）模式：
 
-<!-- Addresses finding: H-2 -->
 
 ```rust
 /// 写时复制状态包装，避免大状态的完整 clone
@@ -640,7 +633,6 @@ pub async fn execute_superstep<S: State>(
     cancellation_token: &CancellationToken,
     checkpointer: &Arc<dyn CheckpointSaver>,
     stream_tx: &Option<mpsc::UnboundedSender<StreamEvent<S>>>,
-    /// <!-- Addresses finding: H-5, R-A2-2 -->
     /// 有界并发控制：使用 Semaphore 限制并行任务数量。
     /// 防止大量 Send 目标或大型图中节点过多导致系统资源耗尽。
     /// Semaphore::new(permits) 创建许可池，task spawn 前获取许可，
@@ -803,9 +795,6 @@ pub async fn execute_superstep<S: State>(
 
 ### 5.1 实现
 
-<!-- Addresses finding: C-1 -->
-<!-- Addresses finding: M-1 -->
-<!-- Addresses finding: H-9 -->
 
 **IMPORTANT: versions_seen 时序**：`versions_seen` 必须在 `apply_writes` 开始时、任何 channel 更新或版本递增之前更新。这记录了 tasks 执行时的 channel 版本快照。
 
@@ -822,12 +811,9 @@ fn apply_writes<S: State>(
 ) -> Result<FieldsChanged, JunctureError> {
     let mut total_changed = FieldsChanged::default();
 
-    // <!-- Addresses finding: H-9 -->
     // 步骤 0: 在任何更新前，先记录当前版本到 versions_seen
     // versions_seen[node] = current channel_versions (snapshot before mutation)
 
-    // <!-- Addresses finding: C-1 -->
-    // <!-- Addresses finding: C-1, M-03-012 -->
     // 按 path-based sorting 排列 tasks（替代 IndexMap 注册顺序）
     // PULL tasks: 按节点名字母序排列
     // PUSH tasks: 按 send index 排序
@@ -913,7 +899,6 @@ state.reset_ephemeral();
 
 ### 5.4 consume() 步骤
 
-<!-- Addresses finding: C-3 -->
 
 在 `apply_writes` 合并所有写入后、`reset_ephemeral()` 之前，对所有被当前 superstep 中 tasks 触发的 channels 调用 `consume()`：
 
@@ -938,8 +923,6 @@ fn consume_triggered_channels<S: State>(
 > **Implementation Note (D-03-10)**: The current implementation resets all ephemeral fields each superstep via `reset_ephemeral()` instead of selectively consuming only triggered channels. This is functionally correct but less optimized than the fine-grained `consume_triggered_channels` approach described above.
 
 ### 5.5 finish() 通知
-
-<!-- Addresses finding: C-4 -->
 
 当 superstep 产生的更新 channels 不再触发任何后续节点时（执行完成），Pregel 引擎对所有 channels 调用 `finish()`：
 
@@ -977,8 +960,6 @@ fn finish_all_channels<S: State>(
 ## 6. 节点调度算法
 
 ### 6.1 主路径：边驱动调度
-
-<!-- Addresses finding: H-8 -->
 
 **优化：trigger_to_nodes 映射**
 
@@ -1384,15 +1365,12 @@ pub enum JunctureError {
     #[error("图执行被优雅停止: {reason}")]
     GraphDrained { reason: String },
 
-    // ── <!-- Addresses finding: L-2 --> ──
     #[error("读取空的 Channel: {channel}")]
     EmptyChannel { channel: String },
 
-    // ── <!-- Addresses finding: L-3 --> ──
     #[error("输入状态为空")]
     EmptyInput,
 
-    // ── <!-- Addresses finding: L-4 --> ──
     #[error("任务 '{task_id}' 未找到")]
     TaskNotFound { task_id: String },
 }
@@ -1400,7 +1378,6 @@ pub enum JunctureError {
 
 ### 10.1b GraphBubbleUp 异常类型
 
-<!-- Addresses finding: M-4 -->
 
 > 参考: `langgraph/errors.py:85` — `GraphBubbleUp` 基类
 
@@ -1508,8 +1485,6 @@ Task C: 正在执行
 
 ### 10.4 ErrorCode 枚举
 
-<!-- Addresses finding: L-12 -->
-
 > 参考: `langgraph/errors.py` — 各种错误类型
 
 Juncture 定义标准的错误代码枚举，用于错误传播和错误处理器匹配：
@@ -1547,7 +1522,6 @@ impl JunctureError {
         }
     }
 
-    /// <!-- Addresses finding: R-A5-1, M-15 -->
     /// Microsoft 风格错误类型检查辅助方法
     /// 参考: https://docs.microsoft.com/en-us/dotnet/standard/exceptions/best-practices-for-exceptions
 
@@ -1609,14 +1583,6 @@ impl JunctureError {
 ```
 
 ---
-
-<!-- Addresses finding: M-02 -->
-<!-- Addresses finding: C-05 -->
-<!-- Addresses finding: C-06 -->
-<!-- Addresses finding: H-02 -->
-<!-- Addresses finding: H-12 -->
-<!-- Addresses finding: Part3#3 -->
-<!-- Addresses finding: L-02 -->
 
 ## 11. 节点弹性策略
 
@@ -1707,7 +1673,6 @@ async fn execute_with_retry<S: State>(
 > 退避间隔计算：delay = min(delay * backoff_factor, max_interval)。
 > 抖动范围：±10% 的延迟，防止雷群效应（thundering herd）。
 
-<!-- Addresses finding: M-2 -->
 
 ```rust
 impl<S: State> StateGraph<S> {
@@ -1959,7 +1924,6 @@ pub mod reserved_keys {
 
 #### 两阶段错误恢复算法
 
-<!-- Addresses finding: H-7 -->
 
 ```
 Phase 1: 扫描与标记（在 after_tick 开始时）
@@ -2054,7 +2018,6 @@ pub trait PregelProtocol<S: State>: Send + Sync + 'static {
 
 ## 12. 与 LangGraph 的关键差异
 
-<!-- Note: 原第 11 节，因新增第 11 节"节点弹性策略"而顺延 -->
 
 | 维度 | LangGraph Python | Juncture Rust | 理由 |
 |------|-----------------|---------------|------|
@@ -2072,7 +2035,6 @@ pub trait PregelProtocol<S: State>: Send + Sync + 'static {
 
 ## 13. SyncAsyncFuture 与任务结果处理
 
-<!-- Addresses finding: M-6 -->
 
 > 参考: `langgraph/pregel/functional.py` — SyncAsyncFuture 类
 
@@ -2156,7 +2118,6 @@ async fn workflow(input: Input, runtime: &Runtime<()>) -> Result<Output> {
 
 ## 14. Previous Result Injection
 
-<!-- Addresses finding: M-7 -->
 
 > 参考: `langgraph/func/__init__.py` — @entrypoint 的 `previous` 参数
 

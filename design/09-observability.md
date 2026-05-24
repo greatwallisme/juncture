@@ -179,7 +179,7 @@ INFO juncture::pregel: graph invoke complete steps=3 total_tokens=600
 
 ---
 
-## 4.4 <!-- Addresses finding: M-9 --> Explicit Metrics API
+## 4.4 Explicit Metrics API
 
 除了 OpenTelemetry 的自动 metrics 采集，Juncture 提供显式 metrics API 用于自定义指标：
 

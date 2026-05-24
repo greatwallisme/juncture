@@ -15,8 +15,6 @@
 
 `StateGraph<S>` 是图的构建阶段表示。它收集节点、边、子图声明，在 `compile()` 时执行拓扑验证并生成不可变的执行结构。
 
-<!-- Addresses finding: C-03 -->
-
 ### Input/Output Schema 分离
 
 > 源码位置: `langgraph/libs/langgraph/langgraph/graph/state.py:130` — `StateGraph(state_schema, input_schema=InputSchema, output_schema=OutputSchema)`
@@ -59,14 +57,10 @@ impl<S: State> StateGraph<S> {
     pub fn new() -> Self;
 
     /// 添加节点。name 必须唯一，node 可以是任何实现 IntoNode<S> 的类型。
-    /// <!-- Addresses finding: L-8 -->
     /// defer: 如果为 true，节点不会在收到触发时立即执行，
     /// 而是等到所有非 deferred 节点执行完毕后再执行。
-    /// <!-- Addresses finding: L-9 -->
     /// metadata: 节点级元数据（用于可观测性标记、条件过滤等）。
-    /// <!-- Addresses finding: L-10 -->
     /// destinations: 声明该节点可能路由到的目标列表（用于拓扑验证和图导出）。
-    /// <!-- Addresses finding: L-11 -->
     /// retry_policies: 重试策略列表（替代单一的 retry_policy），
     /// 允许对不同错误类型配置不同的重试策略。
     pub fn add_node(
@@ -129,11 +123,9 @@ impl<S: State> StateGraph<S> {
     /// 设置终止节点（等价于 add_edge(node, END)）。
     pub fn set_finish_point(&mut self, node: impl Into<String>) -> &mut Self;
 
-    /// <!-- Addresses finding: M-10 -->
     /// 添加线性链：便捷方法用于添加连续的节点序列。
     /// nodes[0] 连接到 nodes[1]，nodes[1] 连接到 nodes[2]，依此类推。
     /// 如果 entry_point 未设置，nodes[0] 自动设为入口点。
-    /// <!-- Addresses finding: B-02-001 (implementation returns Result for early validation) -->
     pub fn add_sequence(&mut self, nodes: &[impl AsRef<str>]) -> Result<&mut Self, TopologyError> {
         for window in nodes.windows(2) {
             self.add_edge(window[0].as_ref(), window[1].as_ref());
@@ -170,7 +162,6 @@ impl<S: State> StateGraph<S> {
 > graph compilation time, which are merged with runtime `RunnableConfig` interrupt settings.
 > This enables reusable HITL configurations without requiring per-invocation config setup.
 
-    /// <!-- Addresses finding: L-9 -->
     /// 验证状态键的有效性。
     /// 检查所有节点的更新是否只引用了 State 中定义的字段。
     /// 在编译时自动调用，也可单独调用用于调试。
@@ -319,9 +310,6 @@ where ...
 
 ### 2.4 节点错误处理器
 
-<!-- Addresses finding: H-07 -->
-<!-- Addresses finding: L-2 -->
-
 > 源码位置: `langgraph/libs/langgraph/langgraph/graph/state.py:107` — `_NodeDefaults`
 
 LangGraph 支持为每个节点注册错误处理器。当节点执行失败时，错误处理器接收错误信息并可以返回 `Command` 来恢复。
@@ -392,8 +380,6 @@ graph.add_node_with_error_handler(
 - `_resume_error_handlers_if_applicable()` 在 tick() 循环中检查并调度
 
 **NodeError 扩展说明**：
-
-<!-- Addresses finding: M-5 -->
 
 > 注意：Juncture 扩展了 LangGraph 的 NodeError，增加了 `state` 和 `attempt` 字段以支持更丰富的错误恢复。
 > LangGraph 的 NodeError 仅包含 `node` 和 `error` 字段。
@@ -522,7 +508,6 @@ enum TriggerSource {
 
 ## 3.5 Runtime 与上下文注入
 
-<!-- Addresses finding: C-04 -->
 
 > 源码位置: `langgraph/libs/langgraph/langgraph/runtime.py:124` — `Runtime` 类
 > 源码位置: `langgraph/libs/langgraph/langgraph/graph/state.py:211` — `context_schema` 参数
@@ -550,19 +535,15 @@ pub struct Runtime<C: Clone + Send + Sync + 'static = ()> {
 
     /// 心跳信号（防止 idle timeout 误判）
     pub heartbeat: Heartbeat,
-    // <!-- Addresses finding: M-06 -->
 
     /// 上一次执行的返回值（仅 Functional API）
     pub previous: Option<serde_json::Value>,
-    // <!-- Addresses finding: M-07 -->
 
     /// 执行元信息
     pub execution_info: Option<ExecutionInfo>,
-    // <!-- Addresses finding: H-13, L-01 -->
 
     /// 协作式排空控制
     pub control: Option<RunControl>,
-    // <!-- Addresses finding: H-12 -->
 }
 ```
 
@@ -592,8 +573,6 @@ async fn my_node(state: S, config: &RunnableConfig, runtime: &Runtime<MyContext>
 
 ### ExecutionInfo
 
-<!-- Addresses finding: H-13, L-01 -->
-
 ```rust
 /// 只读执行元信息
 ///
@@ -611,17 +590,13 @@ pub struct ExecutionInfo {
     /// 当前运行 ID
     pub run_id: Option<String>,
     /// 当前节点执行尝试次数（1-indexed）
-    /// <!-- Addresses finding: L-01 -->
     pub node_attempt: u32,
     /// 首次尝试的 Unix 时间戳（秒）
-    /// <!-- Addresses finding: L-01 -->
     pub node_first_attempt_time: Option<f64>,
 }
 ```
 
 ### Managed Values（IsLastStep, RemainingSteps）
-
-<!-- Addresses finding: H-04 -->
 
 > 源码位置: `langgraph/libs/langgraph/langgraph/managed/is_last_step.py`
 
@@ -670,8 +645,6 @@ async fn agent_node(state: AgentState, runtime: &Runtime<()>) -> Result<Command<
 
 ### RunControl（协作式排空）
 
-<!-- Addresses finding: H-12 -->
-
 ```rust
 /// 运行级控制面：用于协作式优雅关闭
 ///
@@ -696,8 +669,6 @@ impl RunControl {
 ```
 
 ### 保留写入键
-
-<!-- Addresses finding: Part3#12 -->
 
 > 源码位置: `langgraph/libs/langgraph/_internal/_constants.py` — 保留键常量
 
@@ -755,7 +726,6 @@ pub struct Command<S: State> {
 > requiring state updates. This extends LangGraph's streaming model with application-specific event data.
 
 /// 路由指令
-/// <!-- Addresses finding: M-3 -->
 /// 注意：Goto 不再是泛型类型。Send 目标使用动态序列化状态。
 /// 这简化了类型签名和 proc-macro 生成代码。
 pub enum Goto {
@@ -777,7 +747,6 @@ pub enum Goto {
     End,
 }
 
-/// <!-- Addresses finding: M-3 -->
 /// Send API 的目标（非泛型版本）
 /// state 使用 serde_json::Value 以避免 Goto 的泛型参数
 pub struct SendTarget {
@@ -861,7 +830,6 @@ impl<S: State> Command<S> {
         Self { update: None, goto: Some(Goto::End), graph: GraphTarget::Current }
     }
 
-    /// <!-- Addresses finding: B-02-003 (code exceeds design) -->
     /// 附加 Resume 值用于中断恢复
     ///
     /// 当一个节点在中断前返回 Command 时，可以通过 with_resume() 预置
@@ -1021,7 +989,6 @@ struct CompiledGraphInner<S: State> {
 
 ### 6.2 执行方法
 
-<!-- Addresses finding: H-11 -->
 
 > 源码位置: `langgraph/libs/langgraph/langgraph/types.py:359` — `GraphOutput`
 
@@ -1064,7 +1031,6 @@ pub struct GraphOutputMetadata {
 ```
 impl<S: State + Serialize + DeserializeOwned> CompiledGraph<S> {
     /// 同步执行：运行图直到完成，返回 GraphOutput。
-    /// <!-- Addresses finding: M-12 -->
     /// context: 可选的每次调用上下文（覆盖编译时配置的 context_schema）。
     pub async fn invoke(
         &self,
@@ -1074,7 +1040,6 @@ impl<S: State + Serialize + DeserializeOwned> CompiledGraph<S> {
     ) -> Result<GraphOutput<S>, JunctureError>;
 
     /// 流式执行：返回 StreamEvent 流。
-    /// <!-- Addresses finding: M-12 -->
     /// context: 可选的每次调用上下文。
     pub async fn stream(
         &self,
@@ -1118,7 +1083,6 @@ impl<S: State + Serialize + DeserializeOwned> CompiledGraph<S> {
         as_node: Option<&str>,
     ) -> Result<RunnableConfig, JunctureError>;
 
-    /// <!-- Addresses finding: H-11 -->
     /// 批量更新状态（原子操作，创建单个 checkpoint）。
     /// 所有 updates 按顺序应用，as_node 指定每个 update 的来源节点。
     pub async fn bulk_update_state(
@@ -1135,7 +1099,6 @@ pub struct StateUpdate<S: State> {
     pub as_node: Option<String>,
 }
 
-/// <!-- Addresses finding: M-9 -->
 /// 状态历史查询过滤器
 pub struct StateFilter {
     /// 只返回指定 source 的 checkpoint
@@ -1149,7 +1112,6 @@ pub struct StateFilter {
 
 impl<S: State + Serialize + DeserializeOwned> CompiledGraph<S> {
     /// 获取 thread 的完整状态历史（支持过滤和分页）。
-    /// <!-- Addresses finding: M-9 -->
     pub async fn get_state_history(
         &self,
         config: &RunnableConfig,
@@ -1158,7 +1120,6 @@ impl<S: State + Serialize + DeserializeOwned> CompiledGraph<S> {
         limit: Option<usize>,
     ) -> Result<Vec<StateSnapshot<S>>, JunctureError>;
 
-    /// <!-- Addresses finding: M-10 -->
     /// 获取当前状态（可选择是否展开子图状态）。
     pub async fn get_state(
         &self,
@@ -1166,18 +1127,15 @@ impl<S: State + Serialize + DeserializeOwned> CompiledGraph<S> {
         subgraphs: bool,
     ) -> Result<StateSnapshot<S>, JunctureError>;
 
-    /// <!-- Addresses finding: M-11 -->
     /// 获取图的可视化表示（用于调试和文档生成）。
     /// xray: 可选深度，控制子图展开层级（None = 不展开，Some(0) = 一级子图）
     pub fn get_graph(&self, xray: Option<u32>) -> DrawableGraph;
 
-    /// <!-- Addresses finding: M-11 -->
     /// 获取图中所有子图信息。
     /// namespace: 可选命名空间过滤。recurse: 是否递归展开嵌套子图。
     pub fn get_subgraphs(&self, namespace: Option<&str>, recurse: bool) -> Vec<SubgraphInfo>;
 }
 
-/// <!-- Addresses finding: M-11 -->
 /// 可绘制的图结构（用于 Mermaid/DOT 导出）
 pub struct DrawableGraph {
     pub nodes: Vec<DrawableNode>,
@@ -1196,7 +1154,6 @@ pub struct DrawableEdge {
     pub label: Option<String>,
 }
 
-/// <!-- Addresses finding: M-11 -->
 /// 子图信息
 pub struct SubgraphInfo {
     pub name: String,
@@ -1238,7 +1195,6 @@ println!("{}", app.to_mermaid());
 
 ## 7. 函数式 API (entrypoint / task)
 
-<!-- Addresses finding: C-02 -->
 
 > 源码位置: `langgraph/libs/langgraph/langgraph/func/__init__.py` — `task()` 和 `entrypoint()` 装饰器
 
@@ -1333,7 +1289,6 @@ let graph = StateGraph::<WorkflowState>::new()
 
 ### 7.5 previous 状态访问
 
-<!-- Addresses finding: M-07 -->
 
 entrypoint 函数通过 Runtime 可以访问上一次执行的返回值，用于累积模式：
 
@@ -1356,7 +1311,6 @@ async fn accumulating_workflow(
 
 ### 7.6 entrypoint.final：区分返回值与保存值
 
-<!-- Addresses finding: H-10 -->
 
 > 参考: `langgraph/libs/langgraph/langgraph/func/__init__.py` — Final 类型
 
@@ -1412,10 +1366,8 @@ pub struct RunnableConfig {
     pub cancellation_token: Option<CancellationToken>,
     /// 预算配置。
     pub budget: Option<BudgetConfig>,
-    /// <!-- Addresses finding: L-4 -->
     /// 持久化模式（可选，覆盖 checkpointer 默认行为）。
     pub durability: Option<Durability>,
-    /// <!-- Addresses finding: L-5 -->
     /// 节点完成回调（每个节点执行完成后调用，用于进度报告）。
     pub node_finished_callback: Option<Arc<dyn Fn(&str, Duration) + Send + Sync>>,
     /// 用户自定义元数据（传递到 tracing span）。
@@ -1424,13 +1376,10 @@ pub struct RunnableConfig {
     pub tags: Vec<String>,
     /// HITL resume 时携带的人类输入（内部使用）。
     pub(crate) resume_value: Option<serde_json::Value>,
-    /// <!-- Addresses finding: M-16 -->
     /// 运行名称（用于日志和可观测性标识）。
     pub run_name: Option<String>,
-    /// <!-- Addresses finding: H-4 -->
     /// 缓存配置（用于节点级缓存）。
     pub cache: Option<CacheConfig>,
-    /// <!-- Addresses finding: M-2 -->
     /// Checkpoint 命名空间（子图隔离）。
     pub checkpoint_ns: Option<String>,
     /// 实现添加：HITL 中断控制（指定节点执行前/后触发中断）
@@ -1438,7 +1387,6 @@ pub struct RunnableConfig {
     pub interrupt_after: Option<Vec<String>>,
 }
 
-/// <!-- Addresses finding: H-4 -->
 /// 缓存配置（RunnableConfig 中的 cache 字段）
 #[derive(Clone, Debug)]
 pub struct CacheConfig {
@@ -1457,7 +1405,6 @@ impl RunnableConfig {
     pub fn with_budget(mut self, budget: BudgetConfig) -> Self { ... }
 }
 
-/// <!-- Addresses finding: H-3 -->
 /// 缓存策略配置
 ///
 /// 定义节点结果的缓存行为，支持自定义键生成。

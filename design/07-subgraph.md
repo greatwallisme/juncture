@@ -369,7 +369,6 @@ parent.add_subgraph_with_config(
 
 ### ParentCommand 传播
 
-<!-- Addresses finding: H-14 -->
 
 > 参考: `langgraph/errors.py:128` — ParentCommand
 
@@ -762,7 +761,7 @@ let app = parent.compile(CompileConfig {
 
 ---
 
-## 6. SubgraphTransformer（<!-- Addresses finding: M-8 -->）
+## 6. SubgraphTransformer
 
 > 参考: `langgraph/channels/transform.py` — SubgraphTransformer 类
 

@@ -54,7 +54,6 @@ class CheckpointMetadata:
 - 周期性存储一次完整快照（delta snapshot）
 - 恢复时：找到最近的快照，向前重放所有增量 writes
 
-<!-- Addresses finding: Part3#20 -->
 **DeltaSnapshot 设计**：
 
 > 参考: `langgraph/pregel/_checkpoint.py:65-130`
@@ -144,7 +143,6 @@ pub trait CheckpointSaver: Send + Sync + 'static {
     ) -> Result<RunnableConfig, CheckpointError>;
 
     /// 增量保存单个节点的写入（节点执行完成后立即调用）
-    /// <!-- Addresses finding: Part3#5 -->
     /// task_id 使用层级路径格式："{superstep_idx}/{node_name}/{attempt}"
     /// 层级路径支持按 superstep、节点、重试次数排序和过滤
     /// 参考: `langgraph/checkpoint/base/__init__.py:300`
@@ -200,22 +198,18 @@ pub struct Checkpoint {
     // ─── 以下为审查补充字段 ───
 
     /// Checkpoint 格式版本号
-    /// <!-- Addresses finding: Part3#7 -->
     /// 用于前向兼容：当 Checkpoint 结构变更时，通过 v 字段识别格式
     /// v=1: 初始格式, v=2: 增加 new_versions, ...
     pub v: u32,
 
     /// 本 superstep 中哪些 channel 被更新了
-    /// <!-- Addresses finding: Part3#6 -->
     /// key 为 channel 名称，value 为更新后的版本号
     /// 用于增量 checkpoint 和 DeltaChannel 优化
     /// 参考: `langgraph/checkpoint/base/__init__.py:277`
     pub new_versions: HashMap<String, u64>,
 
     /// DeltaChannel 优化元数据
-    /// <!-- Addresses finding: Part3#21 -->
     /// 自上次完整 snapshot 以来的变更计数器
-    /// <!-- Addresses finding: C-5 -->
     /// 变更为结构化 DeltaCounters，替代原始 u64 计数器
     /// 参考: `langgraph/checkpoint/base/__init__.py:63`
     pub counters_since_delta_snapshot: HashMap<String, DeltaCounters>,
@@ -224,7 +218,6 @@ pub struct Checkpoint {
 
 ### 3.2 DeltaCounters
 
-<!-- Addresses finding: M-6 -->
 
 > Send 对象通过 `__pregel_tasks` Topic Channel 流动
 
@@ -256,7 +249,6 @@ pub struct SerializedSend {
 
 ### 3.3 DeltaCounters (结构)
 
-<!-- Addresses finding: C-5 -->
 
 <!-- Note: See section 3.2 above for DeltaCounters struct definition -->
 
@@ -286,7 +278,6 @@ pub struct CheckpointMetadata {
     /// superstep 序号
     pub step: i64,
 
-    /// <!-- Addresses finding: L-3 -->
     /// 本次 superstep 中每个节点的写入摘要
     /// 注意：此字段是 Juncture 扩展，不在 LangGraph 标准规范中。
     /// LangGraph 的 CheckpointMetadata 仅包含 source, step, parents, run_id。
@@ -300,7 +291,7 @@ pub struct CheckpointMetadata {
     pub run_id: String,
 }
 
-// > **实现备注 (C-04-003)**: 实际实现使用了双错误类型系统以支持更精细的错误处理。
+// > 实际实现使用了双错误类型系统以支持更精细的错误处理。
 // > 除了上述 `CheckpointError`（用于存储/序列化错误）外，实现引入了 `CheckpointPutError`
 // > 专门用于 `put()` 操作失败。这种分离允许调用者在无需检查错误消息字符串的情况下，
 // > 区分"checkpoint 数据无效"错误和"存储后端拒绝写入"错误，从而支持更有针对性的重试
@@ -319,7 +310,7 @@ pub enum CheckpointSource {
     Fork,
 }
 
-// > **实现备注 (C-04-001)**: 实际实现增加了 `CheckpointSource::Interrupt` 变体用于
+// > 实际实现增加了 `CheckpointSource::Interrupt` 变体用于
 // > human-in-the-loop (HITL) 工作流。当节点触发中断时（通过 `Command::interrupt`），
 // > 在该点保存的 checkpoint 被标记为 `source: Interrupt`。这允许 `get_state_history`
 // > 过滤器区分 HITL 暂停点和正常执行 checkpoint，使 UI 能够显示"等待人工输入"状态
@@ -417,7 +408,7 @@ pub struct PendingTask {
     pub state_override: Option<serde_json::Value>,
 }
 
-// > **实现备注 (D-04-1)**: checkpoint 模块中用于 checkpoint 数据的类型命名为
+// > checkpoint 模块中用于 checkpoint 数据的类型命名为
 // > `CheckpointPendingTask` 而非 `PendingTask`，以避免与 `pregel::types::PendingTask`
 // > 的命名冲突。两者字段语义相同但属于不同模块的类型。
 ```
@@ -579,9 +570,8 @@ CREATE INDEX IF NOT EXISTS idx_checkpoints_thread_time
 
 ## 5. 序列化策略
 
-### 5.1 默认：MessagePack（<!-- Addresses finding: R-A6-1 -->）
+### 5.1 默认：MessagePack
 
-<!-- Addresses finding: R-A6-1 -->
 **MessagePack 是默认序列化格式**，JSON 作为备用选项：
 
 - **性能优先**：MessagePack 是二进制格式，体积比 JSON 小 30-40%，序列化/反序列化速度快 2-3 倍
@@ -590,7 +580,6 @@ CREATE INDEX IF NOT EXISTS idx_checkpoints_thread_time
 - **调试友好**：开发环境可选择 JSON 格式便于检查
 
 ```rust
-/// <!-- Addresses finding: R-A6-1 -->
 /// 序列化格式枚举
 #[derive(Clone, Debug, Default)]
 pub enum SerializationFormat {
@@ -649,7 +638,6 @@ pub trait CheckpointSerializer: Send + Sync + 'static {
 // > 这些方法提供无类型（untyped）的序列化路径，用于 checkpoint 内部存储 channel_values 等
 // > 已是 `serde_json::Value` 形式的数据，避免不必要的泛型序列化开销。
 
-/// <!-- Addresses finding: R-A6-1 -->
 /// MessagePack 序列化器（默认）
 pub struct MsgpackSerializer;
 
@@ -695,15 +683,13 @@ Checkpoint 中存储 `schema_version`。加载时：
 
 迁移函数操作的是 `serde_json::Value`，不依赖旧版本的 struct 定义。
 
-### 5.5 加密序列化器（<!-- Addresses finding: L-5 -->）
+### 5.5 加密序列化器
 
 > 参考: `langgraph/checkpoint/sereal.py` — 加密序列化器（Python 实现）
 
 对于包含敏感信息的 checkpoint，提供 AES-256-GCM 加密序列化器：
 
 ```rust
-
-<!-- Addresses finding: M-10 -->
 
 对于包含敏感信息的 checkpoint，提供加密序列化器：
 
@@ -759,7 +745,7 @@ impl CheckpointSerializer for EncryptedSerializer {
 - 开发环境：从环境变量 `JUNCTURE_ENCRYPTION_KEY` 读取
 - 生产环境：从 KMS（AWS KMS / HashiCorp Vault）获取
 
-### 5.6 JsonPlusSerializer（<!-- Addresses finding: M-17 -->）
+### 5.6 JsonPlusSerializer
 
 > 参考: `langgraph/checkpoint/json.py` — JsonPlusSerializer
 
@@ -808,13 +794,10 @@ let encrypted = EncryptedSerializer::new(
 
 ### 5.7 缓存后端 (BaseCache)
 
-<!-- Addresses finding: M-11 -->
-
 ```rust
 /// Checkpoint 缓存 trait
 /// 用于缓存最近的 checkpoint，避免频繁访问持久化后端
 ///
-/// <!-- Addresses finding: L-16 -->
 /// key 参数扩展为 (namespace, key) 元组，支持子图隔离缓存。
 #[async_trait]
 pub trait BaseCache: Send + Sync + 'static {
@@ -843,8 +826,6 @@ struct CacheEntry {
 CheckpointSaver 实现可在 `get_tuple()` 时先查缓存，未命中再查持久化层。
 
 ### 5.7 Checkpoint TTL（自动过期）
-
-<!-- Addresses finding: M-12 -->
 
 ```rust
 /// Checkpoint 过期配置
