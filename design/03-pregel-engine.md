@@ -294,7 +294,13 @@ pub enum LoopStatus {
 pub struct SuperstepResult<S: State> {
     /// 每个节点的输出（按完成顺序）
     pub task_outputs: Vec<TaskOutput<S>>,
+    /// 子图冒泡事件（中断、排空、父命令），需要由父 PregelLoop 处理
+    pub bubble_ups: Vec<BubbleUp<S>>,
 }
+
+// > **实现备注 (C-03-004)**: 实际实现中 `SuperstepResult` 额外包含 `bubble_ups: Vec<BubbleUp<S>>` 字段。
+// > 该字段包含从嵌套子图执行中冒泡的事件（中断、排空、父命令），父 PregelLoop 需要处理这些事件。
+// > 这支持子图到父图的控制流传播，符合 LangGraph 的 GraphBubbleUp 语义。
 
 /// 单个任务的输出
 pub struct TaskOutput<S: State> {
@@ -303,11 +309,18 @@ pub struct TaskOutput<S: State> {
     pub command: Command<S>,
     pub duration: Duration,
     pub trigger: TaskTrigger,  // PULL/PUSH 来源，用于 merge 阶段确定性排序
+    pub triggered_fields: Vec<usize>,  // 触发该任务的字段索引，用于细粒度 consumption
+    pub error: Option<JunctureError>,  // 执行错误（如果有），用于错误恢复
 }
 
 // > **实现备注 (D-03-4)**: 实际实现中 `TaskOutput` 额外包含 `trigger: TaskTrigger` 字段。
 // > 该字段记录任务是 PULL（边触发）还是 PUSH（Send API 触发，含 send index），
 // > 用于 merge 阶段的确定性排序：PULL tasks 按节点名字母序，PUSH tasks 按 send index 排序。
+//
+// > **实现备注 (C-03-003)**: 实际实现中 `TaskOutput` 额外包含 `triggered_fields: Vec<usize>` 和
+// > `error: Option<JunctureError>` 字段：
+// > - `triggered_fields` 记录哪些字段的更新导致该任务被调度，用于细粒度 consumption
+// > - `error` 在节点有注册的 error_handler 时包含错误信息，用于错误恢复
 ```
 
 
@@ -535,8 +548,17 @@ invoke(input, config)
     │     **Delta Counter 优化**: checkpoint 性能通过 delta 计数器优化  │
     │     HashMap<String, DeltaCounters> 追踪自上次完整快照        │
     │     以来的更新和 superstep 数，仅在必要时执行完整快照。       │
-    │     DeltaCounters 包含 writes_since_last_snapshot 和          │
-    │     supersteps_since_last_snapshot 字段。                     │
+    │                                                              │
+    │     DeltaCounters 基础设施 (C-03-007):                      │
+    │     - PregelLoop.delta_counters: HashMap<String, DeltaCounters> │
+    │     - DeltaCounters { writes_since_last_snapshot, supersteps_since_last_snapshot } │
+    │     - update(): 每次写操作后增加计数器                       │
+    │     - reset(): 完整快照后重置计数器                          │
+    │     - should_take_full_snapshot(): 检查是否需要完整快照      │
+    │                                                              │
+    │     注意: 当前实现总是保存完整快照。Delta 计数器基础设施已就位，│
+    │     但增量快照格式和恢复逻辑需要扩展以支持部分快照。完整快照更简单，│
+    │     并保证恢复正确性。增量快照可作为未来优化添加。            │
     │                                                              │
     │  f. 检查 interrupt_after                                     │
     │     当前执行的节点中有在 interrupt_after 集合中的?             │
@@ -946,6 +968,10 @@ fn finish_all_channels<S: State>(
 
 `finish()` 的调用条件：当 `compute_next_tasks()` 返回空的任务列表时（所有活跃路径都到达 END，或无更多节点被 channel 更新触发）。
 
+> **实现备注 (C-03-005)**: 实际实现中 `PregelLoop` 包含 `channels_finished: bool` 字段防止重复调用。
+> 该标志确保 `finish_all_channels()` 在每次执行中只调用一次，即使有多个终止路径（中断、取消、预算、递归限制等）。
+> 多次调用会导致冗余操作，并可能引起 `LastValueAfterFinishChannel` 语义问题。
+
 ### 5.6 确定性保证
 
 | 因素 | 保证方式 |
@@ -977,16 +1003,16 @@ pub struct TriggerToNodes {
 
 impl TriggerToNodes {
     /// 从编译后的 TriggerTable 构建
-    pub fn from_trigger_table(table: &TriggerTable) -> Self {
+    pub fn from_trigger_table<S: State>(table: &TriggerTable<S>) -> Self {
         let mut mapping: HashMap<String, HashSet<String>> = HashMap::new();
         for (node_name, sources) in &table.incoming {
             for source in sources {
                 match source {
-                    TriggerSource::Edge { from: _ } => {
-                        // 边触发的节点通过边关系表直接调度
-                    }
-                    TriggerSource::Send { from: _ } => {
-                        // Send 触发通过 Send 列表直接调度
+                    TriggerSource::Edge { from } | TriggerSource::Send { from } => {
+                        mapping
+                            .entry(from.clone())
+                            .or_default()
+                            .insert(node_name.clone());
                     }
                 }
             }
@@ -1005,9 +1031,10 @@ impl TriggerToNodes {
 }
 ```
 
-**优化集成状态**: `TriggerToNodes` 已完全集成到调度路径。
+> **实现备注 (C-03-006)**: `TriggerToNodes` 已完全集成到调度路径。
 > `compute_next_tasks()` 使用 `triggered_nodes()` 方法基于更新的 channels
 > 高效确定需要调度的节点，将 O(nodes) 复杂度降低为 O(triggered_nodes)。
+> 反向映射在编译时从 `TriggerTable` 构建，调度时只需查询。
 
 ```rust
 // juncture-core/src/pregel/scheduler.rs
@@ -1718,6 +1745,105 @@ impl<S: State> Node<S> for RetryingNode<S> {
 }
 ```
 
+### 11.2 心跳机制 (Heartbeat)
+
+> 参考: 实现备注 (C-03-005) — 空闲超时和心跳信号
+
+心跳机制用于长运行节点发送活跃信号，防止空闲超时误检。通过 `Heartbeat` 和 `HeartbeatWatcher` 类型，节点可以定期发送心跳信号，引擎的空闲超时看门狗每次收到 `ping()` 时重置计时器。
+
+```rust
+/// 心跳发送器
+///
+/// 长运行节点应定期调用 `ping()` 发送活跃信号，防止空闲超时误检。
+/// 心跳携带一个无界通道发送端，每次调用 `ping()` 时向引擎的空闲超时看门狗发送信号。
+///
+/// 创建配对的心跳发送器和监视器：
+///
+/// ```ignore
+/// use juncture_core::Heartbeat;
+/// use std::time::Duration;
+///
+/// let (heartbeat, mut watcher) = Heartbeat::new_pair();
+/// heartbeat.ping().unwrap();
+/// assert!(watcher.is_alive(Duration::from_secs(10)));
+/// ```
+pub struct Heartbeat {
+    tx: tokio::sync::mpsc::UnboundedSender<()>,
+    _rx: Option<tokio::sync::mpsc::UnboundedReceiver<()>>,
+}
+
+impl Clone for Heartbeat {
+    fn clone(&self) -> Self {
+        Self {
+            tx: self.tx.clone(),
+            _rx: None, // 只有原始 Heartbeat 保留接收端
+        }
+    }
+}
+
+impl Heartbeat {
+    /// 从无界通道发送端创建心跳
+    pub const fn new(tx: tokio::sync::mpsc::UnboundedSender<()>) -> Self {
+        Self { tx, _rx: None }
+    }
+
+    /// 创建配对的心跳发送器和监视器
+    ///
+    /// 返回通过无界通道连接的 `(Heartbeat, HeartbeatWatcher)` 对。
+    /// 监视器可以通过检查心跳是否在空闲超时内到达来检测停滞。
+    pub fn new_pair() -> (Self, HeartbeatWatcher) {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let watcher = HeartbeatWatcher::new(rx);
+        (Self { tx, _rx: None }, watcher)
+    }
+
+    /// 发送心跳信号
+    ///
+    /// # Errors
+    ///
+    /// 如果通道已关闭（监视器被丢弃），返回错误。
+    pub fn ping(&self) -> Result<(), JunctureError> {
+        self.tx.send(()).map_err(|_| JunctureError::execution("heartbeat channel closed".into()))
+    }
+}
+
+/// 心跳监视器
+///
+/// 监视心跳信号，通过检查最近一次心跳到达时间来检测节点是否停滞。
+pub struct HeartbeatWatcher {
+    rx: tokio::sync::mpsc::UnboundedReceiver<()>,
+    last_ping: std::time::Instant,
+}
+
+impl HeartbeatWatcher {
+    /// 从无界通道接收端创建监视器
+    pub fn new(rx: tokio::sync::mpsc::UnboundedReceiver<()>) -> Self {
+        Self {
+            rx,
+            last_ping: std::time::Instant::now(),
+        }
+    }
+
+    /// 检查节点是否在给定的空闲超时内存活
+    ///
+    /// 如果最近一次心跳在 `idle_timeout` 内到达，返回 `true`。
+    pub fn is_alive(&mut self, idle_timeout: Duration) -> bool {
+        // 尝试接收所有待处理的心跳
+        while let Ok(()) = self.rx.try_recv() {
+            self.last_ping = std::time::Instant::now();
+        }
+        self.last_ping.elapsed() < idle_timeout
+    }
+}
+```
+
+**集成到 TimeoutPolicy**: `idle_timeout` 通过 Heartbeat 机制实现。
+> 每个 task 创建 Heartbeat Sender 对，节点定期调用 `heartbeat.ping()` 发送心跳。
+> tokio::select! 并发检查：超时分支、心跳分支、执行分支。
+> 心跳接收时刷新 idle_timer，实现空闲检测而非总运行时间限制。
+
+**Runtime 集成**: `Runtime<C>` 包含 `heartbeat: Heartbeat` 字段，节点通过 `runtime.heartbeat().ping()` 发送心跳信号。
+
 > 参考: `langgraph/types.py:439` — TimeoutPolicy
 > 参考: `langgraph/errors.py:167` — NodeTimeoutError
 
@@ -2060,6 +2186,9 @@ pub enum SyncAsyncFuture<T> {
 
 impl<T> SyncAsyncFuture<T> {
     /// 阻塞获取结果（如果还未就绪，则等待）
+    ///
+    /// 返回 `Result<T, JunctureError>` 以支持错误传播，遵循 Rust 错误处理惯用法。
+    /// `Ready(None)` 情况返回错误而非 panic，因为这是可恢复的状态（例如任务被取消）。
     pub async fn result(self) -> Result<T, JunctureError> {
         match self {
             SyncAsyncFuture::Ready(Some(value)) => Ok(value),

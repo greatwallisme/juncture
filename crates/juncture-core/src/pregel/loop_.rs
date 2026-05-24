@@ -774,6 +774,13 @@ impl<S: State> PregelLoop<S> {
     where
         S: Clone + serde::Serialize,
     {
+        // CRITICAL: Capture current field versions BEFORE any mutations (A-001 fix).
+        // versions_seen must record the channel state that existed when tasks
+        // were executing, not after apply_writes() modifies the versions.
+        // This ensures node activation semantics match LangGraph design:
+        // nodes activate based on pre-superstep versions, not post-superstep.
+        let versions_before_apply = self.field_versions.versions().to_vec();
+
         // Apply writes from completed tasks using path-based deterministic merge order.
         // apply_writes sorts by trigger type (PULL before PUSH) then by node name / send
         // index so that concurrent writes to the same field produce a deterministic result
@@ -804,11 +811,12 @@ impl<S: State> PregelLoop<S> {
         let fields_to_consume = self.previous_superstep_changed_fields.clone();
         self.consume_triggered_channels(&fields_to_consume);
 
-        // Mark versions as consumed after bumping
+        // Mark versions as consumed using the versions captured BEFORE apply_writes (A-001 fix).
+        // This records the channel state that existed when tasks were executing,
+        // ensuring node activation semantics match the design specification.
         for task_output in &result.task_outputs {
-            let current_versions = self.field_versions.versions().to_vec();
             self.versions_seen
-                .mark_consumed(&task_output.node_name, &current_versions);
+                .mark_consumed(&task_output.node_name, &versions_before_apply);
         }
 
         // Reset ephemeral fields
@@ -1474,7 +1482,14 @@ impl<S: State> PregelLoop<S> {
         // snapshot_frequency thresholds. When no delta channel has crossed
         // the threshold, the pending writes from put_writes() are sufficient
         // for crash recovery and a full snapshot is unnecessary.
-        // TODO: use this decision to emit delta-only checkpoints when false.
+        //
+        // Note: Delta-only checkpoint emission is not currently implemented.
+        // The infrastructure for tracking delta counts is in place, but the
+        // checkpoint format and recovery logic would need to be extended to
+        // support partial checkpoints. Current implementation always takes
+        // full snapshots, which is simpler and guarantees recovery correctness.
+        // Delta-only checkpoints could be added as a future optimization for
+        // workloads with large states and infrequent full snapshots.
         let needs_full_snapshot = self.should_take_full_snapshot();
         tracing::debug!(
             name = "juncture.checkpoint.superstep.delta_decision",
