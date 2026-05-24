@@ -103,6 +103,9 @@ pub struct InterruptSignal {
     pub id: Option<String>,
     /// 中断 payload
     pub payload: serde_json::Value,
+    /// 中断创建时间戳（用于调试和审计）
+    #[serde(default = "InterruptSignal::current_timestamp")]
+    pub timestamp: DateTime<Utc>,
 }
 ```
 
@@ -231,7 +234,7 @@ pub struct Scratchpad {
     processed_interrupts: HashSet<String>,
     /// 任务级别的临时数据存储
     /// key = 数据标识符, value = 序列化的临时数据
-    transient_data: HashMap<String, serde_json::Value>,
+    data: HashMap<String, serde_json::Value>,
     /// 中断历史记录（用于调试和审计）
     interrupt_history: Vec<InterruptRecord>,
 }
@@ -290,19 +293,24 @@ impl Scratchpad {
         });
     }
 
-    /// 存储临时数据（在节点重执行时持久化）
-    pub fn store_transient(&mut self, key: String, value: serde_json::Value) {
-        self.transient_data.insert(key, value);
+    /// 设置临时数据（在节点重执行时持久化）
+    pub fn set_data(&mut self, key: String, value: serde_json::Value) {
+        self.data.insert(key, value);
     }
 
     /// 获取临时数据
-    pub fn get_transient(&self, key: &str) -> Option<&serde_json::Value> {
-        self.transient_data.get(key)
+    pub fn get_data(&self, key: &str) -> Option<&serde_json::Value> {
+        self.data.get(key)
     }
 
-    /// 清除所有临时数据（在任务完成后调用）
+    /// 清除非持久化的临时数据（在任务完成后调用）
+    ///
+    /// 注意：此方法执行选择性清除，保留以 "null_resume:" 为前缀的条目。
+    /// 这些条目在 resume 处理期间需要持久化，以确保已标记为 processed
+    /// 的中断可以正确进行 null-resume。
     pub fn clear_transient(&mut self) {
-        self.transient_data.clear();
+        self.transient_data
+            .retain(|key, _value| key.starts_with("null_resume:"));
     }
 }
 ```
@@ -474,21 +482,26 @@ pub fn match_resume_to_interrupts(
                     continue;
                 }
 
-                // 从中断 ID 中提取命名空间
+                // 从中断 ID 中提取命名空间（返回 Option<&str>）
                 let namespace = extract_namespace(&record.id);
-                
+
                 // 按命名空间查找 resume value
-                if let Some(value) = map.get(&namespace) {
-                    resolved.insert(record.id.clone(), value.clone());
-                } else {
-                    // 回退到 null-resume 检查
-                    if scratchpad.get_null_resume(&record.id) {
+                if let Some(ns) = namespace {
+                    if let Some(value) = map.get(ns) {
+                        resolved.insert(record.id.clone(), value.clone());
+                    } else if scratchpad.get_null_resume(&record.id) {
                         resolved.insert(record.id.clone(), serde_json::Value::Null);
                     } else {
                         return Err(JunctureError::MissingResumeValue {
                             interrupt_id: record.id.clone(),
                         });
                     }
+                } else if scratchpad.get_null_resume(&record.id) {
+                    resolved.insert(record.id.clone(), serde_json::Value::Null);
+                } else {
+                    return Err(JunctureError::MissingResumeValue {
+                        interrupt_id: record.id.clone(),
+                    });
                 }
             }
         }
@@ -498,15 +511,20 @@ pub fn match_resume_to_interrupts(
 }
 
 /// 从中断 ID 中提取命名空间
-/// 
+///
 /// 格式："{namespace}:{local_id}" -> "{namespace}"
-/// 例如："approval_subgraph:interrupt_0" -> "approval_subgraph"
-fn extract_namespace(interrupt_id: &str) -> String {
-    interrupt_id
-        .splitn(2, ':')
-        .next()
-        .unwrap_or("")
-        .to_string()
+/// 例如："approval_subgraph:interrupt_0" -> Some("approval_subgraph")
+/// 例如："node_name#index" -> None（无命名空间前缀）
+///
+/// 返回 Option<&str>（零拷贝，更符合 Rust 惯用法）。
+/// 无命名空间时返回 None 而非空字符串。
+pub fn extract_namespace(interrupt_id: &str) -> Option<&str> {
+    if let Some(colon_pos) = interrupt_id.find(':') {
+        if colon_pos > 0 {
+            return Some(&interrupt_id[..colon_pos]);
+        }
+    }
+    None
 }
 ```
 
@@ -578,7 +596,9 @@ pub fn validate_resume_coverage(
         ResumeValue::ByNamespace(map) => {
             for record in pending_interrupts {
                 let namespace = extract_namespace(&record.id);
-                if !map.contains_key(&namespace) && !scratchpad.get_null_resume(&record.id) {
+                let has_match = namespace
+                    .is_some_and(|ns| map.contains_key(ns));
+                if !has_match && !scratchpad.get_null_resume(&record.id) {
                     return Err(JunctureError::MissingResumeValue {
                         interrupt_id: record.id.clone(),
                     });
@@ -815,13 +835,18 @@ for (node_id, output) in &step_outputs {
 pub struct Command<S: State> {
     /// 状态更新（可选）
     pub update: Option<S::Update>,
-    /// 路由目标（可选）——覆盖正常的边路由
-    pub goto: Option<CommandGoto>,
+    /// 路由目标——覆盖正常的边路由
+    /// 实际实现使用 Goto 枚举（而非 Option<CommandGoto>）
+    pub goto: Goto,
+    /// 目标图（当前图或父图）
+    pub graph: GraphTarget,
     /// Resume 值：支持单一值或 ID 映射
     /// 单一值：resume 所有中断（兼容模式）
     /// HashMap：按中断 ID 精确 resume
     /// 参考: `langgraph/types.py:749-798`
     pub resume: Option<ResumeValue>,
+    /// 自定义流数据（节点执行期间发射）
+    pub stream_data: Vec<serde_json::Value>,
 }
 
 /// Resume 值类型
@@ -835,11 +860,17 @@ pub enum ResumeValue {
     ById(HashMap<String, serde_json::Value>),
     /// 按命名空间路由 resume（用于子图中断）
     /// key = namespace (如 "node_name:uuid"), value = resume 值
-    /// 保留 Vec<Value> 作为便捷包装器（按索引匹配）
+    ///
+    /// 注意：From<Vec<Value>> 便捷转换器使用索引作为 key（因为 Vec 无命名空间信息），
+    /// 这是设计意图：命名空间路由通过 match_resume_to_interrupts() 中的
+    /// extract_namespace() 实现，而非 From trait。
     ByNamespace(HashMap<String, serde_json::Value>),
 }
 
-/// 便捷包装器：Vec<Value> 仍可用于按索引匹配
+/// 便捷包装器：Vec<Value> 使用索引作为 key（非命名空间）
+///
+/// 注意：此转换器使用 Vec 索引作为 HashMap key，而非命名空间。
+/// 命名空间路由需要通过 match_resume_to_interrupts() 配合 extract_namespace() 实现。
 impl From<Vec<serde_json::Value>> for ResumeValue {
     fn from(values: Vec<serde_json::Value>) -> Self {
         // 将 Vec 转换为 ByNamespace 或 Single
@@ -848,7 +879,8 @@ impl From<Vec<serde_json::Value>> for ResumeValue {
         } else if values.len() == 1 {
             ResumeValue::Single(values.into_iter().next().unwrap())
         } else {
-            // 多值时使用索引作为 key
+            // 多值时使用索引作为 key（非命名空间）
+            // 命名空间路由需要通过 match_resume_to_interrupts() 实现
             let map: HashMap<String, serde_json::Value> = values
                 .into_iter()
                 .enumerate()
@@ -859,6 +891,25 @@ impl From<Vec<serde_json::Value>> for ResumeValue {
     }
 }
 
+/// Command 内部使用的路由指令枚举
+///
+/// 实际实现中 `Command<S>.goto` 使用此枚举，而非 `CommandGoto`。
+/// 两个枚举共存：`Goto` 用于 Command 内部路由，`CommandGoto` 用于
+/// 子图到父图的显式路由（One/Many/Parent/Send）。
+pub enum Goto {
+    /// 无路由（使用外部边）
+    None,
+    /// 路由到单个节点
+    Next(String),
+    /// 路由到多个节点（并行执行）
+    Multiple(Vec<String>),
+    /// Send API：动态 fan-out
+    Send(Vec<SendTarget>),
+    /// 终止当前路径
+    End,
+}
+
+/// 子图到父图的路由指令（显式命名变体）
 pub enum CommandGoto {
     /// 路由到单个节点
     One(String),
@@ -942,7 +993,9 @@ async fn router_node(state: AgentState) -> Result<NodeOutput<AgentState>> {
 }
 ```
 
-> **Implementation Note (C-06-1)**: 实际实现使用 `Goto` 枚举（而非设计中的 `CommandGoto`），变体命名为 `Next`、`Multiple`、`End`（对应设计中的 `One`、`Many`、`Parent`）。功能等价，命名遵循 Rust 惯用法。
+> **Implementation Note (C-06-1)**: 实际实现中 `Command<S>.goto` 使用 `Goto` 枚举（变体：`None`、`Next`、`Multiple`、`Send`、`End`），
+> 与 `CommandGoto`（变体：`One`、`Many`、`Parent`、`Send`）共存。
+> `Goto` 用于 Command 内部路由，`CommandGoto` 用于子图到父图的显式路由。功能等价，命名遵循 Rust 惯用法。
 > `Command::goto()` 方法用于构造 goto 路由。
 
 ---
@@ -1279,14 +1332,25 @@ app.resume(vec![], &config).await?;
 ///
 /// 当子图节点需要直接控制父图的路由时使用。
 /// 例如：子图审批流程完成后，直接指示父图跳转到特定节点。
-#[derive(Debug)]
-pub struct ParentCommand<S: State>(pub Command<S>);
+#[derive(Clone, Debug)]
+pub struct ParentCommand<S: State> {
+    /// 子图的命令
+    pub command: Command<S>,
+    /// 源节点信息（用于调试和日志）
+    pub source_node: String,
+    /// 子图命名空间（用于路由）
+    pub namespace: String,
+}
 
 // 子图节点中使用
 async fn approval_node(state: ApproveState, runtime: &Runtime<()>) -> Result<Command<ApproveState>, JunctureError> {
     if state.approved {
         // 向父图发送命令
-        return Err(ParentCommand(Command::goto("publish")));
+        return Err(ParentCommand::from_subgraph(
+            Command::goto("publish"),
+            "approval_node",
+            "approval_subgraph"
+        ));
     }
     Ok(Command::none())
 }

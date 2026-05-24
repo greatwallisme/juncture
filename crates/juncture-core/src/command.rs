@@ -107,18 +107,56 @@ pub enum CommandGoto {
 
 /// Command wrapper for subgraph-to-parent communication
 ///
-/// This newtype wrapper is used as an exception mechanism for subgraph nodes
-/// to send commands to their parent graph. It wraps a `Command<S>` where `S`
-/// is the parent graph's state type.
+/// This wrapper is used as an exception mechanism for subgraph nodes
+/// to send commands to their parent graph, along with metadata about
+/// the source node and namespace.
 ///
 /// # Type Parameters
 ///
 /// * `S` - The parent graph's state type
-pub struct ParentCommand<S: State>(pub Command<S>);
+///
+/// # Fields
+///
+/// * `command` - The command to send to the parent graph
+/// * `source_node` - The name of the subgraph node sending this command (for debugging and logging)
+/// * `namespace` - The subgraph namespace for routing purposes
+#[derive(Clone)]
+pub struct ParentCommand<S: State> {
+    /// The command to send to the parent graph
+    pub command: Command<S>,
+
+    /// Source node information (for debugging and logging)
+    pub source_node: String,
+
+    /// Subgraph namespace (for routing)
+    pub namespace: String,
+}
+
+impl<S: State> ParentCommand<S> {
+    /// Create a new `ParentCommand` from a subgraph
+    ///
+    /// # Arguments
+    ///
+    /// * `command` - The command to send to the parent graph
+    /// * `source_node` - The name of the subgraph node sending this command
+    /// * `namespace` - The subgraph namespace for routing
+    #[must_use]
+    pub fn from_subgraph(command: Command<S>, source_node: &str, namespace: &str) -> Self {
+        Self {
+            command,
+            source_node: source_node.to_string(),
+            namespace: namespace.to_string(),
+        }
+    }
+}
 
 impl<S: State> std::fmt::Debug for ParentCommand<S> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_tuple("ParentCommand").field(&"<command>").finish()
+        f.debug_struct("ParentCommand")
+            .field("command", &"<command>")
+            .field("source_node", &self.source_node)
+            .field("namespace", &self.namespace)
+            .finish()
     }
 }
 

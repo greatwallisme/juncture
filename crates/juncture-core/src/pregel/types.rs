@@ -184,8 +184,8 @@ pub enum BubbleUp<S: State> {
     /// Graph was drained
     Drained(GraphDrained),
 
-    /// Normal command return from subgraph
-    ParentCommand(crate::Command<S>),
+    /// Normal command return from subgraph with metadata
+    ParentCommand(crate::command::ParentCommand<S>),
 }
 
 impl<S: State> std::fmt::Debug for BubbleUp<S> {
@@ -193,7 +193,11 @@ impl<S: State> std::fmt::Debug for BubbleUp<S> {
         match self {
             Self::Interrupt(arg0) => f.debug_tuple("Interrupt").field(arg0).finish(),
             Self::Drained(arg0) => f.debug_tuple("Drained").field(arg0).finish(),
-            Self::ParentCommand(_) => f.debug_tuple("ParentCommand").field(&"<command>").finish(),
+            Self::ParentCommand(cmd) => f
+                .debug_struct("ParentCommand")
+                .field("source_node", &cmd.source_node)
+                .field("namespace", &cmd.namespace)
+                .finish(),
         }
     }
 }

@@ -231,27 +231,43 @@ pub const HIDDEN_TAG: &str = "__hidden__";
 
 /// Check if a node name indicates a hidden (internal) node.
 ///
-/// A node is considered hidden when its name both starts and ends with `__`,
-/// following the convention established by `LangGraph`'s `TAG_HIDDEN` mechanism.
+/// A node is considered hidden when either:
+/// 1. Its name both starts and ends with `__` (e.g., `__route__`, `__internal__`)
+/// 2. It has the `__hidden__` tag in its tags list
+///
+/// This follows the convention established by `LangGraph`'s `TAG_HIDDEN` mechanism.
 ///
 /// Hidden nodes are filtered from:
 /// - `interrupt_before` / `interrupt_after` checks via [`should_interrupt`]
 /// - `StreamEvent::Interrupt` emission in the Pregel loop
+///
+/// # Arguments
+///
+/// * `node_name` - The name of the node to check
+/// * `tags` - The tags associated with the node
 ///
 /// # Examples
 ///
 /// ```
 /// use juncture_core::interrupt::is_hidden_node;
 ///
-/// assert!(is_hidden_node("__route__"));
-/// assert!(is_hidden_node("__internal_router__"));
-/// assert!(!is_hidden_node("my_node"));
-/// assert!(!is_hidden_node("__incomplete"));
-/// assert!(!is_hidden_node("normal__"));
+/// // Hidden by name pattern
+/// assert!(is_hidden_node("__route__", &[]));
+/// assert!(is_hidden_node("__internal_router__", &[]));
+/// assert!(!is_hidden_node("my_node", &[]));
+/// assert!(!is_hidden_node("__incomplete", &[]));
+/// assert!(!is_hidden_node("normal__", &[]));
+///
+/// // Hidden by tag
+/// assert!(is_hidden_node("my_node", &vec!["__hidden__".to_string()]));
+/// assert!(!is_hidden_node("my_node", &vec!["other_tag".to_string()]));
 /// ```
 #[must_use]
-pub fn is_hidden_node(node_name: &str) -> bool {
-    node_name.starts_with("__") && node_name.ends_with("__") && node_name.len() > 4
+pub fn is_hidden_node(node_name: &str, tags: &[String]) -> bool {
+    let is_hidden_by_name =
+        node_name.starts_with("__") && node_name.ends_with("__") && node_name.len() > 4;
+    let is_hidden_by_tag = tags.iter().any(|tag| tag == HIDDEN_TAG);
+    is_hidden_by_name || is_hidden_by_tag
 }
 
 /// Generate a deterministic interrupt ID from node name and index
@@ -341,10 +357,12 @@ pub fn should_interrupt<S: crate::State>(
 
     for task in pending_tasks {
         let node_name = &task.node_name;
+        // PendingTask doesn't have a tags field yet, so pass empty slice
+        let tags: &[String] = &[];
 
-        // Hidden nodes (names starting/ending with __) are internal
+        // Hidden nodes (names starting/ending with __ or with __hidden__ tag) are internal
         // infrastructure and must never surface as interrupts.
-        if is_hidden_node(node_name) {
+        if is_hidden_node(node_name, tags) {
             continue;
         }
 
@@ -803,39 +821,76 @@ mod tests {
 
     #[test]
     fn hidden_node_double_underscore_prefix_and_suffix() {
-        assert!(is_hidden_node("__route__"));
-        assert!(is_hidden_node("__internal__"));
-        assert!(is_hidden_node("__error_handler__"));
+        assert!(is_hidden_node("__route__", &[]));
+        assert!(is_hidden_node("__internal__", &[]));
+        assert!(is_hidden_node("__error_handler__", &[]));
     }
 
     #[test]
     fn normal_nodes_are_not_hidden() {
-        assert!(!is_hidden_node("my_node"));
-        assert!(!is_hidden_node("agent"));
-        assert!(!is_hidden_node("review"));
+        assert!(!is_hidden_node("my_node", &[]));
+        assert!(!is_hidden_node("agent", &[]));
+        assert!(!is_hidden_node("review", &[]));
     }
 
     #[test]
     fn partial_underscore_prefix_is_not_hidden() {
-        assert!(!is_hidden_node("__incomplete"));
-        assert!(!is_hidden_node("__only_start"));
+        assert!(!is_hidden_node("__incomplete", &[]));
+        assert!(!is_hidden_node("__only_start", &[]));
     }
 
     #[test]
     fn partial_underscore_suffix_is_not_hidden() {
-        assert!(!is_hidden_node("only_end__"));
-        assert!(!is_hidden_node("incomplete__"));
+        assert!(!is_hidden_node("only_end__", &[]));
+        assert!(!is_hidden_node("incomplete__", &[]));
     }
 
     #[test]
     fn bare_double_underscore_is_not_hidden() {
         // "____" is only underscores and too short to be a meaningful hidden name
-        assert!(!is_hidden_node("____"));
+        assert!(!is_hidden_node("____", &[]));
     }
 
     #[test]
     fn hidden_tag_constant_value() {
         assert_eq!(HIDDEN_TAG, "__hidden__");
+    }
+
+    #[test]
+    fn hidden_node_by_tag() {
+        // Node marked with HIDDEN_TAG should be hidden even with normal name
+        assert!(is_hidden_node("my_node", &["__hidden__".to_string()]));
+        assert!(is_hidden_node(
+            "agent",
+            &["__hidden__".to_string(), "other".to_string()]
+        ));
+    }
+
+    #[test]
+    fn hidden_node_by_tag_only_when_exact_match() {
+        // Similar tags should not hide the node
+        assert!(!is_hidden_node("my_node", &["_hidden_".to_string()]));
+        assert!(!is_hidden_node("my_node", &["hidden".to_string()]));
+        assert!(!is_hidden_node("my_node", &["__hidden".to_string()]));
+        assert!(!is_hidden_node("my_node", &["hidden__".to_string()]));
+    }
+
+    #[test]
+    fn hidden_node_by_name_or_tag() {
+        // Either name pattern OR tag should hide the node
+        assert!(is_hidden_node("__internal__", &[])); // Hidden by name
+        assert!(is_hidden_node("normal_node", &["__hidden__".to_string()])); // Hidden by tag
+        assert!(is_hidden_node("__internal__", &["__hidden__".to_string()])); // Both
+    }
+
+    #[test]
+    fn normal_node_without_tag_not_hidden() {
+        assert!(!is_hidden_node("my_node", &[]));
+        assert!(!is_hidden_node("my_node", &["other_tag".to_string()]));
+        assert!(!is_hidden_node(
+            "my_node",
+            &["tag1".to_string(), "tag2".to_string()]
+        ));
     }
 
     // --- should_interrupt filtering tests ---

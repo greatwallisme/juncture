@@ -1100,14 +1100,16 @@ impl<S: State> PregelLoop<S> {
     }
 
     /// Handle a subgraph parent command bubbling up to the parent graph
-    fn handle_bubble_up_parent_command(&mut self, cmd: &crate::Command<S>) {
+    fn handle_bubble_up_parent_command(&mut self, parent_cmd: &crate::command::ParentCommand<S>) {
         tracing::debug!(
             step = self.step,
-            goto = ?cmd.goto,
+            source_node = %parent_cmd.source_node,
+            namespace = %parent_cmd.namespace,
+            goto = ?parent_cmd.command.goto,
             "Subgraph parent command bubbling up"
         );
 
-        if let Some(ref update) = cmd.update {
+        if let Some(ref update) = parent_cmd.command.update {
             let changed = self.state.try_apply(update.clone());
             match changed {
                 Ok(changed) => self.field_versions.bump_all(&changed),
@@ -1115,6 +1117,8 @@ impl<S: State> PregelLoop<S> {
                     tracing::warn!(
                         name: "juncture.subgraph.parent_command.apply_failed",
                         step = self.step,
+                        source_node = %parent_cmd.source_node,
+                        namespace = %parent_cmd.namespace,
                         error = %err,
                         "Failed to apply parent command from subgraph"
                     );
@@ -1744,7 +1748,9 @@ impl<S: State> PregelLoop<S> {
                 .unwrap_or("unknown");
 
             // Skip hidden/internal nodes from stream emission
-            if crate::interrupt::is_hidden_node(node) {
+            // PendingTask doesn't have tags yet, so pass empty slice
+            let tags: &[String] = &[];
+            if crate::interrupt::is_hidden_node(node, tags) {
                 continue;
             }
 
@@ -2278,7 +2284,12 @@ mod tests {
 
         let mut loop_ = PregelLoop::new(state, nodes, trigger_table, config, 0).unwrap();
 
-        let bubble_ups = vec![BubbleUp::ParentCommand(Command::end())];
+        let parent_cmd = crate::command::ParentCommand::from_subgraph(
+            Command::end(),
+            "test_subgraph_node",
+            "test_namespace",
+        );
+        let bubble_ups = vec![BubbleUp::ParentCommand(parent_cmd)];
 
         let should_stop = loop_.handle_bubble_ups(&bubble_ups);
 
