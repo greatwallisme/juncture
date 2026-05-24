@@ -19,36 +19,33 @@ use sqlx::Row;
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
     /// Item not found
-    #[error("item not found: {0}")]
-    NotFound(String),
-
-    /// Invalid operation
-    #[error("invalid operation: {0}")]
-    InvalidOperation(String),
-
-    /// Serialization error
-    #[error("serialization error: {0}")]
-    Serialization(#[from] serde_json::Error),
-
-    /// IO error
-    #[error("io error: {0}")]
-    Io(String),
+    #[error("item not found: {namespace}/{key}")]
+    NotFound {
+        /// Namespace of the missing item
+        namespace: String,
+        /// Key of the missing item
+        key: String,
+    },
 
     /// Invalid namespace format
     #[error("invalid namespace: {0}")]
     InvalidNamespace(String),
 
+    /// Serialization error
+    #[error("serialization error: {0}")]
+    Serialize(#[from] serde_json::Error),
+
+    /// Storage backend error
+    #[error("storage error: {0}")]
+    Storage(String),
+
     /// Vector search error
     #[error("vector search error: {0}")]
     VectorSearch(String),
 
-    /// Database error
-    #[error("database error: {0}")]
-    Database(String),
-
-    /// Other errors
-    #[error("store error: {0}")]
-    Other(String),
+    /// Embedding computation error
+    #[error("embedding error: {0}")]
+    Embedding(String),
 }
 
 /// Store trait for cross-thread long-term memory
@@ -316,8 +313,6 @@ pub enum StoreOp {
         max_depth: Option<usize>,
         /// Result limit
         limit: Option<usize>,
-        /// Offset for pagination
-        offset: Option<usize>,
     },
 }
 
@@ -412,7 +407,7 @@ pub struct MemoryStore {
 ///
 /// # Errors
 ///
-/// Implementations should return [`StoreError::Other`] or a suitable variant
+/// Implementations should return [`StoreError::Embedding`] or a suitable variant
 /// if embedding generation fails (network error, model error, etc.).
 #[async_trait::async_trait]
 pub trait EmbeddingFunc: Send + Sync + 'static {
@@ -436,7 +431,7 @@ pub struct IndexConfig {
     /// Embedding dimensions
     pub dims: usize,
     /// Embedding function for computing vectors from text
-    pub embed: Option<Box<dyn EmbeddingFunc>>,
+    pub embed: Box<dyn EmbeddingFunc>,
     /// Fields to index (None indexes all text fields)
     pub fields: Option<Vec<String>>,
 }
@@ -445,7 +440,7 @@ impl std::fmt::Debug for IndexConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("IndexConfig")
             .field("dims", &self.dims)
-            .field("embed", &self.embed.as_ref().map(|_| "..."))
+            .field("embed", &"...")
             .field("fields", &self.fields)
             .finish()
     }
@@ -502,7 +497,7 @@ impl MemoryStore {
     ///
     /// # Errors
     ///
-    /// Returns [`StoreError::Other`] if the sweep operation encounters an
+    /// Returns [`StoreError::Storage`] if the sweep operation encounters an
     /// unexpected error (currently unused, reserved for future extensions).
     ///
     /// # Examples
@@ -690,7 +685,7 @@ impl Store for MemoryStore {
     ) -> Result<(), StoreError> {
         // Compute embedding outside the write lock (embeddings may be async)
         let embedding = if let Some(ref index_config) = self.index_config {
-            if let (Some(embed_fn), Some(index_fields)) = (&index_config.embed, &index) {
+            if let Some(index_fields) = &index {
                 if index_fields.is_empty() {
                     None
                 } else {
@@ -698,7 +693,7 @@ impl Store for MemoryStore {
                     if text.is_empty() {
                         None
                     } else {
-                        let mut embeddings = embed_fn.embed(vec![text]).await?;
+                        let mut embeddings = index_config.embed.embed(vec![text]).await?;
                         embeddings.pop()
                     }
                 }
@@ -755,11 +750,11 @@ impl Store for MemoryStore {
     async fn search(&self, query: SearchQuery) -> Result<SearchResult, StoreError> {
         // Compute query embedding outside the read lock
         let query_embedding: Option<Vec<f32>> = if let Some(ref index_config) = self.index_config {
-            if let (Some(embed_fn), Some(query_text)) = (&index_config.embed, &query.query) {
+            if let Some(query_text) = &query.query {
                 if query_text.is_empty() {
                     None
                 } else {
-                    let mut embeddings = embed_fn.embed(vec![query_text.clone()]).await?;
+                    let mut embeddings = index_config.embed.embed(vec![query_text.clone()]).await?;
                     embeddings.pop()
                 }
             } else {
@@ -906,7 +901,6 @@ impl Store for MemoryStore {
                     suffix,
                     max_depth,
                     limit,
-                    offset,
                 } => {
                     let namespaces = self
                         .list_namespaces(
@@ -914,7 +908,7 @@ impl Store for MemoryStore {
                             suffix.as_deref(),
                             max_depth,
                             limit,
-                            offset,
+                            None,
                         )
                         .await?;
                     StoreResult::Namespaces(namespaces)
@@ -1065,9 +1059,9 @@ impl SqliteStore {
     ///
     /// Returns `StoreError` if connection fails or table creation fails.
     pub async fn new(database_url: &str) -> Result<Self, StoreError> {
-        let pool = sqlx::SqlitePool::connect(database_url).await.map_err(|e| {
-            StoreError::InvalidOperation(format!("Failed to connect to database: {e}"))
-        })?;
+        let pool = sqlx::SqlitePool::connect(database_url)
+            .await
+            .map_err(|e| StoreError::Storage(format!("Failed to connect to database: {e}")))?;
 
         // Run migrations
         sqlx::query(
@@ -1084,7 +1078,7 @@ impl SqliteStore {
         )
         .execute(&pool)
         .await
-        .map_err(|e| StoreError::InvalidOperation(format!("Failed to create table: {e}")))?;
+        .map_err(|e| StoreError::Storage(format!("Failed to create table: {e}")))?;
 
         // Create store_vectors table for vector search support
         // Stores pre-computed embeddings as BLOB for cosine similarity search
@@ -1102,7 +1096,7 @@ impl SqliteStore {
         )
         .execute(&pool)
         .await
-        .map_err(|e| StoreError::InvalidOperation(format!("Failed to create vectors table: {e}")))?;
+        .map_err(|e| StoreError::Storage(format!("Failed to create vectors table: {e}")))?;
 
         Ok(Self {
             pool: Some(pool),
@@ -1210,7 +1204,7 @@ impl Store for SqliteStore {
         let pool = self
             .pool
             .as_ref()
-            .ok_or_else(|| StoreError::InvalidOperation("Store not initialized".to_string()))?;
+            .ok_or_else(|| StoreError::Storage("Store not initialized".to_string()))?;
 
         let result = sqlx::query(
             "SELECT value, created_at, updated_at FROM store_items WHERE namespace = ? AND key = ?",
@@ -1219,19 +1213,19 @@ impl Store for SqliteStore {
         .bind(key)
         .fetch_optional(pool)
         .await
-        .map_err(|e| StoreError::InvalidOperation(format!("Failed to get item: {e}")))?;
+        .map_err(|e| StoreError::Storage(format!("Failed to get item: {e}")))?;
 
         if let Some(row) = result {
             let value_str: String = row
                 .try_get("value")
-                .map_err(|e| StoreError::Database(e.to_string()))?;
-            let value = serde_json::from_str(&value_str).map_err(StoreError::Serialization)?;
+                .map_err(|e| StoreError::Storage(e.to_string()))?;
+            let value = serde_json::from_str(&value_str).map_err(StoreError::Serialize)?;
             let created_at: String = row
                 .try_get("created_at")
-                .map_err(|e| StoreError::Database(e.to_string()))?;
+                .map_err(|e| StoreError::Storage(e.to_string()))?;
             let updated_at: String = row
                 .try_get("updated_at")
-                .map_err(|e| StoreError::Database(e.to_string()))?;
+                .map_err(|e| StoreError::Storage(e.to_string()))?;
 
             // Load embedding if exists
             let embedding = if self.index_config.is_some() {
@@ -1242,14 +1236,12 @@ impl Store for SqliteStore {
                 .bind(key)
                 .fetch_optional(pool)
                 .await
-                .map_err(|e| {
-                    StoreError::InvalidOperation(format!("Failed to load embedding: {e}"))
-                })?;
+                .map_err(|e| StoreError::Storage(format!("Failed to load embedding: {e}")))?;
 
                 if let Some(vrow) = vector_row {
                     let bytes: Vec<u8> = vrow
                         .try_get("vector")
-                        .map_err(|e| StoreError::Database(e.to_string()))?;
+                        .map_err(|e| StoreError::Storage(e.to_string()))?;
                     Some(blob_to_vector(&bytes)?)
                 } else {
                     None
@@ -1263,10 +1255,10 @@ impl Store for SqliteStore {
                 key: key.to_string(),
                 value,
                 created_at: chrono::DateTime::parse_from_rfc3339(&created_at)
-                    .map_err(|e| StoreError::Database(format!("invalid timestamp: {e}")))?
+                    .map_err(|e| StoreError::Storage(format!("invalid timestamp: {e}")))?
                     .with_timezone(&chrono::Utc),
                 updated_at: chrono::DateTime::parse_from_rfc3339(&updated_at)
-                    .map_err(|e| StoreError::Database(format!("invalid timestamp: {e}")))?
+                    .map_err(|e| StoreError::Storage(format!("invalid timestamp: {e}")))?
                     .with_timezone(&chrono::Utc),
                 expires_at: None,
                 embedding,
@@ -1286,13 +1278,13 @@ impl Store for SqliteStore {
         let pool = self
             .pool
             .as_ref()
-            .ok_or_else(|| StoreError::InvalidOperation("Store not initialized".to_string()))?;
+            .ok_or_else(|| StoreError::Storage("Store not initialized".to_string()))?;
 
         let now = Utc::now();
 
         // Compute embedding before the database transaction
         let embedding = if let Some(ref index_config) = self.index_config {
-            if let (Some(embed_fn), Some(index_fields)) = (&index_config.embed, &index) {
+            if let Some(index_fields) = &index {
                 if index_fields.is_empty() {
                     None
                 } else {
@@ -1300,7 +1292,7 @@ impl Store for SqliteStore {
                     if text.is_empty() {
                         None
                     } else {
-                        let mut embeddings = embed_fn.embed(vec![text]).await?;
+                        let mut embeddings = index_config.embed.embed(vec![text]).await?;
                         embeddings.pop()
                     }
                 }
@@ -1311,7 +1303,7 @@ impl Store for SqliteStore {
             None
         };
 
-        let value_str = serde_json::to_string(&value).map_err(StoreError::Serialization)?;
+        let value_str = serde_json::to_string(&value).map_err(StoreError::Serialize)?;
         let now_str = now.to_rfc3339();
 
         sqlx::query(
@@ -1330,7 +1322,7 @@ impl Store for SqliteStore {
         .bind(&now_str)
         .execute(pool)
         .await
-        .map_err(|e| StoreError::InvalidOperation(format!("Failed to put item: {e}")))?;
+        .map_err(|e| StoreError::Storage(format!("Failed to put item: {e}")))?;
 
         // Store embedding if configured
         if let Some(vec) = embedding {
@@ -1348,7 +1340,7 @@ impl Store for SqliteStore {
             .bind(&bytes)
             .execute(pool)
             .await
-            .map_err(|e| StoreError::InvalidOperation(format!("Failed to store embedding: {e}")))?;
+            .map_err(|e| StoreError::Storage(format!("Failed to store embedding: {e}")))?;
         }
 
         Ok(())
@@ -1358,14 +1350,14 @@ impl Store for SqliteStore {
         let pool = self
             .pool
             .as_ref()
-            .ok_or_else(|| StoreError::InvalidOperation("Store not initialized".to_string()))?;
+            .ok_or_else(|| StoreError::Storage("Store not initialized".to_string()))?;
 
         sqlx::query("DELETE FROM store_items WHERE namespace = ? AND key = ?")
             .bind(namespace)
             .bind(key)
             .execute(pool)
             .await
-            .map_err(|e| StoreError::InvalidOperation(format!("Failed to delete item: {e}")))?;
+            .map_err(|e| StoreError::Storage(format!("Failed to delete item: {e}")))?;
 
         Ok(())
     }
@@ -1383,15 +1375,15 @@ impl Store for SqliteStore {
         let pool = self
             .pool
             .as_ref()
-            .ok_or_else(|| StoreError::InvalidOperation("Store not initialized".to_string()))?;
+            .ok_or_else(|| StoreError::Storage("Store not initialized".to_string()))?;
 
         // Compute query embedding if vector search is enabled and query text is provided
         let query_embedding: Option<Vec<f32>> = if let Some(ref index_config) = self.index_config {
-            if let (Some(embed_fn), Some(query_text)) = (&index_config.embed, &query.query) {
+            if let Some(query_text) = &query.query {
                 if query_text.is_empty() {
                     None
                 } else {
-                    let mut embeddings = embed_fn.embed(vec![query_text.clone()]).await?;
+                    let mut embeddings = index_config.embed.embed(vec![query_text.clone()]).await?;
                     embeddings.pop()
                 }
             } else {
@@ -1429,7 +1421,7 @@ impl Store for SqliteStore {
         let rows = data_query
             .fetch_all(pool)
             .await
-            .map_err(|e| StoreError::InvalidOperation(format!("Search query failed: {e}")))?;
+            .map_err(|e| StoreError::Storage(format!("Search query failed: {e}")))?;
 
         let mut items: Vec<SearchItem> = Vec::with_capacity(rows.len());
 
@@ -1437,20 +1429,20 @@ impl Store for SqliteStore {
         for row in rows {
             let namespace: String = row
                 .try_get("namespace")
-                .map_err(|e| StoreError::Database(e.to_string()))?;
+                .map_err(|e| StoreError::Storage(e.to_string()))?;
             let key: String = row
                 .try_get("key")
-                .map_err(|e| StoreError::Database(e.to_string()))?;
+                .map_err(|e| StoreError::Storage(e.to_string()))?;
             let value_str: String = row
                 .try_get("value")
-                .map_err(|e| StoreError::Database(e.to_string()))?;
-            let value = serde_json::from_str(&value_str).map_err(StoreError::Serialization)?;
+                .map_err(|e| StoreError::Storage(e.to_string()))?;
+            let value = serde_json::from_str(&value_str).map_err(StoreError::Serialize)?;
             let created_at_str: String = row
                 .try_get("created_at")
-                .map_err(|e| StoreError::Database(e.to_string()))?;
+                .map_err(|e| StoreError::Storage(e.to_string()))?;
             let updated_at_str: String = row
                 .try_get("updated_at")
-                .map_err(|e| StoreError::Database(e.to_string()))?;
+                .map_err(|e| StoreError::Storage(e.to_string()))?;
 
             // Load embedding for this item
             let embedding = if query_embedding.is_some() {
@@ -1461,14 +1453,12 @@ impl Store for SqliteStore {
                 .bind(&key)
                 .fetch_optional(pool)
                 .await
-                .map_err(|e| {
-                    StoreError::InvalidOperation(format!("Failed to load embedding: {e}"))
-                })?;
+                .map_err(|e| StoreError::Storage(format!("Failed to load embedding: {e}")))?;
 
                 if let Some(vrow) = vector_row {
                     let bytes: Vec<u8> = vrow
                         .try_get("vector")
-                        .map_err(|e| StoreError::Database(e.to_string()))?;
+                        .map_err(|e| StoreError::Storage(e.to_string()))?;
                     Some(blob_to_vector(&bytes)?)
                 } else {
                     None
@@ -1490,10 +1480,10 @@ impl Store for SqliteStore {
                     key,
                     value,
                     created_at: chrono::DateTime::parse_from_rfc3339(&created_at_str)
-                        .map_err(|e| StoreError::Database(format!("invalid timestamp: {e}")))?
+                        .map_err(|e| StoreError::Storage(format!("invalid timestamp: {e}")))?
                         .with_timezone(&chrono::Utc),
                     updated_at: chrono::DateTime::parse_from_rfc3339(&updated_at_str)
-                        .map_err(|e| StoreError::Database(format!("invalid timestamp: {e}")))?
+                        .map_err(|e| StoreError::Storage(format!("invalid timestamp: {e}")))?
                         .with_timezone(&chrono::Utc),
                     expires_at: None,
                     embedding,
@@ -1535,7 +1525,7 @@ impl Store for SqliteStore {
         let pool = self
             .pool
             .as_ref()
-            .ok_or_else(|| StoreError::InvalidOperation("Store not initialized".to_string()))?;
+            .ok_or_else(|| StoreError::Storage("Store not initialized".to_string()))?;
 
         let mut query_str = "SELECT DISTINCT namespace FROM store_items WHERE 1=1".to_string();
         let mut params = Vec::new();
@@ -1563,13 +1553,13 @@ impl Store for SqliteStore {
         let rows = query
             .fetch_all(pool)
             .await
-            .map_err(|e| StoreError::InvalidOperation(format!("Failed to list namespaces: {e}")))?;
+            .map_err(|e| StoreError::Storage(format!("Failed to list namespaces: {e}")))?;
 
         let mut namespaces = Vec::new();
         for row in rows {
             let ns: String = row
                 .try_get("namespace")
-                .map_err(|e| StoreError::Database(e.to_string()))?;
+                .map_err(|e| StoreError::Storage(e.to_string()))?;
             namespaces.push(ns);
         }
 
@@ -1620,7 +1610,6 @@ impl Store for SqliteStore {
                     suffix,
                     max_depth,
                     limit,
-                    offset,
                 } => {
                     let namespaces = self
                         .list_namespaces(
@@ -1628,7 +1617,7 @@ impl Store for SqliteStore {
                             suffix.as_deref(),
                             max_depth,
                             limit,
-                            offset,
+                            None,
                         )
                         .await?;
                     StoreResult::Namespaces(namespaces)
@@ -1666,9 +1655,9 @@ impl PostgresStore {
     ///
     /// Returns `StoreError` if connection fails or table creation fails.
     pub async fn new(database_url: &str) -> Result<Self, StoreError> {
-        let pool = sqlx::PgPool::connect(database_url).await.map_err(|e| {
-            StoreError::InvalidOperation(format!("Failed to connect to database: {e}"))
-        })?;
+        let pool = sqlx::PgPool::connect(database_url)
+            .await
+            .map_err(|e| StoreError::Storage(format!("Failed to connect to database: {e}")))?;
 
         // Run migrations
         sqlx::query(
@@ -1685,7 +1674,7 @@ impl PostgresStore {
         )
         .execute(&pool)
         .await
-        .map_err(|e| StoreError::InvalidOperation(format!("Failed to create table: {e}")))?;
+        .map_err(|e| StoreError::Storage(format!("Failed to create table: {e}")))?;
 
         // Create store_vectors table for vector search support
         // Note: For production use with pgvector, the vector column should use the VECTOR type
@@ -1703,7 +1692,7 @@ impl PostgresStore {
         )
         .execute(&pool)
         .await
-        .map_err(|e| StoreError::InvalidOperation(format!("Failed to create vectors table: {e}")))?;
+        .map_err(|e| StoreError::Storage(format!("Failed to create vectors table: {e}")))?;
 
         Ok(Self {
             pool: Some(pool),
@@ -1873,7 +1862,7 @@ impl Store for PostgresStore {
         let pool = self
             .pool
             .as_ref()
-            .ok_or_else(|| StoreError::InvalidOperation("Store not initialized".to_string()))?;
+            .ok_or_else(|| StoreError::Storage("Store not initialized".to_string()))?;
 
         let result = sqlx::query(
             "SELECT value, created_at, updated_at FROM store_items WHERE namespace = $1 AND key = $2"
@@ -1882,18 +1871,18 @@ impl Store for PostgresStore {
         .bind(key)
         .fetch_optional(pool)
         .await
-        .map_err(|e| StoreError::InvalidOperation(format!("Failed to get item: {e}")))?;
+        .map_err(|e| StoreError::Storage(format!("Failed to get item: {e}")))?;
 
         if let Some(row) = result {
             let value: serde_json::Value = row
                 .try_get("value")
-                .map_err(|e| StoreError::Database(e.to_string()))?;
+                .map_err(|e| StoreError::Storage(e.to_string()))?;
             let created_at: chrono::DateTime<chrono::Utc> = row
                 .try_get("created_at")
-                .map_err(|e| StoreError::Database(e.to_string()))?;
+                .map_err(|e| StoreError::Storage(e.to_string()))?;
             let updated_at: chrono::DateTime<chrono::Utc> = row
                 .try_get("updated_at")
-                .map_err(|e| StoreError::Database(e.to_string()))?;
+                .map_err(|e| StoreError::Storage(e.to_string()))?;
 
             // Load embedding if exists
             let embedding = if self.index_config.is_some() {
@@ -1904,14 +1893,12 @@ impl Store for PostgresStore {
                 .bind(key)
                 .fetch_optional(pool)
                 .await
-                .map_err(|e| {
-                    StoreError::InvalidOperation(format!("Failed to load embedding: {e}"))
-                })?;
+                .map_err(|e| StoreError::Storage(format!("Failed to load embedding: {e}")))?;
 
                 if let Some(vrow) = vector_row {
                     let bytes: Vec<u8> = vrow
                         .try_get("vector")
-                        .map_err(|e| StoreError::Database(e.to_string()))?;
+                        .map_err(|e| StoreError::Storage(e.to_string()))?;
                     Some(bytea_to_vector(&bytes)?)
                 } else {
                     None
@@ -1944,13 +1931,13 @@ impl Store for PostgresStore {
         let pool = self
             .pool
             .as_ref()
-            .ok_or_else(|| StoreError::InvalidOperation("Store not initialized".to_string()))?;
+            .ok_or_else(|| StoreError::Storage("Store not initialized".to_string()))?;
 
         let now = Utc::now();
 
         // Compute embedding before the database transaction
         let embedding = if let Some(ref index_config) = self.index_config {
-            if let (Some(embed_fn), Some(index_fields)) = (&index_config.embed, &index) {
+            if let Some(index_fields) = &index {
                 if index_fields.is_empty() {
                     None
                 } else {
@@ -1958,7 +1945,7 @@ impl Store for PostgresStore {
                     if text.is_empty() {
                         None
                     } else {
-                        let mut embeddings = embed_fn.embed(vec![text]).await?;
+                        let mut embeddings = index_config.embed.embed(vec![text]).await?;
                         embeddings.pop()
                     }
                 }
@@ -1985,7 +1972,7 @@ impl Store for PostgresStore {
         .bind(now)
         .execute(pool)
         .await
-        .map_err(|e| StoreError::InvalidOperation(format!("Failed to put item: {e}")))?;
+        .map_err(|e| StoreError::Storage(format!("Failed to put item: {e}")))?;
 
         // Store embedding if configured
         if let Some(vec) = embedding {
@@ -2003,7 +1990,7 @@ impl Store for PostgresStore {
             .bind(&bytes)
             .execute(pool)
             .await
-            .map_err(|e| StoreError::InvalidOperation(format!("Failed to store embedding: {e}")))?;
+            .map_err(|e| StoreError::Storage(format!("Failed to store embedding: {e}")))?;
         }
 
         Ok(())
@@ -2013,14 +2000,14 @@ impl Store for PostgresStore {
         let pool = self
             .pool
             .as_ref()
-            .ok_or_else(|| StoreError::InvalidOperation("Store not initialized".to_string()))?;
+            .ok_or_else(|| StoreError::Storage("Store not initialized".to_string()))?;
 
         sqlx::query("DELETE FROM store_items WHERE namespace = $1 AND key = $2")
             .bind(namespace)
             .bind(key)
             .execute(pool)
             .await
-            .map_err(|e| StoreError::InvalidOperation(format!("Failed to delete item: {e}")))?;
+            .map_err(|e| StoreError::Storage(format!("Failed to delete item: {e}")))?;
 
         Ok(())
     }
@@ -2038,15 +2025,15 @@ impl Store for PostgresStore {
         let pool = self
             .pool
             .as_ref()
-            .ok_or_else(|| StoreError::InvalidOperation("Store not initialized".to_string()))?;
+            .ok_or_else(|| StoreError::Storage("Store not initialized".to_string()))?;
 
         // Compute query embedding if vector search is enabled and query text is provided
         let query_embedding: Option<Vec<f32>> = if let Some(ref index_config) = self.index_config {
-            if let (Some(embed_fn), Some(query_text)) = (&index_config.embed, &query.query) {
+            if let Some(query_text) = &query.query {
                 if query_text.is_empty() {
                     None
                 } else {
-                    let mut embeddings = embed_fn.embed(vec![query_text.clone()]).await?;
+                    let mut embeddings = index_config.embed.embed(vec![query_text.clone()]).await?;
                     embeddings.pop()
                 }
             } else {
@@ -2095,7 +2082,7 @@ impl Store for PostgresStore {
         let rows = data_query
             .fetch_all(pool)
             .await
-            .map_err(|e| StoreError::InvalidOperation(format!("Search query failed: {e}")))?;
+            .map_err(|e| StoreError::Storage(format!("Search query failed: {e}")))?;
 
         let mut items: Vec<SearchItem> = Vec::with_capacity(rows.len());
 
@@ -2103,19 +2090,19 @@ impl Store for PostgresStore {
         for row in rows {
             let namespace: String = row
                 .try_get("namespace")
-                .map_err(|e| StoreError::Database(e.to_string()))?;
+                .map_err(|e| StoreError::Storage(e.to_string()))?;
             let key: String = row
                 .try_get("key")
-                .map_err(|e| StoreError::Database(e.to_string()))?;
+                .map_err(|e| StoreError::Storage(e.to_string()))?;
             let value: serde_json::Value = row
                 .try_get("value")
-                .map_err(|e| StoreError::Database(e.to_string()))?;
+                .map_err(|e| StoreError::Storage(e.to_string()))?;
             let created_at: chrono::DateTime<chrono::Utc> = row
                 .try_get("created_at")
-                .map_err(|e| StoreError::Database(e.to_string()))?;
+                .map_err(|e| StoreError::Storage(e.to_string()))?;
             let updated_at: chrono::DateTime<chrono::Utc> = row
                 .try_get("updated_at")
-                .map_err(|e| StoreError::Database(e.to_string()))?;
+                .map_err(|e| StoreError::Storage(e.to_string()))?;
 
             // Load embedding for this item
             let embedding = if query_embedding.is_some() {
@@ -2126,14 +2113,12 @@ impl Store for PostgresStore {
                 .bind(&key)
                 .fetch_optional(pool)
                 .await
-                .map_err(|e| {
-                    StoreError::InvalidOperation(format!("Failed to load embedding: {e}"))
-                })?;
+                .map_err(|e| StoreError::Storage(format!("Failed to load embedding: {e}")))?;
 
                 if let Some(vrow) = vector_row {
                     let bytes: Vec<u8> = vrow
                         .try_get("vector")
-                        .map_err(|e| StoreError::Database(e.to_string()))?;
+                        .map_err(|e| StoreError::Storage(e.to_string()))?;
                     Some(bytea_to_vector(&bytes)?)
                 } else {
                     None
@@ -2196,7 +2181,7 @@ impl Store for PostgresStore {
         let pool = self
             .pool
             .as_ref()
-            .ok_or_else(|| StoreError::InvalidOperation("Store not initialized".to_string()))?;
+            .ok_or_else(|| StoreError::Storage("Store not initialized".to_string()))?;
 
         let mut query_str = "SELECT DISTINCT namespace FROM store_items WHERE 1=1".to_string();
         let mut param_idx = 1;
@@ -2227,13 +2212,13 @@ impl Store for PostgresStore {
         let rows = query
             .fetch_all(pool)
             .await
-            .map_err(|e| StoreError::InvalidOperation(format!("Failed to list namespaces: {e}")))?;
+            .map_err(|e| StoreError::Storage(format!("Failed to list namespaces: {e}")))?;
 
         let mut namespaces = Vec::new();
         for row in rows {
             let ns: String = row
                 .try_get("namespace")
-                .map_err(|e| StoreError::Database(e.to_string()))?;
+                .map_err(|e| StoreError::Storage(e.to_string()))?;
             namespaces.push(ns);
         }
 
@@ -2284,7 +2269,6 @@ impl Store for PostgresStore {
                     suffix,
                     max_depth,
                     limit,
-                    offset,
                 } => {
                     let namespaces = self
                         .list_namespaces(
@@ -2292,7 +2276,7 @@ impl Store for PostgresStore {
                             suffix.as_deref(),
                             max_depth,
                             limit,
-                            offset,
+                            None,
                         )
                         .await?;
                     StoreResult::Namespaces(namespaces)
@@ -2715,7 +2699,7 @@ mod tests {
     async fn test_search_with_embeddings_returns_scored_results() {
         let index_config = IndexConfig {
             dims: 8,
-            embed: Some(Box::new(TestEmbeddingFunc)),
+            embed: Box::new(TestEmbeddingFunc),
             fields: Some(vec!["text".to_string()]),
         };
         let store = MemoryStore::new().with_vector_search(index_config);
@@ -2775,7 +2759,7 @@ mod tests {
     async fn test_search_ordering_respects_similarity() {
         let index_config = IndexConfig {
             dims: 8,
-            embed: Some(Box::new(TestEmbeddingFunc)),
+            embed: Box::new(TestEmbeddingFunc),
             fields: Some(vec!["text".to_string()]),
         };
         let store = MemoryStore::new().with_vector_search(index_config);
