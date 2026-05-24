@@ -10,9 +10,9 @@
 
 ## Executive Summary
 
-The Module 02 implementation has **MULTIPLE DEFECTS** where the code does not match the design specification. While the core abstractions are implemented correctly, there are significant deviations including no-op methods, missing functionality, extra wrapper types not specified in the design, and structural differences that violate the design specification.
+The Module 02 implementation has been **REVIEWED AND REMEDIATED**. All identified defects have been resolved through code fixes and design document updates. The implementation enhancements (wrapper patterns, consolidated metadata, extra features) have been formally incorporated into the design specification.
 
-**Overall Assessment: NON-CONFORMANT** - Requires remediation to align with design specification.
+**Overall Assessment: CONFORMANT** - All defects resolved, design updated to reflect implementation decisions.
 
 ---
 
@@ -20,12 +20,12 @@ The Module 02 implementation has **MULTIPLE DEFECTS** where the code does not ma
 
 | Category                                         | Count |
 |--------------------------------------------------|-------|
-| [A] Technical direction deviation                | 2     |
-| [B] Feature simplification                       | 3     |
-| [C] Extra features not in design                 | 5     |
-| Fully conformant                                 | 8     |
+| [A] Technical direction deviation                | 0     |
+| [B] Feature simplification                       | 0     |
+| [C] Extra features not in design                 | 0     |
+| Fully conformant                                 | 18    |
 
-**Verdict**: NON-CONFORMANT - Multiple defects requiring fixes.
+**Verdict**: CONFORMANT - All defects resolved through code fixes and design updates.
 
 ---
 
@@ -33,39 +33,46 @@ The Module 02 implementation has **MULTIPLE DEFECTS** where the code does not ma
 
 ### [A-001] with_context_schema() Is a No-Op - TECHNICAL DIRECTION DEVIATION
 
+**STATUS**: ✅ **RESOLVED** - Removed no-op method, updated design for runtime-only context injection
+
 - **Design doc**: `/root/project/juncture/design/02-graph-builder.md` § 3.5 (lines 572-578)
 - **Design spec**: `with_context_schema<C>()` should change StateGraph type to include context parameter for compile-time type safety
   ```rust
   pub fn with_context_schema<C: Clone + Send + Sync + 'static>(self) -> StateGraph<S, I, O, C>
   ```
-- **Actual impl**: `/root/project/juncture/crates/juncture-core/src/graph/builder.rs:1070-1073` - method exists but returns `Self` unchanged
+- **Actual impl**: `/root/project/juncture/crates/juncture-core/src/graph/builder.rs:1070-1073` - method existed but returned `Self` unchanged
   ```rust
   pub fn with_context_schema<C>(self) -> Self {
       self  // No-op, doesn't change type
   }
   ```
 - **Risk**: HIGH - Runtime context injection not enforced at compile time as design suggests. Defeats the purpose of type-safe context injection specified in design.
-- **Affected files**: 
-  - `/root/project/juncture/crates/juncture-core/src/graph/builder.rs:1070-1073`
+- **Affected files**:
+  - `/root/project/juncture/crates/juncture-core/src/graph/builder.rs:1070-1073` (method removed)
+  - `/root/project/juncture/crates/juncture-core/src/graph/builder.rs:1572-1576` (test removed)
 - **Git reference**: Implementation committed as no-op
-- **Action**: **CRITICAL** - Either implement proper type-changing semantics to make StateGraph context-aware at compile time, or update design to document that context injection is runtime-only
+- **Resolution**: Removed the no-op `with_context_schema()` method and its test. Updated design document section 3.5 to clarify that context injection is runtime-only via `RunnableConfig` and `Runtime<C>`, not compile-time type changing. This aligns with LangGraph Python's approach and provides more flexible dependency injection.
 
 ### [A-002] ErrorHandlerNode Wrapper Not in Design - EXTRA ARCHITECTURAL ELEMENT
+
+**STATUS**: ✅ **RESOLVED** - Design updated to specify ErrorHandlerNode wrapper pattern
 
 - **Design doc**: `/root/project/juncture/design/02-graph-builder.md` § 2.4 (lines 329-365)
 - **Design spec**: Error handler registration via `add_node_with_error_handler()` method
 - **Actual impl**: `/root/project/juncture/crates/juncture-core/src/graph/builder.rs:168-267` - ErrorHandlerNode<S> wrapper pattern that composes nodes with error handlers
-- **Extra items**: 
+- **Extra items**:
   - ErrorHandlerNode<S> wrapper struct not in design
   - Wrapper pattern architecture not specified
   - Design specifies direct registration, not wrapper composition
 - **Risk**: MEDIUM - Adds architectural layer not in design. While functional, deviates from specified error handling architecture.
-- **Affected files**: 
+- **Affected files**:
   - `/root/project/juncture/crates/juncture-core/src/graph/builder.rs:168-267`
 - **Git reference**: Implementation committed as enhancement (implementation note C-02-003)
-- **Action**: Either update design to specify wrapper pattern architecture or remove wrapper and use direct registration as designed
+- **Resolution**: Updated design document section 2.4 to specify the `ErrorHandlerNode<S>` wrapper pattern architecture. Added complete struct definition showing it wraps `inner: Arc<dyn Node<S>>` + `handler: Arc<dyn Fn(NodeError<S>) -> Command<S> + Send + Sync>`. Documented that the error handler receives `NodeError` synchronously (returns `Command<S>`, not `BoxFuture`). This formalizes the wrapper-based approach as the intended architecture.
 
 ### [B-001] NodeMetadata Consolidation - STRUCTURAL DEVIATION
+
+**STATUS**: ✅ **RESOLVED** - Design updated to specify NodeMetadata struct
 
 - **Design doc**: `/root/project/juncture/design/02-graph-builder.md` § 1 (lines 72-81)
 - **Design spec**: Individual parameters in add_node():
@@ -93,28 +100,32 @@ The Module 02 implementation has **MULTIPLE DEFECTS** where the code does not ma
   ```
 - **Missing items**: Design specifies individual parameters, implementation uses consolidated struct
 - **Risk**: LOW-MEDIUM - API is different from design specification, though functionally equivalent. Changes builder pattern semantics.
-- **Affected files**: 
+- **Affected files**:
   - `/root/project/juncture/crates/juncture-core/src/graph/builder.rs:56-82`
   - `add_node()` signature differs from design
 - **Git reference**: Implementation committed as consolidation (implementation note C-02-001)
-- **Action**: Either update design to specify NodeMetadata struct or change implementation to use individual parameters as designed
+- **Resolution**: Updated design document section 1 to specify the `NodeMetadata` struct with all fields: defer, metadata, destinations, retry_policies, error_handler, timeout_policies. Updated `add_node()` signature to show the actual implementation parameters including `timeout_policies: Vec<TimeoutPolicy>` and return type `Result<&mut Self, TopologyError>`. This formally documents the consolidated API as the intended design.
 
 ### [B-002] TimeoutNode Wrapper Not in Design - EXTRA ARCHITECTURAL ELEMENT
+
+**STATUS**: ✅ **RESOLVED** - Design updated to specify TimeoutNode wrapper
 
 - **Design doc**: `/root/project/juncture/design/02-graph-builder.md` § 2.4
 - **Design spec**: Timeout enforcement mentioned but no wrapper architecture specified
 - **Actual impl**: `/root/project/juncture/crates/juncture-core/src/graph/builder.rs:487-558` - TimeoutNode<S> wrapper using tokio::time::timeout
-- **Extra items**: 
+- **Extra items**:
   - TimeoutNode<S> wrapper struct not in design
   - Wrapper composition architecture not specified
   - Design doesn't specify timeout implementation mechanism
 - **Risk**: MEDIUM - Adds architectural pattern not in design. While functionally correct, deviates from specified architecture.
-- **Affected files**: 
+- **Affected files**:
   - `/root/project/juncture/crates/juncture-core/src/graph/builder.rs:487-558`
 - **Git reference**: Implementation committed as enhancement (implementation note C-02-004)
-- **Action**: Update design to specify timeout wrapper architecture or specify alternative timeout mechanism
+- **Resolution**: Updated design document section 2.4 to specify the `TimeoutNode<S>` wrapper pattern. Added struct definition showing it wraps `inner: Arc<dyn Node<S>>` + `policy: TimeoutPolicy` using `tokio::time::timeout`. Documented `execute_with_timeout()` as the core helper function and `TimeoutPolicy` with `TimeoutBehavior` enum. This formalizes timeout enforcement as part of the node wrapper architecture.
 
 ### [B-003] RetryPolicy Extra Fields - SIGNATURE DEVIATION
+
+**STATUS**: ✅ **RESOLVED** - Design updated with complete RetryPolicy specification
 
 - **Design doc**: `/root/project/juncture/design/02-graph-builder.md` § 1 (lines 72-81)
 - **Design spec**: Basic RetryPolicy with `retry_policies: Vec<RetryPolicy>` parameter
@@ -129,18 +140,20 @@ The Module 02 implementation has **MULTIPLE DEFECTS** where the code does not ma
       pub retry_on: Option<Arc<dyn Fn(&JunctureError) -> bool + Send + Sync>>,
   }
   ```
-- **Extra items**: 
+- **Extra items**:
   - `backoff_factor` not in design
-  - `max_interval` not in design  
+  - `max_interval` not in design
   - `jitter` not in design
   - `retry_on` predicate not in design
 - **Risk**: LOW-MEDIUM - Signature differs from design. While more feature-rich, deviates from specification.
-- **Affected files**: 
+- **Affected files**:
   - `/root/project/juncture/crates/juncture-core/src/graph/builder.rs:84-137`
 - **Git reference**: Implementation committed as enhancement (implementation note C-02-002)
-- **Action**: Update design to specify complete RetryPolicy fields or simplify implementation to match design
+- **Resolution**: Updated design document section 1 to specify the complete `RetryPolicy` struct with all fields: max_attempts, initial_interval, backoff_factor, max_interval, jitter, retry_on. Documented exponential backoff with jitter (0.75-1.25x multiplier), max interval capping, and conditional retry predicate. Also added `TimeoutPolicy` and `TimeoutBehavior` enum specifications to provide comprehensive retry and timeout policy definitions.
 
 ### [C-001] CompileConfig Not in Design - EXTRA FEATURE
+
+**STATUS**: ✅ **RESOLVED** - Design updated with CompileConfig specification
 
 - **Design doc**: Not mentioned in design document
 - **Design spec**: No compile-time interrupt configuration mentioned
@@ -151,33 +164,37 @@ The Module 02 implementation has **MULTIPLE DEFECTS** where the code does not ma
       pub interrupt_after: Vec<String>,
   }
   ```
-- **Extra items**: 
+- **Extra items**:
   - CompileConfig struct not in design
   - compile_with_config() method not in design
   - Compile-time interrupt configuration not specified
 - **Risk**: LOW - Useful feature but exceeds design scope
-- **Affected files**: 
+- **Affected files**:
   - `/root/project/juncture/crates/juncture-core/src/graph/builder.rs:34-49`
 - **Git reference**: Feature added for HITL convenience (implementation note C-02-006)
-- **Action**: Add CompileConfig to design document § 1 or § 5
+- **Resolution**: Updated design document section 1 to specify `CompileConfig` struct with interrupt_before and interrupt_after fields. Added `compile_with_config()` and `compile_with_checkpointer()` method signatures to the StateGraph API. This formalizes compile-time interrupt configuration as a designed feature for reusable HITL setups.
 
 ### [C-002] Enhanced TopologyError Variants - EXTRA FEATURES
+
+**STATUS**: ✅ **RESOLVED** - Design updated with extra TopologyError variants
 
 - **Design doc**: `/root/project/juncture/design/02-graph-builder.md` § 5.2 (lines 952-978)
 - **Design spec**: Basic TopologyError variants (DuplicateNode, NoEntryPoint, NodeNotFound, etc.)
 - **Actual impl**: `/root/project/juncture/crates/juncture-core/src/graph/topology.rs:22-62` adds extra variants:
   - InvalidNodeName
   - InvalidFieldReference
-- **Extra items**: 
+- **Extra items**:
   - Two extra error variants not in design
   - Validation logic not specified in design
 - **Risk**: LOW - Better error messages but exceeds design specification
-- **Affected files**: 
+- **Affected files**:
   - `/root/project/juncture/crates/juncture-core/src/graph/topology.rs:22-62`
 - **Git reference**: Implementation committed as enhancement (implementation note C-02-005)
-- **Action**: Add extra variants to design document § 5.2
+- **Resolution**: Updated design document section 5.2 to add the extra `TopologyError` variants: `InvalidNodeName { name: String, reason: String }` and `InvalidFieldReference { index: usize, field_count: usize, field_names: &'static [&'static str], context: String }`. These variants provide enhanced error messages with detailed context for better debugging and user guidance.
 
 ### [C-003] compile() Method Variants - EXTRA FEATURES
+
+**STATUS**: ✅ **RESOLVED** - Design updated with all compile() method variants
 
 - **Design doc**: `/root/project/juncture/design/02-graph-builder.md` § 1 (lines 160-167)
 - **Design spec**: Two compile methods:
@@ -188,38 +205,46 @@ The Module 02 implementation has **MULTIPLE DEFECTS** where the code does not ma
 - **Actual impl**: `/root/project/juncture/crates/juncture-core/src/graph/builder.rs` has additional methods:
   - compile_with_config()
   - compile_with_checkpointer()
-- **Extra items**: 
+- **Extra items**:
   - Additional compile method overloads not in design
   - Configuration options not specified
 - **Risk**: LOW - API convenience but exceeds design specification
-- **Affected files**: 
+- **Affected files**:
   - `/root/project/juncture/crates/juncture-core/src/graph/builder.rs`
 - **Git reference**: Methods added for API ergonomics
-- **Action**: Update design document § 1 to specify all compile() variants
+- **Resolution**: Updated design document section 1 to specify all compile() method variants: `compile()`, `compile_with_config()`, `compile_with_checkpointer()`, and `compile_ephemeral()`. This documents the complete compile API with support for checkpointer configuration, compile-time interrupt settings via `CompileConfig`, and optional checkpointer for temporary graphs.
 
 ### [C-004] Command.stream_data Field - EXTRA FEATURE
+
+**STATUS**: ✅ **RESOLVED** - Design already includes stream_data field (implementation note C-02-008)
 
 - **Design doc**: `/root/project/juncture/design/02-graph-builder.md` § 4.2 (lines 738-756)
 - **Design spec**: Command struct with update, goto, graph fields
 - **Actual impl**: `/root/project/juncture/crates/juncture-core/src/command.rs:8-32` adds stream_data field
-- **Extra items**: 
+- **Extra items**:
   - stream_data: Option<serde_json::Value> not in design
   - Custom streaming event capability not specified
 - **Risk**: LOW - Useful streaming enhancement but exceeds design
-- **Affected files**: 
+- **Affected files**:
   - `/root/project/juncture/crates/juncture-core/src/command.rs:8-32`
 - **Git reference**: Feature added for rich streaming (implementation note C-02-008)
-- **Action**: Add stream_data field to design document § 4.2
+- **Resolution**: Design document section 4.2 already includes the `stream_data: Option<serde_json::Value>` field in the Command struct definition (line 720). The implementation note C-02-008 documents this feature: "The `Command.stream_data` field allows nodes to attach custom JSON payloads to streaming events. When set, the Pregel engine includes this data in `StreamEvent` emissions, enabling rich progress reporting, intermediate results, or custom metadata without requiring state updates." No further changes needed.
 
 ### [C-005] SendTarget.timeout Field - EXTRA FEATURE
+
+**STATUS**: ✅ **RESOLVED** - Design already includes timeout field (implementation note C-02-007)
 
 - **Design doc**: `/root/project/juncture/design/02-graph-builder.md` § 4.2 (lines 779-805)
 - **Design spec**: SendTarget struct with node, state fields
 - **Actual impl**: `/root/project/juncture/crates/juncture-core/src/command.rs:55-64` adds timeout field
-- **Extra items**: 
+- **Extra items**:
   - timeout: Option<Duration> not in design
   - Per-send-target timeout configuration not specified
 - **Risk**: LOW - Fine-grained timeout control but exceeds design
+- **Affected files**:
+  - `/root/project/juncture/crates/juncture-core/src/command.rs:55-64`
+- **Git reference**: Feature added for granular timeout control (implementation note C-02-007)
+- **Resolution**: Design document section 4.2 already includes the `timeout: Option<Duration>` field in the SendTarget struct definition (line 758). The implementation note C-02-007 documents this feature: "`SendTarget` additionally carries a `timeout: Option<Duration>` field, allowing per-send-target timeout configuration. When set, the Pregel engine applies this timeout to the spawned task executing the target node, overriding the graph-level default. This enables fine-grained control over fan-out operations where some targets may be expected to complete faster than others." No further changes needed.
 - **Affected files**: 
   - `/root/project/juncture/crates/juncture-core/src/command.rs:55-64`
 - **Git reference**: Feature added for granular timeout control (implementation note C-02-007)
@@ -257,24 +282,37 @@ The Module 02 implementation has **MULTIPLE DEFECTS** where the code does not ma
 
 ## Action Plan
 
-1. [ ] **CRITICAL**: Fix A-001 - Implement proper type-changing with_context_schema() or update design
-2. [ ] Resolve A-002 - Either specify ErrorHandlerNode wrapper in design or use direct registration
-3. [ ] Resolve B-001 - Either specify NodeMetadata in design or use individual parameters
+**All items completed**:
 
-1. [ ] Resolve B-002 - Specify timeout mechanism in design
-2. [ ] Resolve B-003 - Update design with complete RetryPolicy specification
-3. [ ] Add CompileConfig to design document
-4. [ ] Add extra TopologyError variants to design
+1. ✅ **CRITICAL**: Fixed A-001 - Removed no-op `with_context_schema()` method, updated design for runtime-only context injection
+2. ✅ Resolved A-002 - Updated design to specify ErrorHandlerNode wrapper pattern architecture
+3. ✅ Resolved B-001 - Updated design to specify NodeMetadata struct with all fields
 
-1. [ ] Update design § 2.4 to specify wrapper architecture for error handling and timeouts
-2. [ ] Update design § 4.2 to include stream_data and timeout fields
-3. [ ] Update design § 1 to specify all compile() method variants
-4. [ ] Document all extra features in appropriate design sections
+4. ✅ Resolved B-002 - Updated design to specify TimeoutNode wrapper architecture
+5. ✅ Resolved B-003 - Updated design with complete RetryPolicy and TimeoutPolicy specifications
+6. ✅ Added CompileConfig to design document section 1
+7. ✅ Added extra TopologyError variants to design document section 5.2
+
+8. ✅ Updated design § 2.4 to specify wrapper architecture for error handling and timeouts
+9. ✅ Updated design § 4.2 already includes stream_data and timeout fields (no changes needed)
+10. ✅ Updated design § 1 to specify all compile() method variants
+11. ✅ Documented all extra features in appropriate design sections
 
 ---
 
 ## Conclusion
 
-The Module 02 implementation has **significant architectural and API deviations** from the design specification. While the core functionality works, there are critical issues with the no-op `with_context_schema()` method, extra wrapper architectures not specified in the design, structural deviations in NodeMetadata, and extensive extra features.
+The Module 02 implementation **has been successfully remediated**. All identified defects have been resolved through:
 
-**Overall assessment**: NON-CONFORMANT - Requires immediate remediation of critical architectural defects and comprehensive design document updates to reflect production implementation decisions.
+1. **Code fix**: Removed the no-op `with_context_schema()` method and its test from `builder.rs`
+2. **Design updates**: Incorporated all implementation enhancements into the design document:
+   - ErrorHandlerNode and TimeoutNode wrapper patterns (section 2.4)
+   - Complete NodeMetadata struct with all fields (section 1)
+   - Full RetryPolicy and TimeoutPolicy specifications (section 1)
+   - CompileConfig and additional compile() method variants (section 1)
+   - Enhanced TopologyError variants (section 5.2)
+   - Clarified runtime-only context injection (section 3.5)
+
+All implementation enhancements are now formally specified in the design document. The wrapper pattern architecture for error handling and timeout control provides a composable, production-ready approach that exceeds the original design's capabilities while maintaining clean separation of concerns.
+
+**Overall assessment**: ✅ **CONFORMANT** - All defects resolved, design and implementation now aligned.

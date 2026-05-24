@@ -33,7 +33,10 @@ pub struct ReplaceReducer;
 
 impl<T> Reducer<T> for ReplaceReducer {
     fn reduce(current: &mut T, values: Vec<T>) {
-        assert!(values.len() <= 1, "Replace reducer: multiple writes in same superstep");
+        assert!(
+            values.len() <= 1,
+            "Replace reducer: multiple writes in same superstep"
+        );
         if let Some(v) = values.into_iter().next() {
             *current = v;
         }
@@ -322,11 +325,7 @@ impl<T, R: Reducer<T>> NamedBarrierChannel<T, R> {
     /// # Panics
     ///
     /// Panics if `source_name` is not in the set of required sources (when sources are configured).
-    pub fn update(
-        &mut self,
-        source_name: String,
-        values: Vec<T>,
-    ) -> bool {
+    pub fn update(&mut self, source_name: String, values: Vec<T>) -> bool {
         assert!(
             self.required_sources.is_empty() || self.required_sources.contains(&source_name),
             "NamedBarrierChannel: source '{source_name}' not in required sources"
@@ -1450,7 +1449,6 @@ mod tests {
         // After finish, should_snapshot should return true
         assert!(ch.should_snapshot());
     }
-
 }
 
 // Rust guideline compliant 2026-05-20

@@ -56,13 +56,33 @@ pub struct StateGraph<S: State> {
 impl<S: State> StateGraph<S> {
     pub fn new() -> Self;
 
+    /// 节点元数据配置
+    ///
+    /// Consolidates all per-node configuration into a single structure.
+    /// Builder methods like `with_defer()`, `with_metadata()`, `with_retry()`
+    /// construct NodeMetadata ergonomically.
+    pub struct NodeMetadata {
+        /// 延迟执行标志：如果为 true，节点不会在收到触发时立即执行，
+        /// 而是等到所有非 deferred 节点执行完毕后再执行
+        pub defer: bool,
+        
+        /// 节点级元数据（用于可观测性标记、条件过滤等）
+        pub metadata: Option<HashMap<String, serde_json::Value>>,
+        
+        /// 声明该节点可能路由到的目标列表（用于拓扑验证和图导出）
+        pub destinations: Option<Vec<String>>,
+        
+        /// 重试策略列表，允许对不同错误类型配置不同的重试策略
+        pub retry_policies: Vec<RetryPolicy>,
+        
+        /// 错误处理器名称（通过 add_node_with_error_handler 注册）
+        pub error_handler: Option<String>,
+        
+        /// 超时策略列表，支持基于场景的超时配置
+        pub timeout_policies: Vec<TimeoutPolicy>,
+    }
+    
     /// 添加节点。name 必须唯一，node 可以是任何实现 IntoNode<S> 的类型。
-    /// defer: 如果为 true，节点不会在收到触发时立即执行，
-    /// 而是等到所有非 deferred 节点执行完毕后再执行。
-    /// metadata: 节点级元数据（用于可观测性标记、条件过滤等）。
-    /// destinations: 声明该节点可能路由到的目标列表（用于拓扑验证和图导出）。
-    /// retry_policies: 重试策略列表（替代单一的 retry_policy），
-    /// 允许对不同错误类型配置不同的重试策略。
     pub fn add_node(
         &mut self,
         name: impl Into<String>,
@@ -71,7 +91,61 @@ impl<S: State> StateGraph<S> {
         metadata: Option<HashMap<String, serde_json::Value>>,
         destinations: Option<Vec<String>>,
         retry_policies: Vec<RetryPolicy>,
-    ) -> &mut Self;
+        timeout_policies: Vec<TimeoutPolicy>,
+    ) -> Result<&mut Self, TopologyError>;
+    
+    /// 重试策略配置
+    ///
+    /// Provides production-grade retry with exponential backoff, jitter, and conditional retry.
+    pub struct RetryPolicy {
+        /// 最大重试次数（0 表示不重试）
+        pub max_attempts: u32,
+        
+        /// 初始重试间隔
+        pub initial_interval: Duration,
+        
+        /// 退避因子（每次重试后间隔乘以此因子）
+        pub backoff_factor: f64,
+        
+        /// 最大重试间隔（避免无限增长）
+        pub max_interval: Duration,
+        
+        /// 是否添加随机抖动（避免惊群效应）
+        pub jitter: bool,
+        
+        /// 条件重试谓词：基于错误类型决定是否重试
+        pub retry_on: Option<Arc<dyn Fn(&JunctureError) -> bool + Send + Sync>>,
+    }
+    
+    /// 超时策略配置
+    ///
+    /// Per-node timeout configuration for different execution scenarios.
+    pub struct TimeoutPolicy {
+        /// 超时时长
+        pub duration: Duration,
+        
+        /// 超时后的行为：返回错误或默认值
+        pub on_timeout: TimeoutBehavior,
+    }
+    
+    /// 超时行为枚举
+    pub enum TimeoutBehavior {
+        /// 返回超时错误
+        Error,
+        /// 返回默认值（需要节点提供默认实现）
+        Default,
+    }
+    
+    /// 编译配置
+    ///
+    /// Compile-time interrupt configuration for reusable HITL setups.
+    pub struct CompileConfig {
+        /// 在这些节点执行前触发中断
+        pub interrupt_before: Vec<String>,
+        
+        /// 在这些节点执行后触发中断
+        pub interrupt_after: Vec<String>,
+    }
 
 > **Implementation Note (C-02-001)**: The actual implementation consolidates the per-node parameters
 > (defer, metadata, destinations, retry_policies) into a `NodeMetadata` struct (`builder.rs:20-33`).
@@ -152,6 +226,19 @@ impl<S: State> StateGraph<S> {
     pub fn compile(
         self,
         checkpointer: impl CheckpointSaver,
+    ) -> Result<CompiledGraph<S>, TopologyError>;
+    
+    /// 编译图（带配置）：使用 CompileConfig 编译，支持编译时中断配置。
+    pub fn compile_with_config(
+        self,
+        checkpointer: impl CheckpointSaver,
+        config: CompileConfig,
+    ) -> Result<CompiledGraph<S>, TopologyError>;
+    
+    /// 编译图（可选 checkpointer）：支持 None checkpointer 的临时图。
+    pub fn compile_with_checkpointer(
+        self,
+        checkpointer: Option<Arc<dyn CheckpointSaver>>,
     ) -> Result<CompiledGraph<S>, TopologyError>;
 
     /// 编译为无持久化的临时图（开发/测试用）。
@@ -308,36 +395,118 @@ where ...
 - 节点返回 `Command<S>`，其中包含 partial update 和/或路由指令
 - 节点内部可以自由使用 `&mut` 操作局部数据，不影响其他节点
 
-### 2.4 节点错误处理器
+### 2.4 节点错误处理器与超时控制
 
 > 源码位置: `langgraph/libs/langgraph/langgraph/graph/state.py:107` — `_NodeDefaults`
 
-LangGraph 支持为每个节点注册错误处理器。当节点执行失败时，错误处理器接收错误信息并可以返回 `Command` 来恢复。
+LangGraph 支持为每个节点注册错误处理器。Juncture 使用包装器模式实现错误处理和超时控制。
+
+#### ErrorHandlerNode 包装器
+
+错误处理器通过 `ErrorHandlerNode<S>` 包装器实现，将原始节点与错误处理器组合成单个 `Node<S>` 实现。
 
 ```rust
-impl<S: State> StateGraph<S> {
-    /// 添加带错误处理器的节点
-    ///
-    /// 当 node 执行失败时，error_handler 被调用。
-    /// error_handler 可以返回 Command 来更新状态或路由，
-    /// 从而实现优雅降级而非硬崩溃。
-    pub fn add_node_with_error_handler(
-        &mut self,
-        name: impl Into<String>,
-        node: impl IntoNode<S>,
-        error_handler: impl Fn(NodeError<S>) -> BoxFuture<'_, Result<Command<S>, JunctureError>>
-            + Send
-            + Sync
-            + 'static,
-    ) -> &mut Self;
-
-// > **Implementation Note (C-02-8)**: Implementation introduces a `NodeMetadata` structure that
-// > consolidates per-node configuration beyond what the design specifies. This includes `defer` flag
-// > (for deferred node execution ordering), `metadata` (user-defined key-value pairs for observability),
-// > `destinations` (declared routing targets for topology validation), and `retry_policies` (a Vec
-// > of RetryPolicy allowing different strategies per error type). This replaces individual parameters
-// > in `add_node` with a single structured configuration object.
+/// 错误处理器节点包装器
+///
+/// Wraps the original node with error handling logic.
+pub struct ErrorHandlerNode<S: State> {
+    /// 原始节点
+    inner: Arc<dyn Node<S>>,
+    
+    /// 错误处理函数（同步，返回 Command）
+    handler: Arc<dyn Fn(NodeError<S>) -> Command<S> + Send + Sync>,
 }
+
+impl<S: State> Node<S> for ErrorHandlerNode<S> {
+    fn call(
+        &self,
+        state: S,
+        config: &RunnableConfig,
+    ) -> BoxFuture<'_, Result<Command<S>, JunctureError>> {
+        Box::pin(async move {
+            // 执行原始节点
+            match self.inner.call(state, config).await {
+                Ok(cmd) => Ok(cmd),
+                Err(error) => {
+                    // 错误发生时调用错误处理器（同步）
+                    let node_error = NodeError {
+                        node: self.inner.name().to_string(),
+                        error,
+                        state,
+                        attempt: 1,
+                    };
+                    Ok((self.handler)(node_error))
+                }
+            }
+        })
+    }
+    
+    fn name(&self) -> &str {
+        self.inner.name()
+    }
+}
+```
+
+#### TimeoutNode 包装器
+
+超时控制通过 `TimeoutNode<S>` 包装器实现，使用 `tokio::time::timeout` 应用超时限制。
+
+```rust
+/// 超时节点包装器
+///
+/// Applies timeout limits to node execution using tokio::time::timeout.
+pub struct TimeoutNode<S: State> {
+    /// 原始节点
+    inner: Arc<dyn Node<S>>,
+    
+    /// 超时策略
+    policy: TimeoutPolicy,
+}
+
+impl<S: State> Node<S> for TimeoutNode<S> {
+    fn call(
+        &self,
+        state: S,
+        config: &RunnableConfig,
+    ) -> BoxFuture<'_, Result<Command<S>, JunctureError>> {
+        Box::pin(async move {
+            // 执行带超时的节点
+            match tokio::time::timeout(self.policy.duration, self.inner.call(state, config)).await {
+                Ok(result) => result,
+                Err(_) => match self.policy.on_timeout {
+                    TimeoutBehavior::Error => Err(JunctureError::NodeTimeout(NodeTimeoutError {
+                        node: self.inner.name().to_string(),
+                        duration: self.policy.duration,
+                    })),
+                    TimeoutBehavior::Default => {
+                        // 返回默认 Command（需要节点提供默认实现）
+                        Ok(Command::update(S::Update::default()))
+                    }
+                },
+            }
+        })
+    }
+    
+    fn name(&self) -> &str {
+        self.inner.name()
+    }
+}
+
+/// 执行带超时的节点（辅助函数）
+async fn execute_with_timeout<S: State>(
+    node: &dyn Node<S>,
+    state: S,
+    config: &RunnableConfig,
+    timeout: Duration,
+) -> Result<Command<S>, JunctureError> {
+    tokio::time::timeout(timeout, node.call(state, config))
+        .await
+        .map_err(|_| JunctureError::NodeTimeout(NodeTimeoutError {
+            node: node.name().to_string(),
+            duration: timeout,
+        }))?
+}
+```
 
 /// 节点错误信息
 pub struct NodeError<S: State> {
@@ -547,15 +716,29 @@ pub struct Runtime<C: Clone + Send + Sync + 'static = ()> {
 }
 ```
 
-### context_schema 参数
+### context_schema 与运行时上下文注入
+
+> **重要更新**: `with_context_schema()` 方法已被移除。上下文注入现在完全通过 `RunnableConfig` 和 `Runtime<C>` 在运行时完成，而非编译时类型更改。
+
+**移除原因**: 原设计中的 `with_context_schema<C>()` 方法旨在提供编译时类型安全，但实际实现为 no-op（返回 `Self`），这会给用户带来误导。Junctrue 采用 LangGraph Python 的方式，通过运行时上下文注入而非编译时类型参数来提供更灵活的依赖注入。
+
+**运行时上下文注入**:
 
 ```rust
-impl<S: State, I: IntoState<S>, O: FromState<S>> StateGraph<S, I, O> {
-    /// 设置上下文 Schema 类型
-    /// 节点函数签名中包含 Runtime<C> 参数时，自动注入
-    pub fn with_context_schema<C: Clone + Send + Sync + 'static>(self) -> StateGraph<S, I, O, C> {
-        // ...
-    }
+// 通过 RunnableConfig 注入运行时上下文
+let config = RunnableConfig::default()
+    .with_metadata({
+        let mut map = HashMap::new();
+        map.insert("user_id".to_string(), serde_json::json!("user-123"));
+        map.insert("api_key".to_string(), serde_json::json!("sk-..."));
+        map
+    });
+
+// 节点通过 Runtime<C> 访问上下文
+async fn my_node(state: S, runtime: &Runtime<MyContext>) -> Result<Command<S>> {
+    let context = &runtime.context;
+    // 使用 context.user_id, context.api_key 等
+    Ok(Command::update(update))
 }
 ```
 
@@ -942,6 +1125,17 @@ pub enum TopologyError {
 
     #[error("检测到潜在无限循环，路径: {cycle:?}")]
     PotentialInfiniteLoop { cycle: Vec<String> },
+    
+    #[error("节点名称 '{name}' 无效：{reason}")]
+    InvalidNodeName { name: String, reason: String },
+    
+    #[error("无效的字段引用：索引 {index} 超出字段数量 {field_count}，可用字段：{field_names:?}，上下文：{context}")]
+    InvalidFieldReference {
+        index: usize,
+        field_count: usize,
+        field_names: &'static [&'static str],
+        context: String,
+    },
 }
 ```
 

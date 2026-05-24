@@ -1,52 +1,61 @@
-# Task Plan: Verify review/01-state-channel.md remediation
+# Task Plan: Module 02 Graph Builder Conformance Remediation
 
 ## Goal
-Verify that all fixes claimed in review/01-state-channel.md are actually present in the codebase.
+Fix all defects identified in `review/02-graph-builder.md` to achieve CONFORMANT status.
+
+## Findings from Review
+- 2 technical direction deviations (A-001, A-002)
+- 3 feature simplifications (B-001, B-002, B-003)
+- 5 extra features not in design (C-001 through C-005)
+- 8 fully conformant items
 
 ## Phases
 
-### Phase 1: Verify code fixes (A-001, B-001, B-002)
-- [ ] A-001: DeltaBlob is now generic `DeltaBlob<T>` with proper bounds
-- [ ] B-001: DeltaChannel has `finish()` method
-- [ ] B-002: Reducer trait methods return `()`, not `Result`; Channel::update returns `bool`
+### Phase 1: Fix A-001 with_context_schema() no-op (CRITICAL)
+**Status**: pending
+**Action**: Remove the no-op method. The design doc section 3.5 already acknowledges runtime injection via RunnableConfig. The method provides no value and misleads users.
+**Files**: `crates/juncture-core/src/graph/builder.rs`
+**Design update**: Update design section 3.5 to clarify context injection is runtime-only via RunnableConfig, not compile-time type change.
 
-### Phase 2: Verify design doc updates (C-001, C-002, C-003)
-- [ ] C-001: Design doc documents all State trait methods
-- [ ] C-002: Design doc has TopicChannel section
-- [ ] C-003: Design doc has NamedBarrierChannel section
+### Phase 2: Update design doc for A-002 ErrorHandlerNode wrapper
+**Status**: pending
+**Action**: Update design section 2.4 to formally specify the ErrorHandlerNode wrapper pattern instead of direct registration.
+**Files**: `design/02-graph-builder.md`
 
-### Phase 3: Verify conformance claims (CONF-001 through CONF-004)
-- [ ] CONF-001: FieldsChanged u64 bitmask with required methods
-- [ ] CONF-002: CowState Arc-based with required methods
-- [ ] CONF-003: Overwrite<T> with `__overwrite__` wire format
-- [ ] CONF-004: MessagesState with append+merge+delete
+### Phase 3: Update design doc for B-001 NodeMetadata consolidation
+**Status**: pending
+**Action**: Update design section 1 to specify NodeMetadata struct instead of individual parameters.
+**Files**: `design/02-graph-builder.md`
 
-### Phase 4: Run full verification
-- [ ] cargo build --workspace --all-features
-- [ ] cargo test --workspace --all-targets --all-features
-- [ ] cargo clippy --workspace --all-targets --all-features -- -D warnings
+### Phase 4: Update design doc for B-002 TimeoutNode wrapper
+**Status**: pending
+**Action**: Add TimeoutNode wrapper specification to design section 2.4.
+**Files**: `design/02-graph-builder.md`
 
-## Status: complete
+### Phase 5: Update design doc for B-003 RetryPolicy extra fields
+**Status**: pending
+**Action**: Update design section 1 to specify complete RetryPolicy with backoff_factor, max_interval, jitter, retry_on.
+**Files**: `design/02-graph-builder.md`
 
-## Verification Results
+### Phase 6: Update design doc for C-001 through C-005
+**Status**: pending
+**Action**: Add to design doc:
+- C-001: CompileConfig struct and compile_with_config() in section 1
+- C-002: Extra TopologyError variants in section 5.2
+- C-003: Extra compile() method variants in section 1
+- C-004: Command.stream_data field in section 4.2
+- C-005: SendTarget.timeout field in section 4.2
+**Files**: `design/02-graph-builder.md`
 
-### Phase 1: Code fixes - ALL VERIFIED
-- [x] A-001: `DeltaBlob<T>` is generic with `Clone + Serialize + DeserializeOwned` bounds (line 837-845)
-- [x] B-001: `DeltaChannel::finish()` at line 788, forces snapshot by setting update_count
-- [x] B-002: `Reducer::reduce()` returns `()`, `Channel::update()` returns `bool`, no `InvalidUpdateError` in channel.rs
+### Phase 7: Update review file to mark all items resolved
+**Status**: pending
+**Action**: Update `review/02-graph-builder.md` to reflect remediation status.
+**Files**: `review/02-graph-builder.md`
 
-### Phase 2: Design doc updates - ALL VERIFIED
-- [x] C-001: Section 2.2 (line 205) documents State trait with extended methods (line 239)
-- [x] C-002: Section 3.4 (line 986) documents TopicChannel
-- [x] C-003: Section 3.5 (line 1034) documents NamedBarrierChannel
+### Phase 8: Verify - build and test
+**Status**: pending
+**Action**: Run `cargo build`, `cargo test`, `cargo clippy` to ensure zero warnings/errors.
 
-### Phase 3: Conformance claims - ALL VERIFIED
-- [x] CONF-001: FieldsChanged (trait_.rs:214) - u64 bitmask with is_empty/has_field/set_field/merge
-- [x] CONF-002: CowState (trait_.rs:252) - Arc-based with new/get/get_mut/update/commit
-- [x] CONF-003: Overwrite<T> (channel.rs:101) - {"__overwrite__": value} wire format
-- [x] CONF-004: MessagesState (messages.rs) - append+merge+delete semantics with remove/remove_all
-
-### Phase 4: Build/Test/Clippy - ALL PASS
-- cargo build: OK
-- cargo test: 831 tests passed, 0 failed
-- cargo clippy: 0 warnings, 0 errors
+## Errors Encountered
+| Error | Attempt | Resolution |
+|-------|---------|------------|

@@ -1063,15 +1063,6 @@ impl<S: State, I: IntoState<S>, O: FromState<S>> StateGraph<S, I, O> {
         )
     }
 
-    /// Set the context schema type for this graph
-    ///
-    /// Currently a no-op that returns `self` for forward compatibility.
-    /// Will be used for compile-time context validation in a future release.
-    #[must_use]
-    pub const fn with_context_schema(self) -> Self {
-        self
-    }
-
     /// Add a fixed edge between two nodes
     ///
     /// # Examples
@@ -1566,13 +1557,6 @@ mod tests {
 
         let compiled = graph.compile_ephemeral().unwrap();
         assert_eq!(compiled.nodes().len(), 1);
-    }
-
-    #[test]
-    fn test_with_context_schema() {
-        let graph: StateGraph<StateDummy> = StateGraph::new();
-        let returned = graph.with_context_schema();
-        assert!(returned.nodes.is_empty());
     }
 
     #[test]
