@@ -267,13 +267,12 @@ The implementation of Module 10 (Store) has **MULTIPLE DEFECTS** when evaluated 
 
 ## Action Plan
 
-1. [ ] **D-001**: Restructure StoreError to match design variants exactly
-2. [ ] **D-002**: Change FilterExpr And/Or to tuple variants OR update design
-3. [ ] **D-005**: Remove `embedding` field from Item struct OR update design
-
-1. [ ] **D-003**: Use exact `is_expired()` implementation from design OR update design
-2. [ ] **D-004**: Specify exact default values for SearchQuery fields OR update design
-3. [ ] **D-006**: Remove `start_sweep_task()` automation OR update design
+[ ] **D-001**: Restructure StoreError to match design variants exactly
+[ ] **D-002**: Change FilterExpr And/Or to tuple variants OR update design
+[ ] **D-005**: Remove `embedding` field from Item struct OR update design
+[ ] **D-003**: Use exact `is_expired()` implementation from design OR update design
+[ ] **D-004**: Specify exact default values for SearchQuery fields OR update design
+[ ] **D-006**: Remove `start_sweep_task()` automation OR update design
 
 ### NEVER acceptable
 1. [ ] DO NOT accept "functionally equivalent" as justification for implementation differences
