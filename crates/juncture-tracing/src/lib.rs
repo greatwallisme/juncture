@@ -86,6 +86,7 @@ pub use config::{TracingConfig, TracingInstallResult, init};
 #[cfg(feature = "otel")]
 pub use metrics::{
     CounterBuilder, GaugeBuilder, HistogramBuilder, MetricsRegistry, RegistryMetricsCollector,
+    registry,
 };
 #[cfg(feature = "otel")]
 pub use propagation::{attach_context, extract_trace_context, inject_trace_context};

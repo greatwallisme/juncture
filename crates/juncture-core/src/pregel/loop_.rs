@@ -678,7 +678,7 @@ impl<S: State> PregelLoop<S> {
         if let Some(ref tx) = self.stream_tx {
             let _ = tx.send(StreamEvent::Debug(DebugEvent::SuperstepStart {
                 step: self.step,
-                nodes: node_names
+                pending_nodes: node_names
                     .iter()
                     .copied()
                     .map(std::string::ToString::to_string)
@@ -904,20 +904,21 @@ impl<S: State> PregelLoop<S> {
             self.pending_tasks.extend(recovery_tasks);
         }
 
-        // Emit RouteDecision debug event after computing next tasks
+        // Emit EdgeTraversed debug event after computing next tasks
         if let Some(ref tx) = self.stream_tx {
             let next_node_names: Vec<String> = self
                 .pending_tasks
                 .iter()
                 .map(|t| t.node_name.clone())
                 .collect();
-            if !next_node_names.is_empty() {
-                let route_event = StreamEvent::Debug(DebugEvent::RouteDecision {
+            // Emit one EdgeTraversed event per next node
+            for node_name in &next_node_names {
+                let edge_event = StreamEvent::Debug(DebugEvent::EdgeTraversed {
                     from: "superstep".to_string(),
-                    to: next_node_names,
-                    step: self.step,
+                    to: node_name.clone(),
+                    edge_type: "conditional".to_string(),
                 });
-                let _ = tx.send(route_event);
+                let _ = tx.send(edge_event);
             }
         }
 
@@ -2088,24 +2089,26 @@ impl<S: State> PregelLoop<S> {
     // -----------------------------------------------------------------------
 
     /// Invoke graph-end callback if a handler is configured and emit
-    /// the `juncture.graph.complete` tracing event with execution metrics.
+    /// the `juncture.graph.complete` tracing span with execution metrics.
     #[inline]
     fn on_graph_end(&self, result: &Result<(), JunctureError>) {
-        // Extract budget metrics for the completion event.
+        // Extract budget metrics for the completion span.
         let (total_tokens, cost_usd) = self.budget_tracker.as_ref().map_or((0, 0.0), |tracker| {
             let usage = tracker.current_usage();
             (usage.tokens_used, usage.cost_usd)
         });
 
         let success = result.is_ok();
-        tracing::info!(
-            name: "juncture.graph.complete",
+        let span = tracing::info_span!(
+            "juncture.graph.complete",
             total_steps = self.step,
             total_tokens = total_tokens,
             cost_usd = cost_usd,
             success = success,
-            "Graph execution completed",
         );
+        let _enter = span.enter();
+
+        tracing::info!("Graph execution completed");
 
         if let Some(ref handler) = self.runnable_config.callback_handler {
             handler.on_graph_end(result);

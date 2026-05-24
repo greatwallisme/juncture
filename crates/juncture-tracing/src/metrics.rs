@@ -746,6 +746,24 @@ impl juncture_core::observability::MetricsCollector for RegistryMetricsCollector
     }
 }
 
+/// Create a new metrics registry
+///
+/// Convenience function equivalent to [`MetricsRegistry::new()`].
+/// Provides the API surface shown in the design specification.
+///
+/// # Examples
+///
+/// ```
+/// use juncture_tracing::metrics::registry;
+///
+/// let reg = registry();
+/// ```
+#[cfg(feature = "otel")]
+#[must_use]
+pub fn registry() -> MetricsRegistry {
+    MetricsRegistry::new()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -273,32 +273,70 @@ pub struct MessageStreamMetadata {
 }
 
 /// Debug event details
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize)]
 pub enum DebugEvent {
+    /// Graph execution started
+    GraphStart {
+        thread_id: String,
+        input: serde_json::Value,
+    },
+    /// Superstep started
     SuperstepStart {
         step: usize,
-        nodes: Vec<String>,
+        pending_nodes: Vec<String>,
     },
-    SuperstepEnd {
+    /// Superstep ended (extra variant for enhanced debug visibility)
+    SuperstepEnd { step: usize, duration_ms: u64 },
+    /// Node execution started
+    NodeStart { node: String, step: usize },
+    /// Node execution completed
+    NodeEnd {
+        node: String,
         step: usize,
         duration_ms: u64,
+        output_type: String,
     },
+    /// Node execution failed
+    NodeError {
+        node: String,
+        step: usize,
+        error: String,
+    },
+    /// Channel write operation
+    ChannelWrite {
+        channel: String,
+        node: String,
+        value_summary: String,
+    },
+    /// Channel version updated
+    ChannelUpdate { channel: String, new_version: u64 },
+    /// State merge completed
+    Merge {
+        step: usize,
+        channels_updated: Vec<String>,
+    },
+    /// Edge traversed during routing
+    EdgeTraversed {
+        from: String,
+        to: String,
+        edge_type: String,
+    },
+    /// Checkpoint saved
     CheckpointSaved {
         checkpoint_id: String,
-        metadata: crate::checkpoint::CheckpointMetadata,
         step: usize,
+        source: String,
     },
-    ChannelUpdate {
-        channel: String,
-        version: u64,
+    /// Budget check performed
+    BudgetCheck {
+        tokens_used: u64,
+        cost_usd: f64,
+        budget_remaining_pct: f32,
     },
-    RouteDecision {
-        from: String,
-        to: Vec<String>,
-        step: usize,
-    },
-    BudgetStatus {
-        usage: BudgetUsage,
+    /// Graph execution completed
+    GraphEnd {
+        total_steps: usize,
+        total_duration_ms: u64,
     },
 }
 

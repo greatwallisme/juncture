@@ -245,6 +245,7 @@ impl ChatModel for ChatAnthropic {
             "juncture.tokens.output" = tracing::field::Empty,
             "juncture.llm.has_tool_calls" = false,
             "juncture.llm.stop_reason" = tracing::field::Empty,
+            "juncture.cost.usd" = tracing::field::Empty,
         );
         let _enter = span.enter();
 
@@ -331,6 +332,18 @@ impl ChatModel for ChatAnthropic {
         if let Some(usage) = &api_response.usage {
             tracing::Span::current().record(attrs::TOKENS_INPUT, usage.input_tokens);
             tracing::Span::current().record(attrs::TOKENS_OUTPUT, usage.output_tokens);
+
+            // Calculate and record cost
+            let pricing_table = crate::llm::PricingTable::default();
+            if let Some((input_price, output_price)) = pricing_table.get(model.as_str()) {
+                #[expect(
+                    clippy::cast_precision_loss,
+                    reason = "token counts fit in f64 for pricing"
+                )]
+                let cost = (usage.input_tokens as f64 * input_price / 1_000_000.0)
+                    + (usage.output_tokens as f64 * output_price / 1_000_000.0);
+                tracing::Span::current().record("juncture.cost.usd", cost);
+            }
         }
 
         let has_tool_calls = api_response

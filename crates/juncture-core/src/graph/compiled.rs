@@ -3898,7 +3898,7 @@ mod tests {
         let event: StreamEvent<StateDummy> =
             StreamEvent::Debug(crate::stream::DebugEvent::SuperstepStart {
                 step: 0,
-                nodes: vec![],
+                pending_nodes: vec![],
             });
         assert!(event.namespace().is_empty());
     }
