@@ -20,6 +20,14 @@ use juncture_core::interrupt::InterruptSignal;
 use crate::error::CheckpointError;
 use crate::serde::{SerializerKind, deserialize_auto};
 
+/// Schema migration function type.
+///
+/// Called for each step in the chain migration from `from_version` to `to_version`.
+/// Receives the raw `serde_json::Value` and must return the migrated value.
+/// On failure, return `Err(String)` with a human-readable reason.
+pub type SchemaMigratorFn =
+    Box<dyn Fn(u32, u32, serde_json::Value) -> Result<serde_json::Value, String> + Send + Sync>;
+
 // Convert crate's CheckpointError to core's CheckpointError
 #[allow(dead_code, reason = "conversion trait used internally")]
 trait ToCoreCheckpointError<T> {
@@ -64,6 +72,8 @@ pub struct PostgresSaver {
     pool: Arc<sqlx::PgPool>,
     /// Serializer for checkpoint data fields
     serializer: SerializerKind,
+    /// Optional schema migration function for chain migration (design doc §5.4)
+    schema_migrator: Option<Arc<SchemaMigratorFn>>,
 }
 
 #[cfg(feature = "postgres")]
@@ -72,6 +82,7 @@ impl std::fmt::Debug for PostgresSaver {
         f.debug_struct("PostgresSaver")
             .field("pool", &self.pool)
             .field("serializer", &self.serializer)
+            .field("has_schema_migrator", &self.schema_migrator.is_some())
             .finish()
     }
 }
@@ -138,6 +149,7 @@ impl PostgresSaver {
         Ok(Self {
             pool: Arc::new(pool),
             serializer: SerializerKind::default(),
+            schema_migrator: None,
         })
     }
 
@@ -197,6 +209,33 @@ impl PostgresSaver {
         self
     }
 
+    /// Register a custom schema migrator for chain migration (design doc §5.4)
+    ///
+    /// The migrator is called for each step in the chain migration from
+    /// `from_version` to `to_version`. It receives the raw `serde_json::Value`
+    /// and must return the migrated value, or an error with a human-readable reason.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let saver = PostgresSaver::new("postgresql://localhost/db").await?
+    ///     .with_schema_migrator(Box::new(|from, to, mut values| {
+    ///         match (from, to) {
+    ///             (1, 2) => {
+    ///                 // Add new field with default
+    ///                 values["new_field"] = serde_json::json!("default");
+    ///                 Ok(values)
+    ///             }
+    ///             _ => Err(format!("unknown migration: {from} -> {to}")),
+    ///         }
+    ///     }));
+    /// ```
+    #[must_use]
+    pub fn with_schema_migrator(mut self, migrator: SchemaMigratorFn) -> Self {
+        self.schema_migrator = Some(Arc::new(migrator));
+        self
+    }
+
     /// Get thread ID from config, returning error if not set
     fn get_thread_id(config: &RunnableConfig) -> Result<String, CheckpointError> {
         config
@@ -215,18 +254,20 @@ impl PostgresSaver {
 
     /// Migrate checkpoint data from older schema version to current version
     ///
-    /// This function implements the schema migration strategy specified in
-    /// design doc §5.4. It validates schema version compatibility and returns
-    /// the `channel_values` as-is if versions match, or an error if they do not.
+    /// Implements the chain migration strategy from design doc §5.4:
+    /// 1. Compare stored `schema_version` with current version
+    /// 2. If versions match, return as-is
+    /// 3. If stored < current, apply step-by-step chain migration
+    /// 4. If stored > current, error (downgrade not supported)
     ///
-    /// Schema migration operates on `serde_json::Value` to avoid dependencies
-    /// on old struct definitions. When schema versions differ, the application
-    /// layer must handle migration using `State::migrate()` after checkpoint load.
-    #[allow(clippy::too_many_arguments, reason = "required by database schema")]
+    /// Migration operates on `serde_json::Value` to avoid dependencies on old
+    /// struct definitions. Custom migration steps can be registered via
+    /// [`PostgresSaver::with_schema_migrator`].
     fn migrate_checkpoint_schema(
         channel_values: serde_json::Value,
         stored_schema_version: u32,
         checkpoint_id: &str,
+        migrator: Option<&Arc<SchemaMigratorFn>>,
     ) -> Result<serde_json::Value, CoreCheckpointError> {
         let current_schema_version = 1u32;
 
@@ -234,11 +275,40 @@ impl PostgresSaver {
             return Ok(channel_values);
         }
 
-        Err(CoreCheckpointError::Other(format!(
-            "Checkpoint {checkpoint_id} has schema version {stored_schema_version}, \
-             but current version is {current_schema_version}. Manual migration required. \
-             Use State::migrate() at the application layer."
-        )))
+        if stored_schema_version > current_schema_version {
+            return Err(CoreCheckpointError::Other(format!(
+                "Checkpoint {checkpoint_id} has schema version {stored_schema_version}, \
+                 but current version is {current_schema_version}. \
+                 Downgrade is not supported."
+            )));
+        }
+
+        // Chain migration: apply step-by-step from stored_version to current_version
+        let mut values = channel_values;
+        for step_from in stored_schema_version..current_schema_version {
+            let step_to = step_from + 1;
+
+            // Try registered migrator first
+            if let Some(migrate_fn) = migrator {
+                values = migrate_fn(step_from, step_to, values).map_err(|reason| {
+                    CoreCheckpointError::Other(format!(
+                        "Checkpoint {checkpoint_id}: schema migration \
+                         v{step_from} -> v{step_to} failed: {reason}"
+                    ))
+                })?;
+            } else {
+                // No migrator registered and no built-in migration step available.
+                // Future built-in steps should be added as if/else branches here:
+                // if (step_from, step_to) == (1, 2) { ... }
+                return Err(CoreCheckpointError::Other(format!(
+                    "Checkpoint {checkpoint_id}: no migration path from \
+                     schema v{step_from} to v{step_to}. Register a schema \
+                     migrator via PostgresSaver::with_schema_migrator()."
+                )));
+            }
+        }
+
+        Ok(values)
     }
 
     /// Deserialize checkpoint from database row fields
@@ -259,6 +329,7 @@ impl PostgresSaver {
         schema_version: i64,
         checkpoint_id: String,
         created_at: String,
+        schema_migrator: Option<&Arc<SchemaMigratorFn>>,
     ) -> Result<Checkpoint, CoreCheckpointError> {
         let raw_channel_values: serde_json::Value = deserialize_auto(channel_values_bytes)
             .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
@@ -269,6 +340,7 @@ impl PostgresSaver {
             raw_channel_values,
             schema_version_u32,
             &checkpoint_id,
+            schema_migrator,
         )?;
 
         let channel_versions: std::collections::HashMap<String, u64> =
@@ -324,6 +396,7 @@ impl PostgresSaver {
     fn row_to_tuple(
         row: &sqlx::postgres::PgRow,
         config: &RunnableConfig,
+        schema_migrator: Option<&Arc<SchemaMigratorFn>>,
     ) -> Result<CheckpointTuple, CoreCheckpointError> {
         let channel_values_bytes: Vec<u8> = row
             .try_get("channel_values")
@@ -366,6 +439,7 @@ impl PostgresSaver {
             schema_version,
             checkpoint_id,
             created_at,
+            schema_migrator,
         )
         .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
 
@@ -523,7 +597,7 @@ impl juncture_core::checkpoint::CheckpointSaver for PostgresSaver {
 
         match row {
             Some(ref row) => {
-                let mut tuple = Self::row_to_tuple(row, config)?;
+                let mut tuple = Self::row_to_tuple(row, config, self.schema_migrator.as_ref())?;
                 let pending_writes = self
                     .load_pending_writes(&thread_id, &checkpoint_ns, &tuple.checkpoint.id)
                     .await?;
@@ -582,7 +656,7 @@ impl juncture_core::checkpoint::CheckpointSaver for PostgresSaver {
 
         let tuples: Vec<CheckpointTuple> = rows
             .iter()
-            .map(|row| Self::row_to_tuple(row, config))
+            .map(|row| Self::row_to_tuple(row, config, self.schema_migrator.as_ref()))
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| CoreCheckpointError::Storage(e.to_string()))?;
 
