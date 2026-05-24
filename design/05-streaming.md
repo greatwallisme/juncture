@@ -94,7 +94,7 @@ pub enum StreamEvent<S: State> {
     /// FilteredValues 变体支持 output_keys 过滤，
     /// 避免 Values 模式克隆整个 state。仅包含调用方指定的字段，显著优化大 state 场景的性能。
     FilteredValues {
-        fields: HashMap<String, serde_json::Value>,
+        data: serde_json::Value,
         step: usize,
     },
 
@@ -109,7 +109,7 @@ pub enum StreamEvent<S: State> {
     /// 避免 Updates 模式克隆整个 update。仅包含调用方指定的字段，显著优化大 update 场景的性能。
     FilteredUpdates {
         node: String,
-        fields: HashMap<String, serde_json::Value>,
+        data: serde_json::Value,
         step: usize,
     },
 
@@ -160,6 +160,13 @@ pub enum StreamEvent<S: State> {
         output: S,
     },
 
+    /// 图执行被取消（如调用方 drop 了 stream）。
+    ///
+    /// 当图在到达自然 `End` 之前被中断时触发。
+    /// 消费者通过此变体区分正常完成（`End`）、取消（`Cancelled`）
+    /// 和错误（通过 `Result` 传播）。
+    Cancelled { step: usize },
+
     /// 调试事件（StreamMode::Debug）
     Debug(DebugEvent),
 
@@ -195,6 +202,8 @@ pub enum ToolsEvent {
         tool_call_id: String,
         node: String,
         input: serde_json::Value,
+        /// 工具开始执行的时间戳
+        timestamp: chrono::DateTime<chrono::Utc>,
     },
     /// 工具输出增量（流式工具结果）
     ToolOutputDelta {
@@ -206,6 +215,8 @@ pub enum ToolsEvent {
         tool_call_id: String,
         output: serde_json::Value,
         duration_ms: u64,
+        /// 是否执行成功（false 时表示非错误的正常失败，如空结果）
+        success: bool,
     },
     /// 工具执行失败
     ToolError {
@@ -401,25 +412,27 @@ impl<S: State> EventEmitter<S> {
 
     /// 发送事件（如果当前 mode 不需要此类事件，直接丢弃）
     pub async fn emit(&self, event: StreamEvent<S>) {
-        if self.should_emit(&event) {
-            // 忽略发送失败（接收端已关闭 = 调用方不再关心）
-            let _ = self.tx.send(event).await;
-        }
+        // 忽略发送失败（接收端已关闭 = 调用方不再关心）
+        let _ = self.tx.send(event).await;
     }
 
     /// 创建 StreamWriter handle（传递给节点用于 custom streaming）
-    pub fn stream_writer(&self, node: &str) -> StreamWriter {
-        StreamWriter {
-            tx: self.tx.clone(),
-            node: node.to_string(),
-            ns: vec![],
-        }
+    pub fn stream_writer(&self, node: String) -> StreamWriter<S> {
+        StreamWriter::new(self.tx.clone(), node, self.mode.clone())
     }
 
     fn should_emit(&self, event: &StreamEvent<S>) -> bool {
         match &self.mode {
-            StreamMode::Values => matches!(event, StreamEvent::Values { .. } | StreamEvent::End { .. }),
-            StreamMode::Updates => matches!(event, StreamEvent::Updates { .. } | StreamEvent::End { .. }),
+            StreamMode::Values => matches!(event,
+                StreamEvent::Values { .. }
+                | StreamEvent::FilteredValues { .. }
+                | StreamEvent::End { .. }
+            ),
+            StreamMode::Updates => matches!(event,
+                StreamEvent::Updates { .. }
+                | StreamEvent::FilteredUpdates { .. }
+                | StreamEvent::End { .. }
+            ),
             StreamMode::Messages => matches!(event, StreamEvent::Messages { .. } | StreamEvent::End { .. }),
             StreamMode::Custom => matches!(event, StreamEvent::Custom { .. } | StreamEvent::End { .. }),
             StreamMode::Debug => true, // Debug 模式接收所有事件
@@ -434,9 +447,7 @@ impl<S: State> EventEmitter<S> {
     /// 集成，支持细粒度的流式事件过滤。
     pub fn has_nostream_tag(&self, options: Option<&CallOptions>) -> bool {
         options
-            .and_then(|opts| opts.tags.as_ref())
-            .map(|tags| tags.iter().any(|tag| tag == "nostream"))
-            .unwrap_or(false)
+            .is_some_and(|opts| opts.tags.iter().any(|tag| tag == "nostream"))
     }
 }
 ```
@@ -447,20 +458,59 @@ impl<S: State> EventEmitter<S> {
 /// 传递给节点的 stream writer handle
 /// 节点可通过此对象发送自定义流式数据
 #[derive(Clone)]
-pub struct StreamWriter {
-    tx: mpsc::Sender<StreamEvent<()>>, // 类型擦除的 sender
+pub struct StreamWriter<S: State> {
+    tx: Option<mpsc::Sender<StreamEvent<S>>>,
     node: String,
+    mode: StreamMode,
     ns: Vec<String>,
 }
 
-impl StreamWriter {
-    /// 发送自定义数据到流
+impl<S: State> StreamWriter<S> {
+    /// 创建连接到真实 channel 的 writer
+    pub const fn new(
+        tx: mpsc::Sender<StreamEvent<S>>,
+        node: String,
+        mode: StreamMode,
+    ) -> Self {
+        Self {
+            tx: Some(tx),
+            node,
+            mode,
+            ns: Vec::new(),
+        }
+    }
+
+    /// 创建断开连接的 writer（no-op send）。
+    ///
+    /// 当当前执行未配置 streaming 时使用。
+    pub const fn disconnected(node: String, mode: StreamMode) -> Self {
+        Self {
+            tx: None,
+            node,
+            mode,
+            ns: Vec::new(),
+        }
+    }
+
+    /// 发送自定义数据到流。
+    ///
+    /// 如果 writer 断开连接或事件不匹配配置的 [`StreamMode`]，
+    /// 静默丢弃事件。
     pub async fn send(&self, data: serde_json::Value) {
-        let _ = self.tx.send(StreamEvent::Custom {
+        let Some(ref tx) = self.tx else {
+            return;
+        };
+
+        let event = StreamEvent::Custom {
             node: self.node.clone(),
             data,
             ns: self.ns.clone(),
-        }).await;
+        };
+
+        let emitter = EventEmitter::new(tx.clone(), self.mode.clone());
+        if emitter.should_emit(&event) {
+            let _ = tx.send(event).await;
+        }
     }
 
     /// 创建子命名空间的 writer（用于子图）
@@ -470,6 +520,7 @@ impl StreamWriter {
         Self {
             tx: self.tx.clone(),
             node: self.node.clone(),
+            mode: self.mode.clone(),
             ns: new_ns,
         }
     }

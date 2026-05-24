@@ -1,5 +1,6 @@
 use crate::state::State;
 use futures::StreamExt;
+use std::collections::HashMap;
 use std::sync::Mutex;
 
 /// Stream mode for graph execution
@@ -174,6 +175,74 @@ impl<S: State> StreamEvent<S> {
             | Self::CheckpointSaved { .. }
             | Self::TaskDetail { .. } => &[],
         }
+    }
+}
+
+/// Unified stream event format -- all events carry namespace information.
+///
+/// This wrapper type ensures that all stream events include consistent
+/// namespace information for subgraph event disambiguation. It wraps
+/// [`StreamEvent`] with additional metadata about the event's source
+/// and type.
+///
+/// # Examples
+///
+/// ```ignore
+/// use juncture_core::stream::{StreamPart, StreamEvent, StreamMode};
+/// use juncture_core::state::State;
+///
+/// // Create a stream part for a top-level event
+/// let part = StreamPart {
+///     ns: vec![],
+///     event: "values",
+///     data: StreamEvent::Values { state, step: 1 },
+///     metadata: None,
+/// };
+///
+/// // Create a stream part for a subgraph event
+/// let part = StreamPart {
+///     ns: vec!["agent".to_string(), "research".to_string()],
+///     event: "messages",
+///     data: StreamEvent::Messages { chunk, metadata },
+///     metadata: None,
+/// };
+/// ```
+#[derive(Clone)]
+pub struct StreamPart<S: State> {
+    /// Event namespace path (for subgraph event disambiguation).
+    ///
+    /// Empty `vec![]` indicates a top-level graph event.
+    /// Non-empty values represent the nesting path, e.g.,
+    /// `["agent", "research"]` for an event from a nested subgraph.
+    pub ns: Vec<String>,
+
+    /// Event type label.
+    ///
+    /// A static string identifier for the event type, such as
+    /// `"values"`, `"updates"`, `"messages"`, etc.
+    pub event: &'static str,
+
+    /// Event data.
+    ///
+    /// The actual stream event payload containing the state updates,
+    /// message chunks, or other event-specific information.
+    pub data: StreamEvent<S>,
+
+    /// Event metadata.
+    ///
+    /// Optional additional metadata about the event, such as timestamps,
+    /// performance metrics, or custom annotations.
+    pub metadata: Option<HashMap<String, serde_json::Value>>,
+}
+
+impl<S: State> std::fmt::Debug for StreamPart<S> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StreamPart")
+            .field("ns", &self.ns)
+            .field("event", &self.event)
+            .field("data", &"<StreamEvent>")
+            .field("metadata", &self.metadata)
+            .finish()
     }
 }
 
@@ -379,7 +448,7 @@ impl<S: State> EventEmitter<S> {
             (StreamMode::Messages, StreamEvent::Messages { .. } | StreamEvent::End { .. }) => {
                 // Filter out Messages events with "nostream" tag
                 if let StreamEvent::Messages { metadata, .. } = event {
-                    !Self::has_nostream_tag(metadata)
+                    !Self::has_nostream_tag_in_metadata(metadata)
                 } else {
                     true
                 }
@@ -400,10 +469,49 @@ impl<S: State> EventEmitter<S> {
         }
     }
 
-    /// Check if metadata contains "nostream" tag
+    /// Check if metadata contains "nostream" tag.
+    ///
+    /// Private helper method used by `should_emit()` to filter out
+    /// Messages events that should not be streamed.
     #[must_use]
-    fn has_nostream_tag(metadata: &MessageStreamMetadata) -> bool {
+    fn has_nostream_tag_in_metadata(metadata: &MessageStreamMetadata) -> bool {
         metadata.tags.iter().any(|tag| tag == "nostream")
+    }
+
+    /// Check if `CallOptions` contains "nostream" tag.
+    ///
+    /// This method provides the public API for checking whether LLM call
+    /// options include the "nostream" tag, which suppresses streaming for
+    /// that specific call.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// use juncture_core::stream::EventEmitter;
+    /// use juncture_core::llm::CallOptions;
+    ///
+    /// let emitter = EventEmitter::new(tx, StreamMode::Messages);
+    ///
+    /// // No options - no nostream tag
+    /// assert!(!emitter.has_nostream_tag(None));
+    ///
+    /// // Options with nostream tag
+    /// let options = CallOptions {
+    ///     tags: vec!["nostream".to_string()],
+    ///     ..Default::default()
+    /// };
+    /// assert!(emitter.has_nostream_tag(Some(&options)));
+    ///
+    /// // Options without nostream tag
+    /// let options = CallOptions {
+    ///     tags: vec!["fast".to_string()],
+    ///     ..Default::default()
+    /// };
+    /// assert!(!emitter.has_nostream_tag(Some(&options)));
+    /// ```
+    #[must_use]
+    pub fn has_nostream_tag(&self, options: Option<&crate::llm::CallOptions>) -> bool {
+        options.is_some_and(|opts| opts.tags.iter().any(|tag| tag == "nostream"))
     }
 
     /// Check if event matches any mode in a Multi mode

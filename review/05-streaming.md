@@ -336,30 +336,47 @@ pub const fn disconnected(node: String, mode: StreamMode) -> Self {
 
 | Design Requirement | Implementation | Status |
 |-------------------|----------------|--------|
-| StreamPart unified wrapper | Not implemented | **DEFECT-001** |
-| has_nostream_tag signature | Takes metadata vs CallOptions | **DEFECT-002** |
-| StreamWriter type | Generic S vs type-erased () | **DEFECT-003** |
-| should_emit match patterns | Missing FilteredValues/Updates | **DEFECT-004** |
-| ToolStarted fields | Adds timestamp | **DEFECT-005** |
-| ToolFinished fields | Adds success bool | **DEFECT-006** |
-| StreamEvent variants | Adds Cancelled | **EXTRA-001** |
-| StreamWriter constructors | Adds disconnected() | **EXTRA-002** |
+| StreamPart unified wrapper | Implemented in `stream.rs` with manual Debug | **RESOLVED (DEFECT-001)** |
+| has_nostream_tag signature | Public method added per design + internal helper retained | **RESOLVED (DEFECT-002)** |
+| StreamWriter type | Design updated to generic `StreamWriter<S: State>` | **RESOLVED (DEFECT-003)** |
+| should_emit match patterns | Design updated to include FilteredValues/Updates | **RESOLVED (DEFECT-004)** |
+| ToolStarted fields | Design updated to include timestamp | **RESOLVED (DEFECT-005)** |
+| ToolFinished fields | Design updated to include success bool | **RESOLVED (DEFECT-006)** |
+| StreamEvent variants | Design updated to include Cancelled | **RESOLVED (EXTRA-001)** |
+| StreamWriter constructors | Design updated to include disconnected() | **RESOLVED (EXTRA-002)** |
 
-**Total**: 6 DEFECTS + 2 EXTRAS
+**Total**: 6 DEFECTS + 2 EXTRAS -- ALL RESOLVED
 
 ---
 
 ## Action Plan
 
-1. **[DEFECT-001]** Implement or formally remove StreamPart wrapper
-2. **[DEFECT-002]** Align has_nostream_tag() signature with design
-3. **[DEFECT-003]** Resolve StreamWriter type parameter mismatch
-4. **[DEFECT-004]** Update design to include FilteredValues/Updates
-5. **[DEFECT-005]** Remove timestamp from ToolStarted or update design
-6. **[DEFECT-006]** Remove success from ToolFinished or update design
+1. **[DEFECT-001]** ~~Implement or formally remove StreamPart wrapper~~ IMPLEMENTED in code
+2. **[DEFECT-002]** ~~Align has_nostream_tag() signature with design~~ FIXED: added public method
+3. **[DEFECT-003]** ~~Resolve StreamWriter type parameter mismatch~~ DESIGN UPDATED to `StreamWriter<S: State>`
+4. **[DEFECT-004]** ~~Update design to include FilteredValues/Updates~~ DESIGN UPDATED
+5. **[DEFECT-005]** ~~Remove timestamp from ToolStarted or update design~~ DESIGN UPDATED
+6. **[DEFECT-006]** ~~Remove success from ToolFinished or update design~~ DESIGN UPDATED
 
-7. **[EXTRA-001]** Add Cancelled variant to design §2.2
-8. **[EXTRA-002]** Add disconnected() to design §3.3
+7. **[EXTRA-001]** ~~Add Cancelled variant to design S2.2~~ DESIGN UPDATED
+8. **[EXTRA-002]** ~~Add disconnected() to design S3.3~~ DESIGN UPDATED
+
+---
+
+## Remediation Date: 2025-05-24
+
+**Files Modified:**
+- `crates/juncture-core/src/stream.rs` -- Added `StreamPart<S>`, public `has_nostream_tag()`, renamed internal helper
+- `crates/juncture-core/src/lib.rs` -- Added `StreamPart` re-export
+- `design/05-streaming.md` -- Updated §§2.2, 3.2, 3.3 to match implementation
+
+**Verification:**
+- `cargo build --workspace --all-features` -- PASS
+- `cargo test --workspace --all-targets --all-features` -- PASS (all tests)
+- `cargo clippy --workspace --all-targets --all-features -- -D warnings` -- PASS (zero warnings)
+- `cargo fmt --all -- --check` -- PASS
+
+**Verdict**: **CONFORMANT** -- All 8 defects resolved, implementation and design are aligned.
 
 ---
 
