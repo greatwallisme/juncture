@@ -173,7 +173,7 @@ fn derive_replace_field_indices_child_state() {
 }
 
 /// Basic state with default (replace) reducer
-#[derive(State, Clone, Debug, Serialize, Deserialize)]
+#[derive(State, Clone, Debug, Default, Serialize, Deserialize)]
 struct BasicState {
     count: u32,
     label: String,
@@ -235,7 +235,7 @@ fn derive_schema_version_default() {
 }
 
 /// State with all reducer types
-#[derive(State, Clone, Debug, Serialize, Deserialize)]
+#[derive(State, Clone, Debug, Default, Serialize, Deserialize)]
 struct FullState {
     /// Default: replace
     value: u32,
@@ -335,7 +335,7 @@ fn custom_reducer_merges() {
 }
 
 /// State with explicit schema version
-#[derive(State, Clone, Debug, Serialize, Deserialize)]
+#[derive(State, Clone, Debug, Default, Serialize, Deserialize)]
 #[state_version(3)]
 struct VersionedState {
     data: String,
@@ -371,7 +371,7 @@ fn fields_changed_bitmask() {
 
 /// Parent state with name, age, and messages fields.
 /// Messages use append reducer for accumulated message history.
-#[derive(State, Clone, Debug, Serialize, Deserialize)]
+#[derive(State, Clone, Debug, Default, Serialize, Deserialize)]
 struct ParentState {
     name: String,
     age: u32,
@@ -381,7 +381,7 @@ struct ParentState {
 
 /// Child state that is a subset of `ParentState` (name + messages only).
 /// The `#[subset_of(ParentState)]` attribute generates the `StateSubset` impl.
-#[derive(State, Clone, Debug, Serialize, Deserialize)]
+#[derive(State, Clone, Debug, Default, Serialize, Deserialize)]
 #[subset_of(ParentState)]
 struct ChildState {
     name: String,
@@ -722,7 +722,7 @@ fn apply_writes_allows_append_field_multiple_writers() {
 // --- replace_after_finish reducer tests ---
 
 /// State with `replace_after_finish` field for finish semantics testing
-#[derive(State, Clone, Debug, Serialize, Deserialize)]
+#[derive(State, Clone, Debug, Default, Serialize, Deserialize)]
 struct FinishState {
     value: u32,
     #[reducer(replace_after_finish)]
@@ -848,7 +848,7 @@ fn derive_no_replace_after_finish_fields_yields_empty_slice() {
 }
 
 /// State with multiple `replace_after_finish` fields
-#[derive(State, Clone, Debug, Serialize, Deserialize)]
+#[derive(State, Clone, Debug, Default, Serialize, Deserialize)]
 struct MultiFinishState {
     #[reducer(replace_after_finish)]
     output_a: String,
@@ -996,7 +996,7 @@ fn derive_no_ephemeral_fields_yields_empty_slice() {
 #[test]
 fn derive_consume_field_multiple_ephemeral_fields() {
     /// State with multiple ephemeral fields
-    #[derive(State, Clone, Debug, Serialize, Deserialize)]
+    #[derive(State, Clone, Debug, Default, Serialize, Deserialize)]
     struct MultiEphemeralState {
         #[reducer(ephemeral)]
         temp_a: String,

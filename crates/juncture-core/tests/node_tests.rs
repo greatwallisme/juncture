@@ -5,56 +5,37 @@ use juncture_core::node::{
 };
 use juncture_core::{IntoNode, JunctureError, RunnableConfig};
 use juncture_derive::State;
+use std::pin::Pin;
 use std::sync::Arc;
 
+// Type alias for boxed futures to satisfy higher-ranked lifetime bounds
+type BoxResult<T> = Pin<Box<dyn Future<Output = Result<T, JunctureError>> + Send>>;
+
 // Test state types
-#[derive(Debug, Clone, State)]
+#[derive(Debug, Clone, Default, State)]
 struct TestState {
     value: u32,
 }
 
-// Test nodes
-async fn simple_node(state: TestState) -> Result<TestStateUpdate, JunctureError> {
-    Ok(TestStateUpdate {
-        value: Some(state.value + 1),
-    })
-}
-
-async fn config_node(
-    state: TestState,
-    _config: RunnableConfig,
-) -> Result<TestStateUpdate, JunctureError> {
-    Ok(TestStateUpdate {
-        value: Some(state.value + 2),
-    })
-}
-
-async fn command_node(
-    state: TestState,
-) -> Result<juncture_core::Command<TestState>, JunctureError> {
-    Ok(juncture_core::Command::update(TestStateUpdate {
-        value: Some(state.value + 3),
-    }))
-}
-
-async fn full_node(
-    state: TestState,
-    _config: RunnableConfig,
-) -> Result<juncture_core::Command<TestState>, JunctureError> {
-    Ok(juncture_core::Command::update(TestStateUpdate {
-        value: Some(state.value + 4),
-    }))
-}
-
 #[tokio::test]
 async fn test_into_node_from_simple_function() {
-    let node = NodeFnUpdate(simple_node).into_node("simple");
+    let node = NodeFnUpdate(
+        |state: &TestState| -> BoxResult<<TestState as juncture_core::State>::Update> {
+            let value = state.value;
+            Box::pin(async move {
+                Ok(TestStateUpdate {
+                    value: Some(value + 1),
+                })
+            })
+        },
+    )
+    .into_node("simple");
     assert_eq!(node.name(), "simple");
 
     let state = TestState { value: 10 };
     let config = RunnableConfig::default();
 
-    let result = node.call(state, &config).await;
+    let result = node.call(&state, &config).await;
     assert!(result.is_ok());
 
     let command = result.unwrap();
@@ -63,13 +44,25 @@ async fn test_into_node_from_simple_function() {
 
 #[tokio::test]
 async fn test_into_node_from_config_function() {
-    let node = NodeFnUpdateWithConfig(config_node).into_node("config");
+    let node = NodeFnUpdateWithConfig(
+        |state: &TestState,
+         _config: RunnableConfig|
+         -> BoxResult<<TestState as juncture_core::State>::Update> {
+            let value = state.value;
+            Box::pin(async move {
+                Ok(TestStateUpdate {
+                    value: Some(value + 2),
+                })
+            })
+        },
+    )
+    .into_node("config");
     assert_eq!(node.name(), "config");
 
     let state = TestState { value: 10 };
     let config = RunnableConfig::default();
 
-    let result = node.call(state, &config).await;
+    let result = node.call(&state, &config).await;
     assert!(result.is_ok());
 
     let command = result.unwrap();
@@ -78,13 +71,23 @@ async fn test_into_node_from_config_function() {
 
 #[tokio::test]
 async fn test_into_node_from_command_function() {
-    let node = NodeFnCommand(command_node).into_node("command");
+    let node = NodeFnCommand(
+        |state: &TestState| -> BoxResult<juncture_core::Command<TestState>> {
+            let value = state.value;
+            Box::pin(async move {
+                Ok(juncture_core::Command::update(TestStateUpdate {
+                    value: Some(value + 3),
+                }))
+            })
+        },
+    )
+    .into_node("command");
     assert_eq!(node.name(), "command");
 
     let state = TestState { value: 10 };
     let config = RunnableConfig::default();
 
-    let result = node.call(state, &config).await;
+    let result = node.call(&state, &config).await;
     assert!(result.is_ok());
 
     let command = result.unwrap();
@@ -93,13 +96,25 @@ async fn test_into_node_from_command_function() {
 
 #[tokio::test]
 async fn test_into_node_from_full_function() {
-    let node = NodeFnCommandWithConfig(full_node).into_node("full");
+    let node = NodeFnCommandWithConfig(
+        |state: &TestState,
+         _config: RunnableConfig|
+         -> BoxResult<juncture_core::Command<TestState>> {
+            let value = state.value;
+            Box::pin(async move {
+                Ok(juncture_core::Command::update(TestStateUpdate {
+                    value: Some(value + 4),
+                }))
+            })
+        },
+    )
+    .into_node("full");
     assert_eq!(node.name(), "full");
 
     let state = TestState { value: 10 };
     let config = RunnableConfig::default();
 
-    let result = node.call(state, &config).await;
+    let result = node.call(&state, &config).await;
     assert!(result.is_ok());
 
     let command = result.unwrap();
@@ -108,8 +123,17 @@ async fn test_into_node_from_full_function() {
 
 #[tokio::test]
 async fn test_node_arc_cloning() {
-    let node: Arc<dyn juncture_core::Node<TestState>> =
-        NodeFnUpdate(simple_node).into_node("clone_test");
+    let node: Arc<dyn juncture_core::Node<TestState>> = NodeFnUpdate(
+        |state: &TestState| -> BoxResult<<TestState as juncture_core::State>::Update> {
+            let value = state.value;
+            Box::pin(async move {
+                Ok(TestStateUpdate {
+                    value: Some(value + 1),
+                })
+            })
+        },
+    )
+    .into_node("clone_test");
 
     let node1 = Arc::clone(&node);
     let node2 = Arc::clone(&node);
@@ -121,8 +145,8 @@ async fn test_node_arc_cloning() {
     let state = TestState { value: 5 };
     let config = RunnableConfig::default();
 
-    let result1 = node1.call(state.clone(), &config).await.unwrap();
-    let result2 = node2.call(state, &config).await.unwrap();
+    let result1 = node1.call(&state, &config).await.unwrap();
+    let result2 = node2.call(&state, &config).await.unwrap();
 
     assert!(result1.update.is_some());
     assert!(result2.update.is_some());

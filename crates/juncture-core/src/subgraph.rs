@@ -281,7 +281,7 @@ where
 {
     fn call(
         &self,
-        state: S,
+        state: &S,
         config: &RunnableConfig,
     ) -> std::pin::Pin<
         Box<dyn std::future::Future<Output = Result<Command<S>, JunctureError>> + Send + '_>,
@@ -292,6 +292,7 @@ where
         let output_map = Arc::clone(&self.output_map);
         let name = self.name.clone();
         let persistence = self.config.persistence;
+        let state = state.clone();
 
         Box::pin(async move {
             // Build child checkpoint namespace based on persistence mode.
@@ -1236,10 +1237,10 @@ mod tests {
     }
 
     fn mock_node(name: &str) -> Arc<dyn crate::Node<StateDummy>> {
-        NodeFnUpdate(|_s: StateDummy| async move { Ok(StateDummyUpdate) }).into_node(name)
+        NodeFnUpdate(|_s: &StateDummy| async move { Ok(StateDummyUpdate) }).into_node(name)
     }
 
-    #[derive(Clone, Debug)]
+    #[derive(Clone, Debug, Default)]
     struct StateDummy;
 
     impl crate::State for StateDummy {

@@ -896,7 +896,7 @@ mod tests {
     // --- should_interrupt filtering tests ---
 
     /// Minimal `State` impl for testing `should_interrupt`.
-    #[derive(Clone, Debug, serde::Serialize)]
+    #[derive(Clone, Debug, Default, serde::Serialize)]
     struct TestState;
 
     impl crate::State for TestState {

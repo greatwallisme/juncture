@@ -294,7 +294,7 @@ mod tests {
     use crate::state::FieldVersions;
     use serde_json::json;
 
-    #[derive(Clone, Debug)]
+    #[derive(Clone, Debug, Default)]
     struct TestState;
 
     impl State for TestState {

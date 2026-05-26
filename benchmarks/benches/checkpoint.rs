@@ -9,19 +9,11 @@ use juncture_checkpoint::MemorySaver;
 use juncture_core::checkpoint::CheckpointSaver;
 use juncture_core::node::NodeFnUpdate;
 use juncture_core::state::messages::{MessagesState, MessagesStateUpdate};
-use juncture_core::{JunctureError, RunnableConfig, StateGraph};
+use juncture_core::{RunnableConfig, StateGraph};
 use std::hint::black_box;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-/// No-op node matching `LangGraph`'s `def noop(state): pass`.
-/// Returns an empty update (no field changes).
-async fn noop_node(_state: MessagesState) -> Result<MessagesStateUpdate, JunctureError> {
-    Ok(MessagesStateUpdate { messages: None })
-}
-
-/// Build a linear chain of `num_nodes` no-op nodes:
-/// `START -> node_0 -> node_1 -> ... -> node_{N-1} -> END`
 fn create_sequential_graph(num_nodes: usize) -> StateGraph<MessagesState> {
     let mut graph = StateGraph::new();
 
@@ -29,7 +21,12 @@ fn create_sequential_graph(num_nodes: usize) -> StateGraph<MessagesState> {
 
     for name in &names {
         graph
-            .add_node_simple(name.as_str(), NodeFnUpdate(noop_node))
+            .add_node_simple(
+                name.as_str(),
+                NodeFnUpdate(|_state: &MessagesState| async move {
+                    Ok(MessagesStateUpdate { messages: None })
+                }),
+            )
             .expect("add_node_simple should succeed for unique names");
     }
 
@@ -42,7 +39,6 @@ fn create_sequential_graph(num_nodes: usize) -> StateGraph<MessagesState> {
     graph
 }
 
-/// `RunnableConfig` with high recursion limit and unique `thread_id` for checkpoints.
 fn bench_config(thread_id: &str) -> RunnableConfig {
     RunnableConfig {
         recursion_limit: 20_000_000_000,
@@ -54,12 +50,10 @@ fn bench_config(thread_id: &str) -> RunnableConfig {
 fn benchmark_checkpoint(c: &mut Criterion) {
     let mut group = c.benchmark_group("checkpoint");
 
-    // Test with 100-node sequential graph (same as Python checkpoint.py)
     let num_nodes = 100_usize;
     let graph = create_sequential_graph(num_nodes);
     let input = MessagesState { messages: vec![] };
 
-    // Benchmark WITHOUT checkpointing
     let compiled_no_checkpoint = graph
         .compile()
         .expect("compile should succeed without checkpointer");
@@ -75,14 +69,11 @@ fn benchmark_checkpoint(c: &mut Criterion) {
         },
     );
 
-    // Benchmark WITH checkpointing
-    // Create MemorySaver once outside the timed loop for fair comparison
     let checkpointer: Arc<dyn CheckpointSaver> = Arc::new(MemorySaver::new());
     let compiled_with_checkpoint = graph
         .compile_with_checkpointer(Some(checkpointer))
         .expect("compile should succeed with checkpointer");
 
-    // Use atomic counter for unique thread_ids per iteration
     let counter = Arc::new(AtomicUsize::new(0));
 
     group.bench_with_input(
@@ -90,7 +81,6 @@ fn benchmark_checkpoint(c: &mut Criterion) {
         &num_nodes,
         |b, _| {
             b.iter(|| {
-                // Use unique thread_id per iteration to avoid checkpoint conflicts
                 let iter_id = counter.fetch_add(1, Ordering::Relaxed);
                 let thread_id = format!("bench_checkpoint_{iter_id}");
                 let config = bench_config(&thread_id);

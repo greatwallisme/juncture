@@ -287,7 +287,7 @@ impl<S: State, I: IntoState<S>, O: FromState<S>> CompiledGraph<S, I, O> {
         config: &RunnableConfig,
     ) -> Result<GraphOutput<S, O>, JunctureError>
     where
-        S: serde::Serialize,
+        S: serde::de::DeserializeOwned + serde::Serialize,
         S::Update: serde::Serialize,
         O: FromState<S>,
     {
@@ -320,7 +320,7 @@ impl<S: State, I: IntoState<S>, O: FromState<S>> CompiledGraph<S, I, O> {
         config: &RunnableConfig,
     ) -> Result<GraphOutput<S, O>, JunctureError>
     where
-        S: serde::Serialize,
+        S: serde::de::DeserializeOwned + serde::Serialize,
         S::Update: serde::Serialize,
         O: FromState<S>,
     {
@@ -335,7 +335,7 @@ impl<S: State, I: IntoState<S>, O: FromState<S>> CompiledGraph<S, I, O> {
         config: &RunnableConfig,
     ) -> Result<GraphOutput<S, O>, JunctureError>
     where
-        S: serde::Serialize,
+        S: serde::de::DeserializeOwned + serde::Serialize,
         S::Update: serde::Serialize,
         O: FromState<S>,
     {
@@ -528,7 +528,7 @@ impl<S: State, I: IntoState<S>, O: FromState<S>> CompiledGraph<S, I, O> {
         mode: StreamMode,
     ) -> Result<StreamHandle<S>, JunctureError>
     where
-        S: Clone + Send + serde::Serialize + 'static,
+        S: Clone + Send + serde::de::DeserializeOwned + serde::Serialize + 'static,
         S::Update: serde::Serialize,
     {
         self.stream_with_config(input, config, crate::stream::StreamConfig::new(mode))
@@ -606,7 +606,7 @@ impl<S: State, I: IntoState<S>, O: FromState<S>> CompiledGraph<S, I, O> {
         stream_config: crate::stream::StreamConfig,
     ) -> Result<StreamHandle<S>, JunctureError>
     where
-        S: Clone + Send + serde::Serialize + 'static,
+        S: Clone + Send + serde::de::DeserializeOwned + serde::Serialize + 'static,
         S::Update: serde::Serialize,
     {
         use futures::stream;
@@ -877,7 +877,7 @@ impl<S: State, I: IntoState<S>, O: FromState<S>> CompiledGraph<S, I, O> {
         emitter: EventEmitter<S>,
     ) -> Result<S, JunctureError>
     where
-        S: Clone + Send + serde::Serialize + 'static,
+        S: Clone + Send + serde::de::DeserializeOwned + serde::Serialize + 'static,
         S::Update: serde::Serialize,
     {
         let num_fields = 64;
@@ -3218,10 +3218,10 @@ mod tests {
     }
 
     fn mock_node(name: &str) -> Arc<dyn crate::Node<StateDummy>> {
-        NodeFnUpdate(|_s: StateDummy| async move { Ok(StateDummyUpdate) }).into_node(name)
+        NodeFnUpdate(|_s: &StateDummy| async move { Ok(StateDummyUpdate) }).into_node(name)
     }
 
-    #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+    #[derive(Clone, Debug, Default, serde::Deserialize, serde::Serialize)]
     #[serde(crate = "serde")]
     struct StateDummy;
 
@@ -3243,7 +3243,7 @@ mod tests {
     ///
     /// v1 format: `{"value": 0}` (no `label` field)
     /// v2 format: `{"value": N, "label": "migrated"}` (added `label` field)
-    #[derive(Clone, Debug, serde::Deserialize, serde::Serialize, PartialEq)]
+    #[derive(Clone, Debug, Default, serde::Deserialize, serde::Serialize, PartialEq)]
     #[serde(crate = "serde")]
     struct StateV2 {
         value: i32,
@@ -3351,7 +3351,15 @@ mod tests {
         graph
             .add_node_simple(
                 "human_review",
-                NodeFnUpdate(|_s: StateDummy| async move { Ok(StateDummyUpdate) }),
+                NodeFnUpdate(
+                    |_s: &StateDummy| -> std::pin::Pin<
+                        Box<
+                            dyn std::future::Future<
+                                    Output = Result<StateDummyUpdate, crate::JunctureError>,
+                                > + Send,
+                        >,
+                    > { Box::pin(async move { Ok(StateDummyUpdate) }) },
+                ),
             )
             .unwrap();
         graph.set_entry_point("human_review");
@@ -3444,7 +3452,7 @@ mod tests {
     // --- Tests for stream_with_config / output_keys filtering ---
 
     /// Multi-field state type for `output_keys` filtering tests.
-    #[derive(Clone, Debug, serde::Deserialize, serde::Serialize, PartialEq)]
+    #[derive(Clone, Debug, Default, serde::Deserialize, serde::Serialize, PartialEq)]
     #[serde(crate = "serde")]
     struct MultiFieldState {
         messages: Vec<String>,
@@ -3484,7 +3492,7 @@ mod tests {
     }
 
     fn multi_field_node(name: &str) -> Arc<dyn crate::Node<MultiFieldState>> {
-        NodeFnUpdate(|_s: MultiFieldState| async move {
+        NodeFnUpdate(|_s: &MultiFieldState| async move {
             Ok(MultiFieldStateUpdate {
                 messages: Some(vec!["hello".to_string()]),
                 count: Some(1),
@@ -4335,21 +4343,31 @@ mod tests {
     /// `node_a` increments count, `node_b` increments count again.
     /// This produces two supersteps so resumption can skip one.
     fn build_two_step_graph() -> CompiledGraph<MultiFieldState> {
-        let node_a = NodeFnUpdate(|s: MultiFieldState| async move {
-            Ok(MultiFieldStateUpdate {
-                messages: Some(s.messages),
-                count: Some(s.count + 1),
-                label: Some(s.label),
-            })
+        let node_a = NodeFnUpdate(|s: &MultiFieldState| {
+            let messages = s.messages.clone();
+            let count = s.count;
+            let label = s.label.clone();
+            async move {
+                Ok(MultiFieldStateUpdate {
+                    messages: Some(messages),
+                    count: Some(count + 1),
+                    label: Some(label),
+                })
+            }
         })
         .into_node("node_a");
 
-        let node_b = NodeFnUpdate(|s: MultiFieldState| async move {
-            Ok(MultiFieldStateUpdate {
-                messages: Some(s.messages),
-                count: Some(s.count + 10),
-                label: Some(s.label),
-            })
+        let node_b = NodeFnUpdate(|s: &MultiFieldState| {
+            let messages = s.messages.clone();
+            let count = s.count;
+            let label = s.label.clone();
+            async move {
+                Ok(MultiFieldStateUpdate {
+                    messages: Some(messages),
+                    count: Some(count + 10),
+                    label: Some(label),
+                })
+            }
         })
         .into_node("node_b");
 

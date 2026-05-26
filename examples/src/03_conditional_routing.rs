@@ -12,13 +12,13 @@
 
 use juncture_core::edge::{PathMap, Router};
 use juncture_core::node::NodeFnUpdate;
-use juncture_core::{JunctureError, RunnableConfig, StateGraph};
+use juncture_core::{RunnableConfig, StateGraph};
 use juncture_derive::State;
 use std::io::Write;
 use std::sync::Arc;
 
 /// Score state for conditional routing
-#[derive(State, Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(State, Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 struct ScoreState {
     /// Numerical score
     score: u32,
@@ -37,54 +37,69 @@ const fn grade_router(state: &ScoreState) -> &str {
     }
 }
 
-/// Grade node - assigns a grade based on score
-async fn grade_node(state: ScoreState) -> Result<ScoreStateUpdate, JunctureError> {
-    let grade = if state.score >= 90 {
-        "A".to_string()
-    } else if state.score >= 70 {
-        "B".to_string()
-    } else {
-        "C".to_string()
-    };
-
-    Ok(ScoreStateUpdate {
-        grade: Some(grade),
-        ..Default::default()
-    })
-}
-
-/// Excellent handler - processes high scores
-async fn excellent_node(state: ScoreState) -> Result<ScoreStateUpdate, JunctureError> {
-    Ok(ScoreStateUpdate {
-        grade: Some(format!("{} (excellent!)", state.grade)),
-        ..Default::default()
-    })
-}
-
-/// Good handler - processes medium scores
-async fn good_node(state: ScoreState) -> Result<ScoreStateUpdate, JunctureError> {
-    Ok(ScoreStateUpdate {
-        grade: Some(format!("{} (good)", state.grade)),
-        ..Default::default()
-    })
-}
-
-/// Retry handler - suggests improvement for low scores
-async fn retry_node(state: ScoreState) -> Result<ScoreStateUpdate, JunctureError> {
-    Ok(ScoreStateUpdate {
-        grade: Some(format!("{} (needs improvement)", state.grade)),
-        ..Default::default()
-    })
-}
-
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut graph = StateGraph::<ScoreState>::new();
 
     // Add nodes for each path
-    graph.add_node_simple("grade", NodeFnUpdate(grade_node))?;
-    graph.add_node_simple("excellent", NodeFnUpdate(excellent_node))?;
-    graph.add_node_simple("good", NodeFnUpdate(good_node))?;
-    graph.add_node_simple("retry", NodeFnUpdate(retry_node))?;
+    graph.add_node_simple(
+        "grade",
+        NodeFnUpdate(|state: &ScoreState| {
+            let score = state.score;
+            async move {
+                let grade = if score >= 90 {
+                    "A".to_string()
+                } else if score >= 70 {
+                    "B".to_string()
+                } else {
+                    "C".to_string()
+                };
+
+                Ok(ScoreStateUpdate {
+                    grade: Some(grade),
+                    ..Default::default()
+                })
+            }
+        }),
+    )?;
+
+    graph.add_node_simple(
+        "excellent",
+        NodeFnUpdate(|state: &ScoreState| {
+            let grade = state.grade.clone();
+            async move {
+                Ok(ScoreStateUpdate {
+                    grade: Some(format!("{grade} (excellent!)")),
+                    ..Default::default()
+                })
+            }
+        }),
+    )?;
+
+    graph.add_node_simple(
+        "good",
+        NodeFnUpdate(|state: &ScoreState| {
+            let grade = state.grade.clone();
+            async move {
+                Ok(ScoreStateUpdate {
+                    grade: Some(format!("{grade} (good)")),
+                    ..Default::default()
+                })
+            }
+        }),
+    )?;
+
+    graph.add_node_simple(
+        "retry",
+        NodeFnUpdate(|state: &ScoreState| {
+            let grade = state.grade.clone();
+            async move {
+                Ok(ScoreStateUpdate {
+                    grade: Some(format!("{grade} (needs improvement)")),
+                    ..Default::default()
+                })
+            }
+        }),
+    )?;
 
     // Add conditional edges from "grade" node
     // The router function will determine which path to take

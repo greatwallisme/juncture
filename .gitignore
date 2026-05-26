@@ -6,4 +6,5 @@ __pycache__
 *.log
 *.sqlite3
 *.db
-*.env   
+*.env
+.codegraph   

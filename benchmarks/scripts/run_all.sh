@@ -23,4 +23,4 @@ done
 echo ""
 echo "=== Comparison report ==="
 cd "$BENCH_DIR"
-python3 scripts/compare.py --rust target/criterion_results.json --python python/results_python.json || echo "Comparison requires aggregated JSON results."
+python3 scripts/compare.py --rust results_rust.json --python-dir python || echo "Comparison requires aggregated JSON results."

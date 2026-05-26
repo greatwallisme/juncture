@@ -426,10 +426,10 @@ mod tests {
     }
 
     fn mock_node(name: &str) -> Arc<dyn crate::Node<StateDummy>> {
-        NodeFnUpdate(|_s: StateDummy| async move { Ok(StateDummyUpdate) }).into_node(name)
+        NodeFnUpdate(|_s: &StateDummy| async move { Ok(StateDummyUpdate) }).into_node(name)
     }
 
-    #[derive(Clone, Debug)]
+    #[derive(Clone, Debug, Default)]
     struct StateDummy;
 
     impl crate::State for StateDummy {

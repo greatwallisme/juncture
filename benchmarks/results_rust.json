@@ -1,0 +1,343 @@
+{
+  "benchmarks": [
+    {
+      "cpu_ms": 10.0,
+      "cpu_pct": 100.0,
+      "iterations": 5,
+      "max_ms": 2.004914,
+      "mean_ms": 0.9441336,
+      "min_ms": 0.655647,
+      "num_nodes": 10,
+      "peak_rss_mb": 4.08203125,
+      "per_node_cpu_us": 200.0,
+      "per_node_wall_us": 94.41336,
+      "scenario": "sequential_10",
+      "times_ms": [
+        2.004914,
+        0.67984,
+        0.698552,
+        0.681715,
+        0.655647
+      ]
+    },
+    {
+      "cpu_ms": 20.0,
+      "cpu_pct": 100.0,
+      "iterations": 5,
+      "max_ms": 1.259731,
+      "mean_ms": 1.1285066000000001,
+      "min_ms": 1.0348689999999998,
+      "num_nodes": 100,
+      "peak_rss_mb": 4.92578125,
+      "per_node_cpu_us": 40.0,
+      "per_node_wall_us": 11.285066000000002,
+      "scenario": "sequential_100",
+      "times_ms": [
+        1.259731,
+        1.0348689999999998,
+        1.095101,
+        1.129583,
+        1.123249
+      ]
+    },
+    {
+      "cpu_ms": 30.0,
+      "cpu_pct": 100.0,
+      "iterations": 5,
+      "max_ms": 6.590477,
+      "mean_ms": 5.4702388,
+      "min_ms": 5.066323000000001,
+      "num_nodes": 1000,
+      "peak_rss_mb": 8.30859375,
+      "per_node_cpu_us": 6.0,
+      "per_node_wall_us": 5.4702388,
+      "scenario": "sequential_1000",
+      "times_ms": [
+        6.590477,
+        5.227606,
+        5.367155,
+        5.066323000000001,
+        5.099633
+      ]
+    },
+    {
+      "cpu_ms": 100.0,
+      "cpu_pct": 100.0,
+      "iterations": 5,
+      "max_ms": 18.66341,
+      "mean_ms": 16.931694399999998,
+      "min_ms": 15.892411,
+      "num_nodes": 3000,
+      "peak_rss_mb": 14.44921875,
+      "per_node_cpu_us": 6.666666666666667,
+      "per_node_wall_us": 5.643898133333332,
+      "scenario": "sequential_3000",
+      "times_ms": [
+        18.66341,
+        16.030227,
+        18.173371,
+        15.899053,
+        15.892411
+      ]
+    },
+    {
+      "cpu_ms": 110.0,
+      "cpu_pct": 100.0,
+      "iterations": 3,
+      "max_ms": 35.349855,
+      "mean_ms": 32.68181366666666,
+      "min_ms": 27.840052,
+      "num_nodes": 1800,
+      "peak_rss_mb": 14.44921875,
+      "per_node_cpu_us": 20.37037037037037,
+      "per_node_wall_us": 18.156563148148145,
+      "scenario": "wide_state_300",
+      "times_ms": [
+        35.349855,
+        34.855534,
+        27.840052
+      ]
+    },
+    {
+      "cpu_ms": 220.0,
+      "cpu_pct": 100.0,
+      "iterations": 3,
+      "max_ms": 66.949534,
+      "mean_ms": 62.39453533333333,
+      "min_ms": 58.172233,
+      "num_nodes": 3600,
+      "peak_rss_mb": 14.44921875,
+      "per_node_cpu_us": 20.37037037037037,
+      "per_node_wall_us": 17.33181537037037,
+      "scenario": "wide_state_600",
+      "times_ms": [
+        58.172233,
+        66.949534,
+        62.061839
+      ]
+    },
+    {
+      "cpu_ms": 330.0,
+      "cpu_pct": 100.0,
+      "iterations": 3,
+      "max_ms": 104.832583,
+      "mean_ms": 95.37116099999999,
+      "min_ms": 88.744807,
+      "num_nodes": 7200,
+      "peak_rss_mb": 14.44921875,
+      "per_node_cpu_us": 15.277777777777779,
+      "per_node_wall_us": 13.245994583333331,
+      "scenario": "wide_state_1200",
+      "times_ms": [
+        104.832583,
+        92.536093,
+        88.744807
+      ]
+    },
+    {
+      "cpu_ms": 0.0,
+      "cpu_pct": 0.0,
+      "iterations": 5,
+      "max_ms": 1.091173,
+      "mean_ms": 1.0533002000000002,
+      "min_ms": 0.973583,
+      "num_nodes": 100,
+      "peak_rss_mb": 14.44921875,
+      "per_node_cpu_us": 0.0,
+      "per_node_wall_us": 10.533002000000002,
+      "scenario": "checkpoint_off_100",
+      "times_ms": [
+        1.091173,
+        0.973583,
+        1.080077,
+        1.05484,
+        1.0668279999999999
+      ]
+    },
+    {
+      "cpu_ms": 10.0,
+      "cpu_pct": 100.0,
+      "iterations": 5,
+      "max_ms": 1.06415,
+      "mean_ms": 1.0040512,
+      "min_ms": 0.9785079999999999,
+      "num_nodes": 100,
+      "peak_rss_mb": 14.44921875,
+      "per_node_cpu_us": 20.0,
+      "per_node_wall_us": 10.040512,
+      "scenario": "checkpoint_on_100",
+      "times_ms": [
+        1.06415,
+        0.9823989999999999,
+        1.001285,
+        0.9939140000000001,
+        0.9785079999999999
+      ]
+    },
+    {
+      "cpu_ms": 10.0,
+      "cpu_pct": 100.0,
+      "iterations": 10,
+      "max_ms": 0.676513,
+      "mean_ms": 0.5784507000000001,
+      "min_ms": 0.535085,
+      "num_nodes": 3,
+      "peak_rss_mb": 14.44921875,
+      "per_node_cpu_us": 333.3333333333333,
+      "per_node_wall_us": 192.81690000000003,
+      "scenario": "conditional_routing_3",
+      "times_ms": [
+        0.676513,
+        0.541122,
+        0.5698040000000001,
+        0.604009,
+        0.598672,
+        0.535085,
+        0.57445,
+        0.5708519999999999,
+        0.562751,
+        0.551249
+      ]
+    },
+    {
+      "cpu_ms": 20.0,
+      "cpu_pct": 100.0,
+      "iterations": 10,
+      "max_ms": 1.055232,
+      "mean_ms": 0.6734067999999999,
+      "min_ms": 0.53474,
+      "num_nodes": 3,
+      "peak_rss_mb": 14.44921875,
+      "per_node_cpu_us": 666.6666666666666,
+      "per_node_wall_us": 224.4689333333333,
+      "scenario": "conditional_routing_10",
+      "times_ms": [
+        0.637158,
+        0.53474,
+        0.564253,
+        0.555808,
+        1.055232,
+        0.614099,
+        0.663107,
+        0.6490480000000001,
+        0.6831320000000001,
+        0.7774909999999999
+      ]
+    },
+    {
+      "cpu_ms": 20.0,
+      "cpu_pct": 100.0,
+      "iterations": 10,
+      "max_ms": 0.783326,
+      "mean_ms": 0.7022207999999999,
+      "min_ms": 0.652606,
+      "num_nodes": 3,
+      "peak_rss_mb": 14.44921875,
+      "per_node_cpu_us": 666.6666666666666,
+      "per_node_wall_us": 234.07359999999994,
+      "scenario": "conditional_routing_50",
+      "times_ms": [
+        0.6680879999999999,
+        0.652606,
+        0.689048,
+        0.71562,
+        0.6901299999999999,
+        0.769814,
+        0.669883,
+        0.675949,
+        0.783326,
+        0.7077439999999999
+      ]
+    },
+    {
+      "cpu_ms": 0.0,
+      "cpu_pct": 0.0,
+      "iterations": 3,
+      "max_ms": 2.3941090000000003,
+      "mean_ms": 2.2035473333333333,
+      "min_ms": 2.1036789999999996,
+      "num_nodes": 100,
+      "peak_rss_mb": 14.44921875,
+      "per_node_cpu_us": 0.0,
+      "per_node_wall_us": 22.035473333333336,
+      "scenario": "streaming_100",
+      "times_ms": [
+        2.3941090000000003,
+        2.1036789999999996,
+        2.112854
+      ]
+    },
+    {
+      "cpu_ms": 60.0,
+      "cpu_pct": 100.0,
+      "iterations": 3,
+      "max_ms": 11.993578,
+      "mean_ms": 11.774042999999999,
+      "min_ms": 11.545221,
+      "num_nodes": 1000,
+      "peak_rss_mb": 14.44921875,
+      "per_node_cpu_us": 20.0,
+      "per_node_wall_us": 11.774042999999999,
+      "scenario": "streaming_1000",
+      "times_ms": [
+        11.545221,
+        11.993578,
+        11.78333
+      ]
+    },
+    {
+      "cpu_ms": 650.0,
+      "cpu_pct": 100.0,
+      "iterations": 3,
+      "max_ms": 158.75042200000001,
+      "mean_ms": 142.701462,
+      "min_ms": 115.25334,
+      "num_nodes": 10000,
+      "peak_rss_mb": 41.2734375,
+      "per_node_cpu_us": 21.666666666666664,
+      "per_node_wall_us": 14.2701462,
+      "scenario": "streaming_10000",
+      "times_ms": [
+        154.10062399999998,
+        158.75042200000001,
+        115.25334
+      ]
+    },
+    {
+      "cpu_ms": 0.0,
+      "cpu_pct": 0.0,
+      "iterations": 3,
+      "max_ms": 1.083667,
+      "mean_ms": 1.0380453333333333,
+      "min_ms": 1.003809,
+      "num_nodes": 120,
+      "peak_rss_mb": 41.2734375,
+      "per_node_cpu_us": 0.0,
+      "per_node_wall_us": 8.650377777777777,
+      "scenario": "fanout_10",
+      "times_ms": [
+        1.083667,
+        1.02666,
+        1.003809
+      ]
+    },
+    {
+      "cpu_ms": 10.0,
+      "cpu_pct": 100.0,
+      "iterations": 3,
+      "max_ms": 1.470742,
+      "mean_ms": 1.3459610000000002,
+      "min_ms": 1.14073,
+      "num_nodes": 1200,
+      "peak_rss_mb": 41.2734375,
+      "per_node_cpu_us": 2.777777777777778,
+      "per_node_wall_us": 1.121634166666667,
+      "scenario": "fanout_100",
+      "times_ms": [
+        1.470742,
+        1.426411,
+        1.14073
+      ]
+    }
+  ]
+}

@@ -15,7 +15,7 @@ use juncture::tools::{Tool, ToolError};
 use juncture_core::node::NodeFnUpdate;
 use juncture_core::state::messages::{Message, MessagesState, MessagesStateUpdate};
 use juncture_core::state::{Content, Role};
-use juncture_core::{JunctureError, RunnableConfig, StateGraph};
+use juncture_core::{RunnableConfig, StateGraph};
 use serde_json::json;
 use std::io::Write;
 
@@ -63,41 +63,6 @@ impl Tool for CalculatorTool {
     }
 }
 
-/// Agent node - simulates processing that might trigger a tool call
-async fn agent_node(state: MessagesState) -> Result<MessagesStateUpdate, JunctureError> {
-    let last_message = state.messages.last();
-
-    if let Some(msg) = last_message
-        && matches!(msg.role, Role::Human)
-    {
-        let response_text = if let Content::Text(text) = &msg.content {
-            if text.contains("add") || text.contains("plus") {
-                "I can help with that using the calculator tool!"
-            } else {
-                "Hello! I can help you with calculations."
-            }
-        } else {
-            "Hello! How can I help you today?"
-        };
-
-        let response = Message {
-            id: uuid::Uuid::new_v4().to_string(),
-            role: Role::Ai,
-            content: Content::Text(response_text.to_string()),
-            tool_calls: vec![],
-            tool_call_id: None,
-            name: None,
-            usage: None,
-        };
-
-        return Ok(MessagesStateUpdate {
-            messages: Some(vec![response]),
-        });
-    }
-
-    Ok(MessagesStateUpdate::default())
-}
-
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut stdout = std::io::stdout();
 
@@ -118,7 +83,43 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Build a graph that uses the tool via an agent node
     let mut graph = StateGraph::<MessagesState>::new();
 
-    graph.add_node_simple("agent", NodeFnUpdate(agent_node))?;
+    graph.add_node_simple(
+        "agent",
+        NodeFnUpdate(|state: &MessagesState| {
+            let last_message = state.messages.last().cloned();
+            async move {
+                if let Some(msg) = last_message
+                    && matches!(msg.role, Role::Human)
+                {
+                    let response_text = if let Content::Text(text) = &msg.content {
+                        if text.contains("add") || text.contains("plus") {
+                            "I can help with that using the calculator tool!"
+                        } else {
+                            "Hello! I can help you with calculations."
+                        }
+                    } else {
+                        "Hello! How can I help you today?"
+                    };
+
+                    let response = Message {
+                        id: uuid::Uuid::new_v4().to_string(),
+                        role: Role::Ai,
+                        content: Content::Text(response_text.to_string()),
+                        tool_calls: vec![],
+                        tool_call_id: None,
+                        name: None,
+                        usage: None,
+                    };
+
+                    return Ok(MessagesStateUpdate {
+                        messages: Some(vec![response]),
+                    });
+                }
+
+                Ok(MessagesStateUpdate::default())
+            }
+        }),
+    )?;
 
     graph.set_entry_point("agent");
     graph.set_finish_point("agent");

@@ -9,7 +9,7 @@ use serde_json::json;
     dead_code,
     reason = "state type needed for interrupt context integration"
 )]
-#[derive(Debug, Clone, State)]
+#[derive(Debug, Clone, Default, State)]
 struct TestState {
     value: u32,
 }

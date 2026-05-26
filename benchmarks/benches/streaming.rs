@@ -10,18 +10,9 @@ use futures::StreamExt;
 use juncture_core::node::NodeFnUpdate;
 use juncture_core::state::messages::{MessagesState, MessagesStateUpdate};
 use juncture_core::stream::{StreamEvent, StreamMode};
-use juncture_core::{JunctureError, RunnableConfig, StateGraph};
+use juncture_core::{RunnableConfig, StateGraph};
 use std::pin::Pin;
 
-/// Node that appends a message to the state
-async fn append_message_node(_state: MessagesState) -> Result<MessagesStateUpdate, JunctureError> {
-    Ok(MessagesStateUpdate {
-        messages: Some(vec![]),
-    })
-}
-
-/// Build a linear chain of `num_nodes` message-appending nodes:
-/// `START -> node_0 -> node_1 -> ... -> node_{N-1} -> END`
 fn create_streaming_graph(num_nodes: usize) -> StateGraph<MessagesState> {
     let mut graph = StateGraph::new();
 
@@ -29,7 +20,12 @@ fn create_streaming_graph(num_nodes: usize) -> StateGraph<MessagesState> {
 
     for name in &names {
         graph
-            .add_node_simple(name.as_str(), NodeFnUpdate(append_message_node))
+            .add_node_simple(
+                name.as_str(),
+                NodeFnUpdate(|_state: &MessagesState| async move {
+                    Ok(MessagesStateUpdate { messages: None })
+                }),
+            )
             .expect("add_node_simple should succeed for unique names");
     }
 
@@ -42,7 +38,6 @@ fn create_streaming_graph(num_nodes: usize) -> StateGraph<MessagesState> {
     graph
 }
 
-/// `RunnableConfig` with high recursion limit for deep graphs
 fn bench_config() -> RunnableConfig {
     RunnableConfig {
         recursion_limit: 20_000_000_000,
@@ -50,9 +45,13 @@ fn bench_config() -> RunnableConfig {
     }
 }
 
-/// Count the number of events in a stream
 async fn count_events<S>(
-    mut stream: Pin<Box<dyn futures::Stream<Item = Result<StreamEvent<S>, JunctureError>> + Send>>,
+    mut stream: Pin<
+        Box<
+            dyn futures::Stream<Item = Result<StreamEvent<S>, juncture_core::error::JunctureError>>
+                + Send,
+        >,
+    >,
 ) -> usize
 where
     S: juncture_core::State,

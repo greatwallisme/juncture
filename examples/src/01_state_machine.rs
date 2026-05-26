@@ -12,12 +12,12 @@
 //! - Accessing final state from `GraphOutput`
 
 use juncture_core::node::NodeFnUpdate;
-use juncture_core::{JunctureError, RunnableConfig, StateGraph};
+use juncture_core::{RunnableConfig, StateGraph};
 use juncture_derive::State;
 use std::io::Write;
 
 /// Workflow state tracking the current step and a counter
-#[derive(State, Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(State, Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 struct WorkflowState {
     /// Current step description
     step: String,
@@ -25,29 +25,35 @@ struct WorkflowState {
     count: u32,
 }
 
-/// Greet node - sets step to "greeted" and increments count
-async fn greet_node(state: WorkflowState) -> Result<WorkflowStateUpdate, JunctureError> {
-    Ok(WorkflowStateUpdate {
-        step: Some("greeted".to_string()),
-        count: Some(state.count + 1),
-    })
-}
-
-/// Finish node - sets step to "done" and increments count
-async fn finish_node(state: WorkflowState) -> Result<WorkflowStateUpdate, JunctureError> {
-    Ok(WorkflowStateUpdate {
-        step: Some("done".to_string()),
-        count: Some(state.count + 1),
-    })
-}
-
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create a new graph builder
     let mut graph = StateGraph::<WorkflowState>::new();
 
     // Add nodes to the graph
-    graph.add_node_simple("greet", NodeFnUpdate(greet_node))?;
-    graph.add_node_simple("finish", NodeFnUpdate(finish_node))?;
+    graph.add_node_simple(
+        "greet",
+        NodeFnUpdate(|state: &WorkflowState| {
+            let count = state.count;
+            async move {
+                Ok(WorkflowStateUpdate {
+                    step: Some("greeted".to_string()),
+                    count: Some(count + 1),
+                })
+            }
+        }),
+    )?;
+    graph.add_node_simple(
+        "finish",
+        NodeFnUpdate(|state: &WorkflowState| {
+            let count = state.count;
+            async move {
+                Ok(WorkflowStateUpdate {
+                    step: Some("done".to_string()),
+                    count: Some(count + 1),
+                })
+            }
+        }),
+    )?;
 
     // Define the execution flow: greet -> finish
     graph.add_edge("greet", "finish");

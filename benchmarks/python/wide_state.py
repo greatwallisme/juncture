@@ -2,6 +2,10 @@
 
 Port of LangGraph's bench/wide_state.py for Juncture comparison.
 Produces JSON output for the comparison script.
+
+Node behavior mirrors the Rust benchmark exactly: each node reads one field
+(to simulate state access cost) and writes fixed, small values to other fields.
+This avoids exponential state growth and ensures fair comparison.
 """
 
 import json
@@ -9,12 +13,11 @@ import operator
 import sys
 import time
 
-from collections.abc import Sequence
 from dataclasses import dataclass, field
-from functools import partial
-from random import choice
+from typing import Annotated
 
 import uvloop
+from bench_utils import get_cpu_time_ms, get_peak_rss_mb
 from langgraph._internal._runnable import RunnableCallable
 from langgraph.constants import END, START
 from langgraph.graph import StateGraph
@@ -25,140 +28,83 @@ def create_wide_state(n: int) -> StateGraph:
 
     @dataclass(kw_only=True)
     class State:
-        messages: list = field(default_factory=list)
-        """Messages exchanged during conversation."""
-        trigger_events: list = field(default_factory=list)
-        """External events converted by the graph."""
-        primary_issue_medium: str = field(default="email")
-        """Primary medium for issue communication."""
-        autoresponse: dict | None = field(default=None)
-        """Auto-response configuration."""
-        issue: dict | None = field(default=None)
-        """Current issue details."""
+        messages: Annotated[list, operator.add] = field(default_factory=list)
+        trigger_events: Annotated[list, operator.add] = field(default_factory=list)
+        primary_issue_medium: Annotated[str, lambda x, y: y or x] = field(
+            default="email"
+        )
+        autoresponse: Annotated[dict | None, lambda _, y: y] = field(default=None)
+        issue: Annotated[dict | None, lambda x, y: y if y else x] = field(default=None)
         relevant_rules: list[dict] | None = field(default=None)
-        """SOPs from rulebook relevant to conversation."""
         memory_docs: list[dict] | None = field(default=None)
-        """Memory docs relevant to conversation."""
-        categorizations: list[dict] = field(default_factory=list)
-        """AI-generated issue categorizations."""
-        responses: list[dict] = field(default_factory=list)
-        """Draft responses recommended by AI."""
-        user_info: dict | None = field(default=None)
-        """Current user state by email."""
-        crm_info: dict | None = field(default=None)
-        """CRM info for user's organization."""
-        email_thread_id: str | None = field(default=None)
-        """Current email thread ID."""
-        slack_participants: dict = field(default_factory=dict)
-        """Growing list of Slack participants."""
+        categorizations: Annotated[list[dict], operator.add] = field(
+            default_factory=list
+        )
+        responses: Annotated[list[dict], operator.add] = field(default_factory=list)
+        user_info: Annotated[dict | None, lambda x, y: y if y is not None else x] = (
+            field(default=None)
+        )
+        crm_info: Annotated[dict | None, lambda x, y: y if y is not None else x] = (
+            field(default=None)
+        )
+        email_thread_id: Annotated[str | None, lambda x, y: y if y is not None else x] = (
+            field(default=None)
+        )
+        slack_participants: Annotated[dict, operator.or_] = field(default_factory=dict)
         bot_id: str | None = field(default=None)
-        """Bot user ID in Slack channel."""
-        notified_assignees: dict = field(default_factory=dict)
-        """Assignees that have been notified."""
+        notified_assignees: Annotated[dict, operator.or_] = field(default_factory=dict)
 
-    list_fields = {
-        "messages",
-        "trigger_events",
-        "categorizations",
-        "responses",
-        "memory_docs",
-        "relevant_rules",
-    }
-
-    def read_write(read: str, write: Sequence[str], input_state: State) -> dict:
-        """Node function that reads one field and writes to others."""
-        val = getattr(input_state, read)
-        val = {val: val} if isinstance(val, str) else val
-        val_single = val[-1] if isinstance(val, list) else val
-        val_list = val if isinstance(val, list) else [val]
+    def node_one(state: State) -> dict:
+        _ = state.messages[-1:]  # read access (no crash on empty)
         return {
-            k: val_list
-            if k in list_fields
-            else val_single
-            if k in {"user_info", "crm_info", "slack_participants", "notified_assignees", "autoresponse", "issue"}
-            else "".join(choice("abcdefghijklmnopqrstuvwxyz") for _ in range(n))
-            for k in write
+            "trigger_events": [{"event": "triggered"}],
+            "primary_issue_medium": "email",
         }
+
+    def node_two(state: State) -> dict:
+        _ = state.trigger_events[-1:]  # read access
+        return {"autoresponse": {"enabled": True}}
+
+    def node_three(state: State) -> dict:
+        _ = state.autoresponse  # read access
+        return {"relevant_rules": []}
+
+    def node_four(state: State) -> dict:
+        _ = state.trigger_events[-1:]  # read access
+        return {
+            "categorizations": [],
+            "responses": [],
+            "memory_docs": None,
+        }
+
+    def node_five(state: State) -> dict:
+        _ = state.categorizations[-1:]  # read access
+        return {
+            "user_info": {},
+            "crm_info": {},
+            "email_thread_id": "t",
+            "slack_participants": {},
+            "bot_id": "b",
+            "notified_assignees": {},
+        }
+
+    def node_six(state: State) -> dict:
+        _ = state.responses[-1:]  # read access
+        return {"messages": [{"message": "completed"}]}
 
     builder = StateGraph(State)
     builder.add_edge(START, "one")
-    builder.add_node(
-        "one",
-        RunnableCallable(
-            partial(read_write, "messages", ["trigger_events", "primary_issue_medium"]),
-            partial(read_write, "messages", ["trigger_events", "primary_issue_medium"]),
-        ),
-    )
+    builder.add_node("one", RunnableCallable(node_one))
     builder.add_edge("one", "two")
-    builder.add_node(
-        "two",
-        RunnableCallable(
-            partial(read_write, "trigger_events", ["autoresponse", "issue"]),
-            partial(read_write, "trigger_events", ["autoresponse", "issue"]),
-        ),
-    )
+    builder.add_node("two", RunnableCallable(node_two))
     builder.add_edge("two", "three")
     builder.add_edge("two", "four")
-    builder.add_node(
-        "three",
-        RunnableCallable(
-            partial(read_write, "autoresponse", ["relevant_rules"]),
-            partial(read_write, "autoresponse", ["relevant_rules"]),
-        ),
-    )
-    builder.add_node(
-        "four",
-        RunnableCallable(
-            partial(
-                read_write,
-                "trigger_events",
-                ["categorizations", "responses", "memory_docs"],
-            ),
-            partial(
-                read_write,
-                "trigger_events",
-                ["categorizations", "responses", "memory_docs"],
-            ),
-        ),
-    )
-    builder.add_node(
-        "five",
-        RunnableCallable(
-            partial(
-                read_write,
-                "categorizations",
-                [
-                    "user_info",
-                    "crm_info",
-                    "email_thread_id",
-                    "slack_participants",
-                    "bot_id",
-                    "notified_assignees",
-                ],
-            ),
-            partial(
-                read_write,
-                "categorizations",
-                [
-                    "user_info",
-                    "crm_info",
-                    "email_thread_id",
-                    "slack_participants",
-                    "bot_id",
-                    "notified_assignees",
-                ],
-            ),
-        ),
-    )
+    builder.add_node("three", RunnableCallable(node_three))
+    builder.add_node("four", RunnableCallable(node_four))
+    builder.add_node("five", RunnableCallable(node_five))
     builder.add_edge(["three", "four"], "five")
     builder.add_edge("five", "six")
-    builder.add_node(
-        "six",
-        RunnableCallable(
-            partial(read_write, "responses", ["messages"]),
-            partial(read_write, "responses", ["messages"]),
-        ),
-    )
+    builder.add_node("six", RunnableCallable(node_six))
     builder.add_conditional_edges(
         "six", lambda state: END if len(state.messages) > n else "one"
     )
@@ -180,46 +126,45 @@ async def arun(graph, input_data: dict, config: dict) -> int:
     )
 
 
-async def run_benchmark(iterations: int, num_iterations: int = 20) -> dict:
+async def run_benchmark(iterations: int, num_iterations: int = 3) -> dict:
     """Run the wide state benchmark for a given number of iterations."""
     graph = create_wide_state(iterations).compile()
 
-    # Pre-generate input data matching Python structure
-    input_messages = []
-    for i in range(50):
-        inner_map = {}
-        for j in range(50):
-            key = str(j) * 10
-            value = ["hi?" * 10, True, 1, 6327816386138, None] * 5
-            inner_map[key] = value
-        input_messages.append(inner_map)
-
-    input_data = {"messages": input_messages}
+    input_data = {"messages": []}
     config = {
         "configurable": {"thread_id": "bench"},
         "recursion_limit": 20_000_000_000,
     }
 
-    # Warmup
-    for _ in range(3):
-        await arun(graph, input_data, config)
+    # Warmup (1 run)
+    await arun(graph, input_data, config)
 
     # Timed runs
     times: list[float] = []
+    cpu_before = get_cpu_time_ms()
     for _ in range(num_iterations):
         start = time.perf_counter()
         await arun(graph, input_data, config)
         elapsed = time.perf_counter() - start
         times.append(elapsed)
+    cpu_after = get_cpu_time_ms()
+    rss = get_peak_rss_mb()
+
+    mean_ms = sum(times) / len(times) * 1000
+    node_count = iterations * 6  # 6 nodes per iteration
 
     result = {
         "scenario": f"wide_state_{iterations}",
         "iterations": iterations,
+        "node_count": node_count,
         "num_runs": num_iterations,
         "times_ms": [t * 1000 for t in times],
-        "mean_ms": sum(times) / len(times) * 1000,
+        "mean_ms": mean_ms,
         "min_ms": min(times) * 1000,
         "max_ms": max(times) * 1000,
+        "cpu_ms": cpu_after - cpu_before,
+        "peak_rss_mb": rss,
+        "per_node_wall_us": mean_ms * 1000 / node_count,
     }
     return result
 
@@ -231,7 +176,7 @@ def main() -> None:
     for iterations in [300, 600, 1200]:
         sys.stdout.write(f"Running wide_state_{iterations}...\n")
         sys.stdout.flush()
-        result = uvloop.run(run_benchmark(iterations))
+        result = uvloop.run(run_benchmark(iterations, num_iterations=3))
         results.append(result)
         sys.stdout.write(
             f"  {result['scenario']}: {result['mean_ms']:.2f} ms "

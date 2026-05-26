@@ -129,7 +129,7 @@ impl ValidationNode {
 impl Node<MessagesState> for ValidationNode {
     fn call(
         &self,
-        state: MessagesState,
+        state: &MessagesState,
         _config: &RunnableConfig,
     ) -> std::pin::Pin<
         Box<
@@ -138,8 +138,10 @@ impl Node<MessagesState> for ValidationNode {
                 + '_,
         >,
     > {
+        // Clone messages to avoid lifetime issues in async block
+        let messages = state.messages.clone();
         Box::pin(async move {
-            self.validate(&state.messages)
+            self.validate(&messages)
                 .map(|()| Command::update(MessagesStateUpdate::default()))
                 .map_err(|e| JunctureError::execution(e.to_string()))
         })
@@ -343,7 +345,7 @@ mod tests {
         };
         let config = RunnableConfig::default();
 
-        let result = validator.call(state, &config).await;
+        let result = validator.call(&state, &config).await;
         assert!(result.is_ok());
 
         let command = result.expect("call should succeed");
@@ -372,7 +374,7 @@ mod tests {
         };
         let config = RunnableConfig::default();
 
-        let result = validator.call(state, &config).await;
+        let result = validator.call(&state, &config).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().is_execution());
     }
@@ -398,7 +400,7 @@ mod tests {
         };
         let config = RunnableConfig::default();
 
-        let result = validator.call(state, &config).await;
+        let result = validator.call(&state, &config).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().is_execution());
     }

@@ -416,7 +416,7 @@ mod tests {
     // --- StatefulTool tests ---
 
     /// Dummy State for stateful tool tests
-    #[derive(Clone, Debug)]
+    #[derive(Clone, Debug, Default)]
     struct TestState {
         context: String,
     }

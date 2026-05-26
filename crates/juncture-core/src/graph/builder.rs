@@ -229,7 +229,7 @@ impl<S: State> ErrorHandlerNode<S> {
 impl<S: State + Clone> crate::Node<S> for ErrorHandlerNode<S> {
     fn call(
         &self,
-        state: S,
+        state: &S,
         config: &crate::RunnableConfig,
     ) -> std::pin::Pin<
         Box<
@@ -312,7 +312,7 @@ impl<S: State> RetryingNode<S> {
 impl<S: State + Clone> crate::Node<S> for RetryingNode<S> {
     fn call(
         &self,
-        state: S,
+        state: &S,
         config: &crate::RunnableConfig,
     ) -> std::pin::Pin<
         Box<
@@ -325,13 +325,14 @@ impl<S: State + Clone> crate::Node<S> for RetryingNode<S> {
         let inner = Arc::clone(&self.inner);
         let config = config.clone();
         let node_name = self.name.clone();
+        let state_owned = state.clone();
 
         Box::pin(async move {
             execute_with_retry(
                 &node_name,
                 &policy,
                 |s, cfg| inner.call(s, cfg),
-                state,
+                &state_owned,
                 &config,
             )
             .await
@@ -381,21 +382,19 @@ pub async fn execute_with_retry<S, F, Fut>(
     node_name: &str,
     policy: &RetryPolicy,
     operation: F,
-    state: S,
+    state: &S,
     config: &crate::RunnableConfig,
 ) -> Result<crate::Command<S>, crate::JunctureError>
 where
-    S: State + Clone,
-    F: Fn(S, &crate::RunnableConfig) -> Fut,
+    S: State,
+    F: Fn(&S, &crate::RunnableConfig) -> Fut,
     Fut: std::future::Future<Output = Result<crate::Command<S>, crate::JunctureError>>,
 {
     let mut last_error: Option<crate::JunctureError> = None;
     let mut delay = policy.initial_interval;
 
     for attempt in 0..policy.max_attempts {
-        let state_for_attempt = state.clone();
-
-        match operation(state_for_attempt, config).await {
+        match operation(state, config).await {
             Ok(command) => {
                 if attempt > 0 {
                     tracing::debug!(
@@ -526,7 +525,7 @@ impl<S: State> TimeoutNode<S> {
 impl<S: State + Clone> crate::Node<S> for TimeoutNode<S> {
     fn call(
         &self,
-        state: S,
+        state: &S,
         config: &crate::RunnableConfig,
     ) -> std::pin::Pin<
         Box<
@@ -540,12 +539,13 @@ impl<S: State + Clone> crate::Node<S> for TimeoutNode<S> {
         let node_name = self.name.clone();
         let run_timeout = self.policy.run_timeout;
 
+        let state_cloned = state.clone();
         Box::pin(async move {
             execute_with_timeout(
                 &node_name,
                 run_timeout,
                 |s, cfg| inner.call(s, cfg),
-                state,
+                &state_cloned,
                 &config,
             )
             .await
@@ -594,12 +594,12 @@ pub async fn execute_with_timeout<S, F, Fut>(
     node_name: &str,
     run_timeout: std::time::Duration,
     operation: F,
-    state: S,
+    state: &S,
     config: &crate::RunnableConfig,
 ) -> Result<crate::Command<S>, crate::JunctureError>
 where
     S: State,
-    F: FnOnce(S, &crate::RunnableConfig) -> Fut,
+    F: FnOnce(&S, &crate::RunnableConfig) -> Fut,
     Fut: std::future::Future<Output = Result<crate::Command<S>, crate::JunctureError>>,
 {
     let result = tokio::time::timeout(run_timeout, operation(state, config)).await;
@@ -1464,7 +1464,12 @@ impl<S: State, I: IntoState<S>, O: FromState<S>> Default for StateGraph<S, I, O>
 mod tests {
     use super::*;
     use crate::Node;
+    use crate::error::JunctureError;
     use crate::node::NodeFnUpdate;
+    use std::pin::Pin;
+
+    // Type alias for boxed futures to satisfy higher-ranked lifetime bounds
+    type BoxResult<T> = Pin<Box<dyn Future<Output = Result<T, JunctureError>> + Send>>;
 
     #[test]
     fn test_state_graph_new() {
@@ -1478,7 +1483,9 @@ mod tests {
     #[test]
     fn test_add_node_simple() {
         let mut graph: StateGraph<StateDummy> = StateGraph::new();
-        let node = NodeFnUpdate(|_s| async move { Ok(StateDummyUpdate) });
+        let node = NodeFnUpdate(|_s: &StateDummy| -> BoxResult<_> {
+            Box::pin(async move { Ok(StateDummyUpdate) })
+        });
 
         graph.add_node_simple("test", node).unwrap();
         assert!(graph.nodes.contains_key("test"));
@@ -1491,12 +1498,16 @@ mod tests {
         graph
             .add_node_simple(
                 "test",
-                NodeFnUpdate(|_s| async move { Ok(StateDummyUpdate) }),
+                NodeFnUpdate(|_s: &StateDummy| -> BoxResult<_> {
+                    Box::pin(async move { Ok(StateDummyUpdate) })
+                }),
             )
             .unwrap();
         let result = graph.add_node_simple(
             "test",
-            NodeFnUpdate(|_s| async move { Ok(StateDummyUpdate) }),
+            NodeFnUpdate(|_s: &StateDummy| -> BoxResult<_> {
+                Box::pin(async move { Ok(StateDummyUpdate) })
+            }),
         );
         assert!(matches!(result, Err(TopologyError::DuplicateNode { .. })));
     }
@@ -1523,13 +1534,28 @@ mod tests {
 
         // Add nodes first
         graph
-            .add_node_simple("a", NodeFnUpdate(|_s| async move { Ok(StateDummyUpdate) }))
+            .add_node_simple(
+                "a",
+                NodeFnUpdate(|_s: &StateDummy| -> BoxResult<_> {
+                    Box::pin(async move { Ok(StateDummyUpdate) })
+                }),
+            )
             .unwrap();
         graph
-            .add_node_simple("b", NodeFnUpdate(|_s| async move { Ok(StateDummyUpdate) }))
+            .add_node_simple(
+                "b",
+                NodeFnUpdate(|_s: &StateDummy| -> BoxResult<_> {
+                    Box::pin(async move { Ok(StateDummyUpdate) })
+                }),
+            )
             .unwrap();
         graph
-            .add_node_simple("c", NodeFnUpdate(|_s| async move { Ok(StateDummyUpdate) }))
+            .add_node_simple(
+                "c",
+                NodeFnUpdate(|_s: &StateDummy| -> BoxResult<_> {
+                    Box::pin(async move { Ok(StateDummyUpdate) })
+                }),
+            )
             .unwrap();
 
         // Add sequence
@@ -1550,7 +1576,12 @@ mod tests {
     fn test_compile_ephemeral() {
         let mut graph: StateGraph<StateDummy> = StateGraph::new();
         graph
-            .add_node_simple("a", NodeFnUpdate(|_s| async move { Ok(StateDummyUpdate) }))
+            .add_node_simple(
+                "a",
+                NodeFnUpdate(|_s: &StateDummy| -> BoxResult<_> {
+                    Box::pin(async move { Ok(StateDummyUpdate) })
+                }),
+            )
             .unwrap();
         graph.set_entry_point("a");
         graph.set_finish_point("a");
@@ -1563,7 +1594,10 @@ mod tests {
     fn test_add_subgraph() {
         let mut graph: StateGraph<StateDummy> = StateGraph::new();
 
-        let node = NodeFnUpdate(|_s| async move { Ok(StateDummyUpdate) }).into_node("sub");
+        let node = NodeFnUpdate(|_s: &StateDummy| -> BoxResult<_> {
+            Box::pin(async move { Ok(StateDummyUpdate) })
+        })
+        .into_node("sub");
         let mount = crate::subgraph::SubgraphMount::new(
             "my_subgraph",
             crate::subgraph::SubgraphConfig::default(),
@@ -1581,7 +1615,10 @@ mod tests {
 
         let mut graph: StateGraph<StateDummy> = StateGraph::new();
 
-        let node = NodeFnUpdate(|_s| async move { Ok(StateDummyUpdate) }).into_node("sub");
+        let node = NodeFnUpdate(|_s: &StateDummy| -> BoxResult<_> {
+            Box::pin(async move { Ok(StateDummyUpdate) })
+        })
+        .into_node("sub");
         let mount = SubgraphMount::new(
             "my_subgraph",
             SubgraphConfig {
@@ -1608,11 +1645,16 @@ mod tests {
         graph
             .add_node_simple(
                 "my_subgraph",
-                NodeFnUpdate(|_s| async move { Ok(StateDummyUpdate) }),
+                NodeFnUpdate(|_s: &StateDummy| -> BoxResult<_> {
+                    Box::pin(async move { Ok(StateDummyUpdate) })
+                }),
             )
             .unwrap();
 
-        let node = NodeFnUpdate(|_s| async move { Ok(StateDummyUpdate) }).into_node("sub");
+        let node = NodeFnUpdate(|_s: &StateDummy| -> BoxResult<_> {
+            Box::pin(async move { Ok(StateDummyUpdate) })
+        })
+        .into_node("sub");
         let mount = crate::subgraph::SubgraphMount::new(
             "my_subgraph",
             crate::subgraph::SubgraphConfig::default(),
@@ -1624,7 +1666,7 @@ mod tests {
     }
 
     /// Child state type for testing explicit-mapping subgraph mounting.
-    #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+    #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
     struct ChildState {
         value: i32,
     }
@@ -1654,8 +1696,8 @@ mod tests {
         child_graph
             .add_node_simple(
                 "child_node",
-                crate::node::NodeFnUpdate(|_s: ChildState| async move {
-                    Ok(ChildStateUpdate { value: Some(42) })
+                crate::node::NodeFnUpdate(|_s: &ChildState| -> BoxResult<_> {
+                    Box::pin(async move { Ok(ChildStateUpdate { value: Some(42) }) })
                 }),
             )
             .unwrap();
@@ -1684,8 +1726,8 @@ mod tests {
         child_graph
             .add_node_simple(
                 "child_node",
-                crate::node::NodeFnUpdate(|_s: ChildState| async move {
-                    Ok(ChildStateUpdate { value: Some(42) })
+                crate::node::NodeFnUpdate(|_s: &ChildState| -> BoxResult<_> {
+                    Box::pin(async move { Ok(ChildStateUpdate { value: Some(42) }) })
                 }),
             )
             .unwrap();
@@ -1698,7 +1740,9 @@ mod tests {
         parent_graph
             .add_node_simple(
                 "explicit_subgraph",
-                crate::node::NodeFnUpdate(|_s| async move { Ok(StateDummyUpdate) }),
+                crate::node::NodeFnUpdate(|_s: &StateDummy| -> BoxResult<_> {
+                    Box::pin(async move { Ok(StateDummyUpdate) })
+                }),
             )
             .unwrap();
 
@@ -1729,7 +1773,9 @@ mod tests {
         graph
             .add_node_with_retry(
                 "retry_node",
-                NodeFnUpdate(|_s| async move { Ok(StateDummyUpdate) }),
+                NodeFnUpdate(|_s: &StateDummy| -> BoxResult<_> {
+                    Box::pin(async move { Ok(StateDummyUpdate) })
+                }),
                 policy,
             )
             .unwrap();
@@ -1746,7 +1792,9 @@ mod tests {
         graph
             .add_node_with_error_handler(
                 "error_handler_node",
-                NodeFnUpdate(|_s| async move { Ok(StateDummyUpdate) }),
+                NodeFnUpdate(|_s: &StateDummy| -> BoxResult<_> {
+                    Box::pin(async move { Ok(StateDummyUpdate) })
+                }),
                 handler,
             )
             .unwrap();
@@ -1773,13 +1821,17 @@ mod tests {
         graph
             .add_node_simple(
                 "node_a",
-                NodeFnUpdate(|_s| async move { Ok(StateDummyUpdate) }),
+                NodeFnUpdate(|_s: &StateDummy| -> BoxResult<_> {
+                    Box::pin(async move { Ok(StateDummyUpdate) })
+                }),
             )
             .unwrap();
         graph
             .add_node_simple(
                 "node_b",
-                NodeFnUpdate(|_s| async move { Ok(StateDummyUpdate) }),
+                NodeFnUpdate(|_s: &StateDummy| -> BoxResult<_> {
+                    Box::pin(async move { Ok(StateDummyUpdate) })
+                }),
             )
             .unwrap();
 
@@ -1804,7 +1856,9 @@ mod tests {
         graph
             .add_node_simple(
                 "node:test",
-                NodeFnUpdate(|_s| async move { Ok(StateDummyUpdate) }),
+                NodeFnUpdate(|_s: &StateDummy| -> BoxResult<_> {
+                    Box::pin(async move { Ok(StateDummyUpdate) })
+                }),
             )
             .unwrap();
 
@@ -1828,7 +1882,9 @@ mod tests {
         graph
             .add_node_simple(
                 "node_a",
-                NodeFnUpdate(|_s| async move { Ok(StateDummyUpdate) }),
+                NodeFnUpdate(|_s: &StateDummy| -> BoxResult<_> {
+                    Box::pin(async move { Ok(StateDummyUpdate) })
+                }),
             )
             .unwrap();
         graph.set_finish_point("nonexistent");
@@ -1843,13 +1899,17 @@ mod tests {
         graph
             .add_node_simple(
                 "start",
-                NodeFnUpdate(|_s| async move { Ok(StateDummyUpdate) }),
+                NodeFnUpdate(|_s: &StateDummy| -> BoxResult<_> {
+                    Box::pin(async move { Ok(StateDummyUpdate) })
+                }),
             )
             .unwrap();
         graph
             .add_node_simple(
                 "end",
-                NodeFnUpdate(|_s| async move { Ok(StateDummyUpdate) }),
+                NodeFnUpdate(|_s: &StateDummy| -> BoxResult<_> {
+                    Box::pin(async move { Ok(StateDummyUpdate) })
+                }),
             )
             .unwrap();
         graph.set_entry_point("start");
@@ -1864,7 +1924,9 @@ mod tests {
         graph
             .add_node_simple(
                 "node_a",
-                NodeFnUpdate(|_s| async move { Ok(StateWithBadReplaceIndexUpdate::default()) }),
+                NodeFnUpdate(|_s: &StateWithBadReplaceIndex| -> BoxResult<_> {
+                    Box::pin(async move { Ok(StateWithBadReplaceIndexUpdate::default()) })
+                }),
             )
             .unwrap();
         graph.set_entry_point("node_a");
@@ -1894,7 +1956,9 @@ mod tests {
         graph
             .add_node_simple(
                 "node_a",
-                NodeFnUpdate(|_s| async move { Ok(StateWithBadAfterFinishIndexUpdate::default()) }),
+                NodeFnUpdate(|_s: &StateWithBadAfterFinishIndex| -> BoxResult<_> {
+                    Box::pin(async move { Ok(StateWithBadAfterFinishIndexUpdate::default()) })
+                }),
             )
             .unwrap();
         graph.set_entry_point("node_a");
@@ -1920,7 +1984,7 @@ mod tests {
 
     /// State type with a `replace` field index that exceeds the field count.
     /// Simulates an inconsistency that would be caught by `validate_keys()`.
-    #[derive(Clone, Debug)]
+    #[derive(Clone, Debug, Default)]
     struct StateWithBadReplaceIndex {
         a: i32,
         b: i32,
@@ -1966,7 +2030,7 @@ mod tests {
 
     /// State type with a `replace_after_finish` field index that exceeds the field count.
     /// Simulates an inconsistency that would be caught by `validate_keys()`.
-    #[derive(Clone, Debug)]
+    #[derive(Clone, Debug, Default)]
     struct StateWithBadAfterFinishIndex {
         x: String,
         y: String,
@@ -2016,7 +2080,9 @@ mod tests {
         graph
             .add_node_simple(
                 "node_a",
-                NodeFnUpdate(|_s| async move { Ok(StateWithBadReplaceIndexUpdate::default()) }),
+                NodeFnUpdate(|_s: &StateWithBadReplaceIndex| -> BoxResult<_> {
+                    Box::pin(async move { Ok(StateWithBadReplaceIndexUpdate::default()) })
+                }),
             )
             .unwrap();
         graph.set_entry_point("node_a");
@@ -2047,7 +2113,9 @@ mod tests {
         graph
             .add_node_simple(
                 "node_a",
-                NodeFnUpdate(|_s| async move { Ok(StateWithBadAfterFinishIndexUpdate::default()) }),
+                NodeFnUpdate(|_s: &StateWithBadAfterFinishIndex| -> BoxResult<_> {
+                    Box::pin(async move { Ok(StateWithBadAfterFinishIndexUpdate::default()) })
+                }),
             )
             .unwrap();
         graph.set_entry_point("node_a");
@@ -2083,7 +2151,9 @@ mod tests {
         graph
             .add_node_simple(
                 "process",
-                NodeFnUpdate(|_s| async move { Ok(StateWithBadReplaceIndexUpdate::default()) }),
+                NodeFnUpdate(|_s: &StateWithBadReplaceIndex| -> BoxResult<_> {
+                    Box::pin(async move { Ok(StateWithBadReplaceIndexUpdate::default()) })
+                }),
             )
             .unwrap();
         graph.set_entry_point("process");
@@ -2118,7 +2188,7 @@ mod tests {
         }
     }
 
-    #[derive(Clone, Debug)]
+    #[derive(Clone, Debug, Default)]
     struct StateDummy;
 
     impl crate::State for StateDummy {
@@ -2152,8 +2222,10 @@ mod tests {
         let result = execute_with_retry(
             "test_node",
             &policy,
-            |_s: StateDummy, _cfg: &crate::RunnableConfig| async { Ok(crate::Command::end()) },
-            StateDummy,
+            |_s: &StateDummy, _cfg: &crate::RunnableConfig| -> BoxResult<_> {
+                Box::pin(async { Ok(crate::Command::end()) })
+            },
+            &StateDummy,
             &config,
         )
         .await;
@@ -2179,18 +2251,18 @@ mod tests {
         let result = execute_with_retry(
             "test_node",
             &policy,
-            move |_s: StateDummy, _cfg: &crate::RunnableConfig| {
+            move |_s: &StateDummy, _cfg: &crate::RunnableConfig| -> BoxResult<_> {
                 let counter = Arc::clone(&attempt_clone);
-                async move {
+                Box::pin(async move {
                     let n = counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     if n < 2 {
                         Err(crate::JunctureError::execution("transient failure"))
                     } else {
                         Ok(crate::Command::end())
                     }
-                }
+                })
             },
-            StateDummy,
+            &StateDummy,
             &config,
         )
         .await;
@@ -2214,10 +2286,10 @@ mod tests {
         let result = execute_with_retry(
             "test_node",
             &policy,
-            |_s: StateDummy, _cfg: &crate::RunnableConfig| async {
-                Err(crate::JunctureError::execution("always fails"))
+            |_s: &StateDummy, _cfg: &crate::RunnableConfig| -> BoxResult<_> {
+                Box::pin(async { Err(crate::JunctureError::execution("always fails")) })
             },
-            StateDummy,
+            &StateDummy,
             &config,
         )
         .await;
@@ -2244,14 +2316,14 @@ mod tests {
         let result = execute_with_retry(
             "test_node",
             &policy,
-            move |_s: StateDummy, _cfg: &crate::RunnableConfig| {
+            move |_s: &StateDummy, _cfg: &crate::RunnableConfig| -> BoxResult<_> {
                 let counter = Arc::clone(&attempt_clone);
-                async move {
+                Box::pin(async move {
                     counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     Err(crate::JunctureError::cancelled())
-                }
+                })
             },
-            StateDummy,
+            &StateDummy,
             &config,
         )
         .await;
@@ -2280,14 +2352,14 @@ mod tests {
         let result = execute_with_retry(
             "test_node",
             &policy,
-            move |_s: StateDummy, _cfg: &crate::RunnableConfig| {
+            move |_s: &StateDummy, _cfg: &crate::RunnableConfig| -> BoxResult<_> {
                 let counter = Arc::clone(&attempt_clone);
-                async move {
+                Box::pin(async move {
                     counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     Err(crate::JunctureError::interrupt("user input needed"))
-                }
+                })
             },
-            StateDummy,
+            &StateDummy,
             &config,
         )
         .await;
@@ -2316,15 +2388,15 @@ mod tests {
         let result = execute_with_retry(
             "test_node",
             &policy,
-            move |_s: StateDummy, _cfg: &crate::RunnableConfig| {
+            move |_s: &StateDummy, _cfg: &crate::RunnableConfig| -> BoxResult<_> {
                 let counter = Arc::clone(&attempt_clone);
-                async move {
+                Box::pin(async move {
                     counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     // Return execution error (not timeout), should NOT be retried
                     Err(crate::JunctureError::execution("not a timeout"))
-                }
+                })
             },
-            StateDummy,
+            &StateDummy,
             &config,
         )
         .await;
@@ -2354,18 +2426,18 @@ mod tests {
         let result = execute_with_retry(
             "test_node",
             &policy,
-            move |_s: StateDummy, _cfg: &crate::RunnableConfig| {
+            move |_s: &StateDummy, _cfg: &crate::RunnableConfig| -> BoxResult<_> {
                 let counter = Arc::clone(&attempt_clone);
-                async move {
+                Box::pin(async move {
                     let n = counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     if n < 2 {
                         Err(crate::JunctureError::timeout("timed out"))
                     } else {
                         Ok(crate::Command::end())
                     }
-                }
+                })
             },
-            StateDummy,
+            &StateDummy,
             &config,
         )
         .await;
@@ -2473,18 +2545,19 @@ mod tests {
         let call_count = Arc::new(std::sync::atomic::AtomicU32::new(0));
         let count_clone = Arc::clone(&call_count);
 
-        let inner: Arc<dyn crate::Node<StateDummy>> = NodeFnCommand(move |_s: StateDummy| {
-            let counter = Arc::clone(&count_clone);
-            async move {
-                let n = counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                if n == 0 {
-                    Err(crate::JunctureError::execution("first try fails"))
-                } else {
-                    Ok(crate::Command::end())
-                }
-            }
-        })
-        .into_node("inner");
+        let inner: Arc<dyn crate::Node<StateDummy>> =
+            NodeFnCommand(move |_s: &StateDummy| -> BoxResult<_> {
+                let counter = Arc::clone(&count_clone);
+                Box::pin(async move {
+                    let n = counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    if n == 0 {
+                        Err(crate::JunctureError::execution("first try fails"))
+                    } else {
+                        Ok(crate::Command::end())
+                    }
+                })
+            })
+            .into_node("inner");
 
         let policy = RetryPolicy {
             max_attempts: 3,
@@ -2498,7 +2571,7 @@ mod tests {
         let retrying_node = RetryingNode::new(inner, policy);
         let config = crate::RunnableConfig::new();
 
-        let result = retrying_node.call(StateDummy, &config).await;
+        let result = retrying_node.call(&StateDummy, &config).await;
         result.unwrap();
         assert_eq!(call_count.load(std::sync::atomic::Ordering::Relaxed), 2);
     }
@@ -2510,14 +2583,15 @@ mod tests {
         let call_count = Arc::new(std::sync::atomic::AtomicU32::new(0));
         let count_clone = Arc::clone(&call_count);
 
-        let inner: Arc<dyn crate::Node<StateDummy>> = NodeFnCommand(move |_s: StateDummy| {
-            let counter = Arc::clone(&count_clone);
-            async move {
-                counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                Err(crate::JunctureError::execution("always fails"))
-            }
-        })
-        .into_node("inner");
+        let inner: Arc<dyn crate::Node<StateDummy>> =
+            NodeFnCommand(move |_s: &StateDummy| -> BoxResult<_> {
+                let counter = Arc::clone(&count_clone);
+                Box::pin(async move {
+                    counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    Err(crate::JunctureError::execution("always fails"))
+                })
+            })
+            .into_node("inner");
 
         let policy = RetryPolicy {
             max_attempts: 5,
@@ -2531,7 +2605,7 @@ mod tests {
         let retrying_node = RetryingNode::new(inner, policy);
         let config = crate::RunnableConfig::new();
 
-        let result = retrying_node.call(StateDummy, &config).await;
+        let result = retrying_node.call(&StateDummy, &config).await;
         let err = result.unwrap_err();
         assert!(err.is_execution());
         assert_eq!(call_count.load(std::sync::atomic::Ordering::Relaxed), 5);
@@ -2544,18 +2618,19 @@ mod tests {
         let call_count = Arc::new(std::sync::atomic::AtomicU32::new(0));
         let count_clone = Arc::clone(&call_count);
 
-        let inner: Arc<dyn crate::Node<StateDummy>> = NodeFnCommand(move |_s: StateDummy| {
-            let counter = Arc::clone(&count_clone);
-            async move {
-                let n = counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                if n < 2 {
-                    Err(crate::JunctureError::execution("retry me"))
-                } else {
-                    Ok(crate::Command::end())
-                }
-            }
-        })
-        .into_node("inner");
+        let inner: Arc<dyn crate::Node<StateDummy>> =
+            NodeFnCommand(move |_s: &StateDummy| -> BoxResult<_> {
+                let counter = Arc::clone(&count_clone);
+                Box::pin(async move {
+                    let n = counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    if n < 2 {
+                        Err(crate::JunctureError::execution("retry me"))
+                    } else {
+                        Ok(crate::Command::end())
+                    }
+                })
+            })
+            .into_node("inner");
 
         let policy = RetryPolicy {
             max_attempts: 3,
@@ -2569,7 +2644,7 @@ mod tests {
         let retrying_node = RetryingNode::new(inner, policy);
         let config = crate::RunnableConfig::new();
 
-        let result = retrying_node.call(StateDummy, &config).await;
+        let result = retrying_node.call(&StateDummy, &config).await;
         result.unwrap();
         assert_eq!(call_count.load(std::sync::atomic::Ordering::Relaxed), 3);
     }
@@ -2594,18 +2669,18 @@ mod tests {
         let result = execute_with_retry(
             "test_node",
             &policy,
-            move |_s: StateDummy, _cfg: &crate::RunnableConfig| {
+            move |_s: &StateDummy, _cfg: &crate::RunnableConfig| -> BoxResult<_> {
                 let counter = Arc::clone(&attempt_clone);
-                async move {
+                Box::pin(async move {
                     let n = counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     if n < 2 {
                         Err(crate::JunctureError::execution("fail"))
                     } else {
                         Ok(crate::Command::end())
                     }
-                }
+                })
             },
-            StateDummy,
+            &StateDummy,
             &config,
         )
         .await;
@@ -2629,8 +2704,10 @@ mod tests {
         let result = execute_with_timeout(
             "test_node",
             std::time::Duration::from_secs(10),
-            |_s: StateDummy, _cfg: &crate::RunnableConfig| async { Ok(crate::Command::end()) },
-            StateDummy,
+            |_s: &StateDummy, _cfg: &crate::RunnableConfig| -> BoxResult<_> {
+                Box::pin(async { Ok(crate::Command::end()) })
+            },
+            &StateDummy,
             &config,
         )
         .await;
@@ -2645,11 +2722,13 @@ mod tests {
         let result = execute_with_timeout(
             "slow_node",
             std::time::Duration::from_millis(10),
-            |_s: StateDummy, _cfg: &crate::RunnableConfig| async {
-                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
-                Ok(crate::Command::end())
+            |_s: &StateDummy, _cfg: &crate::RunnableConfig| -> BoxResult<_> {
+                Box::pin(async {
+                    tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                    Ok(crate::Command::end())
+                })
             },
-            StateDummy,
+            &StateDummy,
             &config,
         )
         .await;
@@ -2665,10 +2744,10 @@ mod tests {
         let result = execute_with_timeout(
             "failing_node",
             std::time::Duration::from_secs(10),
-            |_s: StateDummy, _cfg: &crate::RunnableConfig| async {
-                Err(crate::JunctureError::execution("inner failure"))
+            |_s: &StateDummy, _cfg: &crate::RunnableConfig| -> BoxResult<_> {
+                Box::pin(async { Err(crate::JunctureError::execution("inner failure")) })
             },
-            StateDummy,
+            &StateDummy,
             &config,
         )
         .await;
@@ -2685,14 +2764,15 @@ mod tests {
         let call_count = Arc::new(std::sync::atomic::AtomicU32::new(0));
         let count_clone = Arc::clone(&call_count);
 
-        let inner: Arc<dyn crate::Node<StateDummy>> = NodeFnCommand(move |_s: StateDummy| {
-            let counter = Arc::clone(&count_clone);
-            async move {
-                counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                Ok(crate::Command::end())
-            }
-        })
-        .into_node("inner");
+        let inner: Arc<dyn crate::Node<StateDummy>> =
+            NodeFnCommand(move |_s: &StateDummy| -> BoxResult<_> {
+                let counter = Arc::clone(&count_clone);
+                Box::pin(async move {
+                    counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    Ok(crate::Command::end())
+                })
+            })
+            .into_node("inner");
 
         let policy =
             crate::TimeoutPolicy::new().with_run_timeout(std::time::Duration::from_secs(10));
@@ -2700,7 +2780,7 @@ mod tests {
         let timeout_node = TimeoutNode::new(inner, policy);
         let config = crate::RunnableConfig::new();
 
-        let result = timeout_node.call(StateDummy, &config).await;
+        let result = timeout_node.call(&StateDummy, &config).await;
         result.unwrap();
         assert_eq!(call_count.load(std::sync::atomic::Ordering::Relaxed), 1);
     }
@@ -2709,11 +2789,14 @@ mod tests {
     async fn test_timeout_node_fires_on_exceeded_duration() {
         use crate::node::NodeFnCommand;
 
-        let inner: Arc<dyn crate::Node<StateDummy>> = NodeFnCommand(|_s: StateDummy| async {
-            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
-            Ok(crate::Command::end())
-        })
-        .into_node("inner");
+        let inner: Arc<dyn crate::Node<StateDummy>> =
+            NodeFnCommand(|_s: &StateDummy| -> BoxResult<_> {
+                Box::pin(async {
+                    tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                    Ok(crate::Command::end())
+                })
+            })
+            .into_node("inner");
 
         let policy =
             crate::TimeoutPolicy::new().with_run_timeout(std::time::Duration::from_millis(10));
@@ -2721,7 +2804,7 @@ mod tests {
         let timeout_node = TimeoutNode::new(inner, policy);
         let config = crate::RunnableConfig::new();
 
-        let result = timeout_node.call(StateDummy, &config).await;
+        let result = timeout_node.call(&StateDummy, &config).await;
         let err = result.unwrap_err();
         assert!(err.is_node_timeout());
     }
@@ -2730,10 +2813,11 @@ mod tests {
     async fn test_timeout_node_passes_through_inner_error() {
         use crate::node::NodeFnCommand;
 
-        let inner: Arc<dyn crate::Node<StateDummy>> = NodeFnCommand(|_s: StateDummy| async {
-            Err(crate::JunctureError::execution("node failure"))
-        })
-        .into_node("inner");
+        let inner: Arc<dyn crate::Node<StateDummy>> =
+            NodeFnCommand(|_s: &StateDummy| -> BoxResult<_> {
+                Box::pin(async { Err(crate::JunctureError::execution("node failure")) })
+            })
+            .into_node("inner");
 
         let policy =
             crate::TimeoutPolicy::new().with_run_timeout(std::time::Duration::from_secs(10));
@@ -2741,7 +2825,7 @@ mod tests {
         let timeout_node = TimeoutNode::new(inner, policy);
         let config = crate::RunnableConfig::new();
 
-        let result = timeout_node.call(StateDummy, &config).await;
+        let result = timeout_node.call(&StateDummy, &config).await;
         let err = result.unwrap_err();
         assert!(err.is_execution());
         assert!(!err.is_node_timeout());

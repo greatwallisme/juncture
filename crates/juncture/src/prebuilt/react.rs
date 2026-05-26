@@ -420,13 +420,9 @@ impl<M: ChatModel> fmt::Debug for AgentNode<M> {
 }
 
 impl<M: ChatModel> Node<MessagesState> for AgentNode<M> {
-    #[allow(
-        clippy::needless_pass_by_value,
-        reason = "state ownership is transferred into the async future"
-    )]
     fn call(
         &self,
-        state: MessagesState,
+        state: &MessagesState,
         config: &RunnableConfig,
     ) -> std::pin::Pin<
         Box<
@@ -439,10 +435,10 @@ impl<M: ChatModel> Node<MessagesState> for AgentNode<M> {
         let budget_tracker = config.budget_tracker().cloned();
 
         // Apply pre_model_hook to transform state before building messages
-        let state = match &self.pre_model_hook {
-            Some(hook) => hook(&state),
-            None => state,
-        };
+        let state = self
+            .pre_model_hook
+            .as_ref()
+            .map_or_else(|| state.clone(), |hook| hook(state));
 
         let messages = self.build_messages(&state);
 
@@ -510,7 +506,7 @@ impl<N: Node<MessagesState>> fmt::Debug for NamedNodeWrapper<N> {
 impl<N: Node<MessagesState>> Node<MessagesState> for NamedNodeWrapper<N> {
     fn call(
         &self,
-        state: MessagesState,
+        state: &MessagesState,
         config: &RunnableConfig,
     ) -> std::pin::Pin<
         Box<
@@ -585,7 +581,7 @@ impl fmt::Debug for ToolNodeAdapter {
 impl Node<MessagesState> for ToolNodeAdapter {
     fn call(
         &self,
-        state: MessagesState,
+        state: &MessagesState,
         _config: &RunnableConfig,
     ) -> std::pin::Pin<
         Box<
@@ -594,11 +590,17 @@ impl Node<MessagesState> for ToolNodeAdapter {
                 + '_,
         >,
     > {
+        // Clone messages and optionally state to avoid lifetime issues in async block
+        let messages = state.messages.clone();
+        let tool_node = Arc::clone(&self.tool_node);
+
+        // Clone state for stateful tools (expensive but necessary for lifetime safety)
+        let state_owned = state.clone();
+
         Box::pin(async move {
             // Execute tools with state access for stateful tools
-            let results = self
-                .tool_node
-                .execute_with_state(&state.messages, Some(&state))
+            let results = tool_node
+                .execute_with_state(&messages, Some(&state_owned))
                 .await
                 .map_err(|e| JunctureError::execution(e.to_string()))?;
 
@@ -747,7 +749,7 @@ mod tests {
             messages: vec![Message::human("Hello")],
         };
 
-        let result = node.call(state, &RunnableConfig::default()).await;
+        let result = node.call(&state, &RunnableConfig::default()).await;
 
         let cmd = result.unwrap();
         assert!(cmd.update.is_some());
@@ -763,7 +765,7 @@ mod tests {
             messages: vec![Message::human("What is 2+2?")],
         };
 
-        let result = node.call(state, &RunnableConfig::default()).await;
+        let result = node.call(&state, &RunnableConfig::default()).await;
         result.unwrap();
     }
 
@@ -779,7 +781,7 @@ mod tests {
             messages: vec![Message::human("Hello")],
         };
 
-        let result = node.call(state, &RunnableConfig::default()).await;
+        let result = node.call(&state, &RunnableConfig::default()).await;
         result.unwrap();
     }
 
@@ -792,7 +794,7 @@ mod tests {
             messages: vec![Message::human("Hello")],
         };
 
-        let result = node.call(state, &RunnableConfig::default()).await;
+        let result = node.call(&state, &RunnableConfig::default()).await;
         result.unwrap_err();
     }
 
@@ -812,7 +814,7 @@ mod tests {
             )],
         };
 
-        let result = adapter.call(state, &RunnableConfig::default()).await;
+        let result = adapter.call(&state, &RunnableConfig::default()).await;
         assert!(result.is_ok());
 
         let cmd = result.unwrap();
@@ -833,7 +835,7 @@ mod tests {
             messages: vec![Message::ai("No tools here")],
         };
 
-        let result = adapter.call(state, &RunnableConfig::default()).await;
+        let result = adapter.call(&state, &RunnableConfig::default()).await;
         result.unwrap_err();
     }
 
@@ -947,7 +949,7 @@ mod tests {
             messages: vec![Message::human("Hello")],
         };
 
-        let result = node.call(state, &RunnableConfig::default()).await;
+        let result = node.call(&state, &RunnableConfig::default()).await;
         result.unwrap();
     }
 
@@ -967,7 +969,7 @@ mod tests {
             messages: vec![Message::human("Hello")],
         };
 
-        let result = node.call(state, &RunnableConfig::default()).await;
+        let result = node.call(&state, &RunnableConfig::default()).await;
         result.unwrap();
     }
 
@@ -989,7 +991,7 @@ mod tests {
             messages: vec![Message::human("Hello")],
         };
 
-        let result = node.call(state, &RunnableConfig::default()).await;
+        let result = node.call(&state, &RunnableConfig::default()).await;
         result.unwrap();
     }
 

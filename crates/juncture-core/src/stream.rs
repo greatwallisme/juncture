@@ -1103,7 +1103,7 @@ mod tests {
     use crate::state::{FieldVersions, FieldsChanged, State};
 
     /// Minimal state implementation for `EventEmitter` tests.
-    #[derive(Clone, Debug)]
+    #[derive(Clone, Debug, Default)]
     struct TestState;
 
     impl State for TestState {

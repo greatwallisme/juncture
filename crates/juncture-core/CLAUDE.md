@@ -6,7 +6,7 @@ Core types and engine for Juncture. This is the largest crate; all other crates 
 
 | Module | Responsibility |
 |--------|---------------|
-| `state/` | `State` trait, `CowState<S>` (Arc copy-on-write), `FieldsChanged` (u64 bitmask), `Reducer<T>` trait, channel types (`UntrackedChannel`, `EphemeralChannel`, `DeltaChannel`, `LastValueAfterFinishChannel`, `NamedBarrierChannel`, `TopicChannel`), `Overwrite<T>` serde wrapper |
+| `state/` | `State` trait, `CowState<S>` (Arc copy-on-write), `FieldsChanged` (u64 bitmask), `Reducer<T>` trait, channel types (`UntrackedChannel`, `EphemeralChannel`, `DeltaChannel`, `LastValueAfterFinishChannel`, `NamedBarrierChannel`, `TopicChannel`), `Overwrite<T>` serde wrapper, `MessagesState` (pre-built chat state with append reducer) |
 | `graph/` | `StateGraph<S,I,O>` builder (3 type params), `CompiledGraph<S,I,O>`, topology validation, `RemoteGraph`, `RetryPolicy`, `TimeoutPolicy`, `CompileConfig` |
 | `pregel/` | Pregel execution engine: `PregelLoop<S>`, `execute_superstep()`, task scheduling (`compute_next_tasks`, `apply_writes`), `BudgetConfig`, `BudgetTracker`, `Durability` modes, streaming |
 | `node/` | `Node<S>` trait, `IntoNode` conversions via wrapper types (`NodeFnUpdate`, `NodeFnCommand`, `NodeFnUpdateWithRuntime`, etc.) |

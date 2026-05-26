@@ -202,6 +202,13 @@ pub struct PregelLoop<S: State> {
     /// a recovery task targeting the handler instead of canceling all tasks.
     error_handler_map: HashMap<String, String>,
 
+    /// Cached reverse mapping from trigger source to target nodes.
+    ///
+    /// Built once at construction time since the graph topology never changes
+    /// during execution. Previously rebuilt every superstep causing O(N^2) total
+    /// work for N-node sequential chains.
+    trigger_to_nodes: crate::pregel::scheduler::TriggerToNodes,
+
     /// Per-node retry policies extracted from builder metadata.
     ///
     /// When a node has an entry here, its execution in `execute_superstep` is
@@ -264,6 +271,7 @@ impl<S: State> std::fmt::Debug for PregelLoop<S> {
             .field("interrupt_versions_seen", &self.interrupt_versions_seen)
             .field("superstep_start", &self.superstep_start.is_some())
             .field("error_handler_map", &self.error_handler_map.len())
+            .field("trigger_to_nodes", &"<cached>")
             .field(
                 "retry_policies",
                 &self.retry_policies.keys().collect::<Vec<_>>(),
@@ -359,6 +367,10 @@ impl<S: State> PregelLoop<S> {
         // Initialize pending tasks from entry point
         let pending_tasks = Self::compute_initial_tasks(&trigger_table);
 
+        // Build reverse trigger mapping once; topology never changes during execution
+        let trigger_to_nodes =
+            crate::pregel::scheduler::TriggerToNodes::from_trigger_table(&trigger_table);
+
         // Generate unique run ID for this execution
         let run_id = uuid::Uuid::new_v4().to_string();
 
@@ -385,6 +397,7 @@ impl<S: State> PregelLoop<S> {
             interrupt_versions_seen: HashMap::new(),
             superstep_start: None,
             error_handler_map,
+            trigger_to_nodes,
             retry_policies: HashMap::new(),
             timeout_policies: HashMap::new(),
             delta_counters: HashMap::new(),
@@ -636,6 +649,30 @@ impl<S: State> PregelLoop<S> {
         Ok(true)
     }
 
+    /// Deserialize `state_json` → `state_override` for Send targets.
+    ///
+    /// Send targets carry per-target state as JSON; this converts it to a typed
+    /// override before passing to the runner so each task gets its own state instance.
+    fn resolve_state_json(tasks: &mut [PendingTask<S>]) -> Result<(), JunctureError>
+    where
+        S: serde::de::DeserializeOwned,
+    {
+        for task in tasks {
+            if task.state_override.is_none()
+                && let Some(ref json) = task.state_json
+            {
+                let deserialized = serde_json::from_value::<S>(json.clone()).map_err(|e| {
+                    JunctureError::execution(format!(
+                        "failed to deserialize state_json for task '{}': {e}",
+                        task.node_name
+                    ))
+                })?;
+                task.state_override = Some(deserialized);
+            }
+        }
+        Ok(())
+    }
+
     /// Execute one superstep
     ///
     /// Delegates to [`runner::execute_superstep`] with the current [`step`](Self::step)
@@ -654,8 +691,20 @@ impl<S: State> PregelLoop<S> {
     /// ```
     pub async fn execute_superstep(&mut self) -> Result<SuperstepResult<S>, JunctureError>
     where
+        S: serde::de::DeserializeOwned,
         S::Update: serde::Serialize,
     {
+        // Resolve state_json → state_override for Send targets.
+        // Send targets carry per-target state as JSON; deserialize it before
+        // passing to the runner so each task gets its own state instance.
+        Self::resolve_state_json(&mut self.pending_tasks)?;
+
+        // Move state into Arc for zero-copy sharing with spawned tasks.
+        // std::mem::take replaces self.state with Default::default() (free),
+        // avoiding the O(state_size) clone that caused O(N^2) total cost
+        // in scenarios with growing state (e.g., wide_state with append reducer).
+        // After all tasks complete, we recover the state via Arc::try_unwrap.
+        let arc_state: Arc<S> = Arc::new(std::mem::take(&mut self.state));
         let node_names: Vec<_> = self
             .pending_tasks
             .iter()
@@ -692,7 +741,7 @@ impl<S: State> PregelLoop<S> {
 
         let (result, interrupt_rx) = execute_superstep(
             &self.pending_tasks,
-            &self.state,
+            &arc_state,
             &self.nodes,
             &self.runnable_config,
             &self.cancellation_token,
@@ -705,6 +754,20 @@ impl<S: State> PregelLoop<S> {
             self.step,
         )
         .await?;
+
+        // Recover state from Arc. All spawned tasks completed and dropped their
+        // Arc clones, so refcount is 1 and Arc::try_unwrap succeeds without cloning.
+        self.state = match Arc::try_unwrap(arc_state) {
+            Ok(state) => state,
+            Err(arc) => {
+                tracing::warn!(
+                    name: "juncture.state.arc_leak",
+                    step = self.step,
+                    "Arc refcount > 1 after superstep, falling back to clone"
+                );
+                S::clone(&*arc)
+            }
+        };
 
         // Mark previously pending interrupts as processed in the scratchpad.
         // This is critical for multi-interrupt scenarios where a node has several
@@ -885,9 +948,14 @@ impl<S: State> PregelLoop<S> {
             }
         }
 
-        // Compute next pending tasks
-        self.pending_tasks =
-            compute_next_tasks(&result.task_outputs, &self.trigger_table, &self.state).await?;
+        // Compute next pending tasks (uses cached trigger_to_nodes)
+        self.pending_tasks = compute_next_tasks(
+            &result.task_outputs,
+            &self.trigger_table,
+            &self.trigger_to_nodes,
+            &self.state,
+        )
+        .await?;
 
         // Schedule error handler recovery tasks for any failed nodes that have
         // a registered error handler. These tasks run the handler node which
@@ -2159,7 +2227,16 @@ mod tests {
         let mut nodes = IndexMap::new();
         nodes.insert(
             "test_node".to_string(),
-            NodeFnCommand(|_s| async move { Ok(Command::end()) }).into_node("test_node"),
+            NodeFnCommand(
+                |_s: &TestState| -> std::pin::Pin<
+                    Box<
+                        dyn std::future::Future<
+                                Output = Result<crate::Command<TestState>, crate::JunctureError>,
+                            > + Send,
+                    >,
+                > { Box::pin(async move { Ok(crate::Command::end()) }) },
+            )
+            .into_node("test_node"),
         );
 
         let trigger_table = TriggerTable::new();
@@ -2220,7 +2297,16 @@ mod tests {
         let mut nodes = IndexMap::new();
         nodes.insert(
             "test_node".to_string(),
-            NodeFnCommand(|_s| async move { Ok(Command::end()) }).into_node("test_node"),
+            NodeFnCommand(
+                |_s: &TestState| -> std::pin::Pin<
+                    Box<
+                        dyn std::future::Future<
+                                Output = Result<crate::Command<TestState>, crate::JunctureError>,
+                            > + Send,
+                    >,
+                > { Box::pin(async move { Ok(crate::Command::end()) }) },
+            )
+            .into_node("test_node"),
         );
 
         let trigger_table = TriggerTable::new();
@@ -2254,7 +2340,16 @@ mod tests {
         let mut nodes = IndexMap::new();
         nodes.insert(
             "test_node".to_string(),
-            NodeFnCommand(|_s| async move { Ok(Command::end()) }).into_node("test_node"),
+            NodeFnCommand(
+                |_s: &TestState| -> std::pin::Pin<
+                    Box<
+                        dyn std::future::Future<
+                                Output = Result<crate::Command<TestState>, crate::JunctureError>,
+                            > + Send,
+                    >,
+                > { Box::pin(async move { Ok(crate::Command::end()) }) },
+            )
+            .into_node("test_node"),
         );
 
         let trigger_table = TriggerTable::new();
@@ -2279,7 +2374,16 @@ mod tests {
         let mut nodes = IndexMap::new();
         nodes.insert(
             "test_node".to_string(),
-            NodeFnCommand(|_s| async move { Ok(Command::end()) }).into_node("test_node"),
+            NodeFnCommand(
+                |_s: &TestState| -> std::pin::Pin<
+                    Box<
+                        dyn std::future::Future<
+                                Output = Result<crate::Command<TestState>, crate::JunctureError>,
+                            > + Send,
+                    >,
+                > { Box::pin(async move { Ok(crate::Command::end()) }) },
+            )
+            .into_node("test_node"),
         );
 
         let trigger_table = TriggerTable::new();
@@ -2306,7 +2410,16 @@ mod tests {
         let mut nodes = IndexMap::new();
         nodes.insert(
             "test_node".to_string(),
-            NodeFnCommand(|_s| async move { Ok(Command::end()) }).into_node("test_node"),
+            NodeFnCommand(
+                |_s: &TestState| -> std::pin::Pin<
+                    Box<
+                        dyn std::future::Future<
+                                Output = Result<crate::Command<TestState>, crate::JunctureError>,
+                            > + Send,
+                    >,
+                > { Box::pin(async move { Ok(crate::Command::end()) }) },
+            )
+            .into_node("test_node"),
         );
 
         let trigger_table = TriggerTable::new();
@@ -2326,7 +2439,16 @@ mod tests {
         let mut nodes = IndexMap::new();
         nodes.insert(
             "test_node".to_string(),
-            NodeFnCommand(|_s| async move { Ok(Command::end()) }).into_node("test_node"),
+            NodeFnCommand(
+                |_s: &TestState| -> std::pin::Pin<
+                    Box<
+                        dyn std::future::Future<
+                                Output = Result<crate::Command<TestState>, crate::JunctureError>,
+                            > + Send,
+                    >,
+                > { Box::pin(async move { Ok(crate::Command::end()) }) },
+            )
+            .into_node("test_node"),
         );
 
         let trigger_table = TriggerTable::new();
@@ -2357,7 +2479,7 @@ mod tests {
         assert!(loop_.status.is_interrupted());
     }
 
-    #[derive(Clone, Debug, serde::Serialize)]
+    #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
     struct TestState;
 
     impl State for TestState {
@@ -2377,7 +2499,7 @@ mod tests {
     // --- B-04-001: delta counter tests ---
 
     /// Test state with two fields to exercise delta counter tracking.
-    #[derive(Clone, Debug, serde::Serialize)]
+    #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
     struct DeltaTestState {
         value: i32,
         messages: Vec<String>,
@@ -2481,7 +2603,19 @@ mod tests {
         let mut nodes = IndexMap::new();
         nodes.insert(
             "test_node".to_string(),
-            NodeFnCommand(|_s| async move { Ok(Command::end()) }).into_node("test_node"),
+            NodeFnCommand(
+                |_s: &DeltaTestState| -> std::pin::Pin<
+                    Box<
+                        dyn std::future::Future<
+                                Output = Result<
+                                    crate::Command<DeltaTestState>,
+                                    crate::JunctureError,
+                                >,
+                            > + Send,
+                    >,
+                > { Box::pin(async move { Ok(crate::Command::end()) }) },
+            )
+            .into_node("test_node"),
         );
         let trigger_table = TriggerTable::new();
         let config = crate::config::RunnableConfig::new();
@@ -2519,7 +2653,19 @@ mod tests {
         let mut nodes = IndexMap::new();
         nodes.insert(
             "test_node".to_string(),
-            NodeFnCommand(|_s| async move { Ok(Command::end()) }).into_node("test_node"),
+            NodeFnCommand(
+                |_s: &DeltaTestState| -> std::pin::Pin<
+                    Box<
+                        dyn std::future::Future<
+                                Output = Result<
+                                    crate::Command<DeltaTestState>,
+                                    crate::JunctureError,
+                                >,
+                            > + Send,
+                    >,
+                > { Box::pin(async move { Ok(crate::Command::end()) }) },
+            )
+            .into_node("test_node"),
         );
         let trigger_table = TriggerTable::new();
         let config = crate::config::RunnableConfig::new();
@@ -2560,7 +2706,19 @@ mod tests {
         let mut nodes = IndexMap::new();
         nodes.insert(
             "test_node".to_string(),
-            NodeFnCommand(|_s| async move { Ok(Command::end()) }).into_node("test_node"),
+            NodeFnCommand(
+                |_s: &DeltaTestState| -> std::pin::Pin<
+                    Box<
+                        dyn std::future::Future<
+                                Output = Result<
+                                    crate::Command<DeltaTestState>,
+                                    crate::JunctureError,
+                                >,
+                            > + Send,
+                    >,
+                > { Box::pin(async move { Ok(crate::Command::end()) }) },
+            )
+            .into_node("test_node"),
         );
         let trigger_table = TriggerTable::new();
         let config = crate::config::RunnableConfig::new();
@@ -2600,7 +2758,19 @@ mod tests {
         let mut nodes = IndexMap::new();
         nodes.insert(
             "test_node".to_string(),
-            NodeFnCommand(|_s| async move { Ok(Command::end()) }).into_node("test_node"),
+            NodeFnCommand(
+                |_s: &DeltaTestState| -> std::pin::Pin<
+                    Box<
+                        dyn std::future::Future<
+                                Output = Result<
+                                    crate::Command<DeltaTestState>,
+                                    crate::JunctureError,
+                                >,
+                            > + Send,
+                    >,
+                > { Box::pin(async move { Ok(crate::Command::end()) }) },
+            )
+            .into_node("test_node"),
         );
         let trigger_table = TriggerTable::new();
         let mut config = crate::config::RunnableConfig::new();
@@ -2694,7 +2864,16 @@ mod tests {
         let mut nodes = IndexMap::new();
         nodes.insert(
             "test_node".to_string(),
-            NodeFnCommand(|_s| async move { Ok(Command::end()) }).into_node("test_node"),
+            NodeFnCommand(
+                |_s: &TestState| -> std::pin::Pin<
+                    Box<
+                        dyn std::future::Future<
+                                Output = Result<crate::Command<TestState>, crate::JunctureError>,
+                            > + Send,
+                    >,
+                > { Box::pin(async move { Ok(crate::Command::end()) }) },
+            )
+            .into_node("test_node"),
         );
         let trigger_table = TriggerTable::new();
         let config = crate::config::RunnableConfig::new();
@@ -2731,7 +2910,19 @@ mod tests {
         let mut nodes = IndexMap::new();
         nodes.insert(
             "test_node".to_string(),
-            NodeFnCommand(|_s| async move { Ok(Command::end()) }).into_node("test_node"),
+            NodeFnCommand(
+                |_s: &DeltaTestState| -> std::pin::Pin<
+                    Box<
+                        dyn std::future::Future<
+                                Output = Result<
+                                    crate::Command<DeltaTestState>,
+                                    crate::JunctureError,
+                                >,
+                            > + Send,
+                    >,
+                > { Box::pin(async move { Ok(crate::Command::end()) }) },
+            )
+            .into_node("test_node"),
         );
         let trigger_table = TriggerTable::new();
         let config = crate::config::RunnableConfig::new();
@@ -2826,7 +3017,16 @@ mod tests {
         let mut nodes = IndexMap::new();
         nodes.insert(
             "test_node".to_string(),
-            NodeFnCommand(|_s| async move { Ok(Command::end()) }).into_node("test_node"),
+            NodeFnCommand(
+                |_s: &TestState| -> std::pin::Pin<
+                    Box<
+                        dyn std::future::Future<
+                                Output = Result<crate::Command<TestState>, crate::JunctureError>,
+                            > + Send,
+                    >,
+                > { Box::pin(async move { Ok(crate::Command::end()) }) },
+            )
+            .into_node("test_node"),
         );
 
         let trigger_table = TriggerTable::new();
@@ -2891,7 +3091,16 @@ mod tests {
         let mut nodes = IndexMap::new();
         nodes.insert(
             "test_node".to_string(),
-            NodeFnCommand(|_s| async move { Ok(Command::end()) }).into_node("test_node"),
+            NodeFnCommand(
+                |_s: &TestState| -> std::pin::Pin<
+                    Box<
+                        dyn std::future::Future<
+                                Output = Result<crate::Command<TestState>, crate::JunctureError>,
+                            > + Send,
+                    >,
+                > { Box::pin(async move { Ok(crate::Command::end()) }) },
+            )
+            .into_node("test_node"),
         );
 
         let trigger_table = TriggerTable::new();
@@ -3011,7 +3220,16 @@ mod tests {
         let mut nodes = IndexMap::new();
         nodes.insert(
             "test_node".to_string(),
-            NodeFnCommand(|_s| async move { Ok(Command::end()) }).into_node("test_node"),
+            NodeFnCommand(
+                |_s: &TestState| -> std::pin::Pin<
+                    Box<
+                        dyn std::future::Future<
+                                Output = Result<crate::Command<TestState>, crate::JunctureError>,
+                            > + Send,
+                    >,
+                > { Box::pin(async move { Ok(crate::Command::end()) }) },
+            )
+            .into_node("test_node"),
         );
 
         let trigger_table = TriggerTable::new();
@@ -3062,7 +3280,16 @@ mod tests {
         let mut nodes = IndexMap::new();
         nodes.insert(
             "test_node".to_string(),
-            NodeFnCommand(|_s| async move { Ok(Command::end()) }).into_node("test_node"),
+            NodeFnCommand(
+                |_s: &TestState| -> std::pin::Pin<
+                    Box<
+                        dyn std::future::Future<
+                                Output = Result<crate::Command<TestState>, crate::JunctureError>,
+                            > + Send,
+                    >,
+                > { Box::pin(async move { Ok(crate::Command::end()) }) },
+            )
+            .into_node("test_node"),
         );
 
         let trigger_table = TriggerTable::new();
@@ -3125,7 +3352,16 @@ mod tests {
         let mut nodes = IndexMap::new();
         nodes.insert(
             "test_node".to_string(),
-            NodeFnCommand(|_s| async move { Ok(Command::end()) }).into_node("test_node"),
+            NodeFnCommand(
+                |_s: &TestState| -> std::pin::Pin<
+                    Box<
+                        dyn std::future::Future<
+                                Output = Result<crate::Command<TestState>, crate::JunctureError>,
+                            > + Send,
+                    >,
+                > { Box::pin(async move { Ok(crate::Command::end()) }) },
+            )
+            .into_node("test_node"),
         );
 
         let trigger_table = TriggerTable::new();
@@ -3161,7 +3397,16 @@ mod tests {
         let mut nodes = IndexMap::new();
         nodes.insert(
             "test_node".to_string(),
-            NodeFnCommand(|_s| async move { Ok(Command::end()) }).into_node("test_node"),
+            NodeFnCommand(
+                |_s: &TestState| -> std::pin::Pin<
+                    Box<
+                        dyn std::future::Future<
+                                Output = Result<crate::Command<TestState>, crate::JunctureError>,
+                            > + Send,
+                    >,
+                > { Box::pin(async move { Ok(crate::Command::end()) }) },
+            )
+            .into_node("test_node"),
         );
         let trigger_table = TriggerTable::new();
         let config = crate::config::RunnableConfig::new();
@@ -3179,7 +3424,16 @@ mod tests {
         let mut nodes = IndexMap::new();
         nodes.insert(
             "test_node".to_string(),
-            NodeFnCommand(|_s| async move { Ok(Command::end()) }).into_node("test_node"),
+            NodeFnCommand(
+                |_s: &TestState| -> std::pin::Pin<
+                    Box<
+                        dyn std::future::Future<
+                                Output = Result<crate::Command<TestState>, crate::JunctureError>,
+                            > + Send,
+                    >,
+                > { Box::pin(async move { Ok(crate::Command::end()) }) },
+            )
+            .into_node("test_node"),
         );
         let trigger_table = TriggerTable::new();
         let config = crate::config::RunnableConfig::new().with_checkpoint_ns(
@@ -3206,7 +3460,16 @@ mod tests {
         let mut nodes = IndexMap::new();
         nodes.insert(
             "test_node".to_string(),
-            NodeFnCommand(|_s| async move { Ok(Command::end()) }).into_node("test_node"),
+            NodeFnCommand(
+                |_s: &TestState| -> std::pin::Pin<
+                    Box<
+                        dyn std::future::Future<
+                                Output = Result<crate::Command<TestState>, crate::JunctureError>,
+                            > + Send,
+                    >,
+                > { Box::pin(async move { Ok(crate::Command::end()) }) },
+            )
+            .into_node("test_node"),
         );
         let trigger_table = TriggerTable::new();
         let config = crate::config::RunnableConfig::new().with_checkpoint_ns(
@@ -3231,7 +3494,16 @@ mod tests {
         let mut nodes = IndexMap::new();
         nodes.insert(
             "test_node".to_string(),
-            NodeFnCommand(|_s| async move { Ok(Command::end()) }).into_node("test_node"),
+            NodeFnCommand(
+                |_s: &TestState| -> std::pin::Pin<
+                    Box<
+                        dyn std::future::Future<
+                                Output = Result<crate::Command<TestState>, crate::JunctureError>,
+                            > + Send,
+                    >,
+                > { Box::pin(async move { Ok(crate::Command::end()) }) },
+            )
+            .into_node("test_node"),
         );
 
         let trigger_table = TriggerTable::new();
@@ -3285,7 +3557,16 @@ mod tests {
         let mut nodes = IndexMap::new();
         nodes.insert(
             "test_node".to_string(),
-            NodeFnCommand(|_s| async move { Ok(Command::end()) }).into_node("test_node"),
+            NodeFnCommand(
+                |_s: &TestState| -> std::pin::Pin<
+                    Box<
+                        dyn std::future::Future<
+                                Output = Result<crate::Command<TestState>, crate::JunctureError>,
+                            > + Send,
+                    >,
+                > { Box::pin(async move { Ok(crate::Command::end()) }) },
+            )
+            .into_node("test_node"),
         );
 
         let trigger_table = TriggerTable::new();
@@ -3347,7 +3628,16 @@ mod tests {
         let mut nodes = IndexMap::new();
         nodes.insert(
             "test_node".to_string(),
-            NodeFnCommand(|_s| async move { Ok(Command::end()) }).into_node("test_node"),
+            NodeFnCommand(
+                |_s: &TestState| -> std::pin::Pin<
+                    Box<
+                        dyn std::future::Future<
+                                Output = Result<crate::Command<TestState>, crate::JunctureError>,
+                            > + Send,
+                    >,
+                > { Box::pin(async move { Ok(crate::Command::end()) }) },
+            )
+            .into_node("test_node"),
         );
 
         let trigger_table = TriggerTable::new();
@@ -3399,7 +3689,16 @@ mod tests {
         let mut nodes = IndexMap::new();
         nodes.insert(
             "test_node".to_string(),
-            NodeFnCommand(|_s| async move { Ok(Command::end()) }).into_node("test_node"),
+            NodeFnCommand(
+                |_s: &TestState| -> std::pin::Pin<
+                    Box<
+                        dyn std::future::Future<
+                                Output = Result<crate::Command<TestState>, crate::JunctureError>,
+                            > + Send,
+                    >,
+                > { Box::pin(async move { Ok(crate::Command::end()) }) },
+            )
+            .into_node("test_node"),
         );
         let trigger_table = TriggerTable::new();
         let config = crate::config::RunnableConfig::new();
@@ -3421,7 +3720,16 @@ mod tests {
         let mut nodes = IndexMap::new();
         nodes.insert(
             "test_node".to_string(),
-            NodeFnCommand(|_s| async move { Ok(Command::end()) }).into_node("test_node"),
+            NodeFnCommand(
+                |_s: &TestState| -> std::pin::Pin<
+                    Box<
+                        dyn std::future::Future<
+                                Output = Result<crate::Command<TestState>, crate::JunctureError>,
+                            > + Send,
+                    >,
+                > { Box::pin(async move { Ok(crate::Command::end()) }) },
+            )
+            .into_node("test_node"),
         );
 
         let trigger_table = TriggerTable::new();
@@ -3478,7 +3786,16 @@ mod tests {
         let mut nodes = IndexMap::new();
         nodes.insert(
             "test_node".to_string(),
-            NodeFnCommand(|_s| async move { Ok(Command::end()) }).into_node("test_node"),
+            NodeFnCommand(
+                |_s: &TestState| -> std::pin::Pin<
+                    Box<
+                        dyn std::future::Future<
+                                Output = Result<crate::Command<TestState>, crate::JunctureError>,
+                            > + Send,
+                    >,
+                > { Box::pin(async move { Ok(crate::Command::end()) }) },
+            )
+            .into_node("test_node"),
         );
 
         let trigger_table = TriggerTable::new();
@@ -3530,7 +3847,16 @@ mod tests {
         let mut nodes = IndexMap::new();
         nodes.insert(
             "test_node".to_string(),
-            NodeFnCommand(|_s| async move { Ok(Command::end()) }).into_node("test_node"),
+            NodeFnCommand(
+                |_s: &TestState| -> std::pin::Pin<
+                    Box<
+                        dyn std::future::Future<
+                                Output = Result<crate::Command<TestState>, crate::JunctureError>,
+                            > + Send,
+                    >,
+                > { Box::pin(async move { Ok(crate::Command::end()) }) },
+            )
+            .into_node("test_node"),
         );
 
         let trigger_table = TriggerTable::new();
@@ -3586,7 +3912,16 @@ mod tests {
         let mut nodes = IndexMap::new();
         nodes.insert(
             "test_node".to_string(),
-            NodeFnCommand(|_s| async move { Ok(Command::end()) }).into_node("test_node"),
+            NodeFnCommand(
+                |_s: &TestState| -> std::pin::Pin<
+                    Box<
+                        dyn std::future::Future<
+                                Output = Result<crate::Command<TestState>, crate::JunctureError>,
+                            > + Send,
+                    >,
+                > { Box::pin(async move { Ok(crate::Command::end()) }) },
+            )
+            .into_node("test_node"),
         );
 
         let trigger_table = TriggerTable::new();
@@ -3645,7 +3980,16 @@ mod tests {
         let mut nodes = IndexMap::new();
         nodes.insert(
             "test_node".to_string(),
-            NodeFnCommand(|_s| async move { Ok(Command::end()) }).into_node("test_node"),
+            NodeFnCommand(
+                |_s: &TestState| -> std::pin::Pin<
+                    Box<
+                        dyn std::future::Future<
+                                Output = Result<crate::Command<TestState>, crate::JunctureError>,
+                            > + Send,
+                    >,
+                > { Box::pin(async move { Ok(crate::Command::end()) }) },
+            )
+            .into_node("test_node"),
         );
 
         let trigger_table = TriggerTable::new();
@@ -3688,7 +4032,16 @@ mod tests {
         let mut nodes = IndexMap::new();
         nodes.insert(
             "test_node".to_string(),
-            NodeFnCommand(|_s| async move { Ok(Command::end()) }).into_node("test_node"),
+            NodeFnCommand(
+                |_s: &TestState| -> std::pin::Pin<
+                    Box<
+                        dyn std::future::Future<
+                                Output = Result<crate::Command<TestState>, crate::JunctureError>,
+                            > + Send,
+                    >,
+                > { Box::pin(async move { Ok(crate::Command::end()) }) },
+            )
+            .into_node("test_node"),
         );
 
         let trigger_table = TriggerTable::new();

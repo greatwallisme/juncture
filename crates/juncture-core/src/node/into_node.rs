@@ -338,7 +338,7 @@ where
 impl<S, F, Fut> IntoNode<S> for NodeFnUpdate<F>
 where
     S: State,
-    F: Fn(S) -> Fut + Send + Sync + 'static,
+    F: Fn(&S) -> Fut + Send + Sync + 'static,
     Fut: std::future::Future<Output = Result<S::Update, JunctureError>> + Send + 'static,
 {
     fn into_node(self, name: &str) -> Arc<dyn Node<S>> {
@@ -353,7 +353,7 @@ where
 impl<S, F, Fut> IntoNode<S> for NodeFnUpdateWithConfig<F>
 where
     S: State,
-    F: Fn(S, RunnableConfig) -> Fut + Send + Sync + 'static,
+    F: Fn(&S, RunnableConfig) -> Fut + Send + Sync + 'static,
     Fut: std::future::Future<Output = Result<S::Update, JunctureError>> + Send + 'static,
 {
     fn into_node(self, name: &str) -> Arc<dyn Node<S>> {
@@ -368,7 +368,7 @@ where
 impl<S, F, Fut> IntoNode<S> for NodeFnCommand<F>
 where
     S: State,
-    F: Fn(S) -> Fut + Send + Sync + 'static,
+    F: Fn(&S) -> Fut + Send + Sync + 'static,
     Fut: std::future::Future<Output = Result<Command<S>, JunctureError>> + Send + 'static,
 {
     fn into_node(self, name: &str) -> Arc<dyn Node<S>> {
@@ -383,7 +383,7 @@ where
 impl<S, F, Fut> IntoNode<S> for NodeFnCommandWithConfig<F>
 where
     S: State,
-    F: Fn(S, RunnableConfig) -> Fut + Send + Sync + 'static,
+    F: Fn(&S, RunnableConfig) -> Fut + Send + Sync + 'static,
     Fut: std::future::Future<Output = Result<Command<S>, JunctureError>> + Send + 'static,
 {
     fn into_node(self, name: &str) -> Arc<dyn Node<S>> {
@@ -400,7 +400,7 @@ impl<S, F, Fut, C> IntoNode<S> for NodeFnUpdateWithRuntime<F, C>
 where
     S: State,
     C: Clone + Send + Sync + 'static,
-    F: Fn(S, Runtime<C>) -> Fut + Send + Sync + 'static,
+    F: Fn(&S, Runtime<C>) -> Fut + Send + Sync + 'static,
     Fut: std::future::Future<Output = Result<S::Update, JunctureError>> + Send + 'static,
 {
     fn into_node(self, name: &str) -> Arc<dyn Node<S>> {
@@ -418,7 +418,7 @@ impl<S, F, Fut, C> IntoNode<S> for NodeFnUpdateWithConfigAndRuntime<F, C>
 where
     S: State,
     C: Clone + Send + Sync + 'static,
-    F: Fn(S, RunnableConfig, Runtime<C>) -> Fut + Send + Sync + 'static,
+    F: Fn(&S, RunnableConfig, Runtime<C>) -> Fut + Send + Sync + 'static,
     Fut: std::future::Future<Output = Result<S::Update, JunctureError>> + Send + 'static,
 {
     fn into_node(self, name: &str) -> Arc<dyn Node<S>> {
@@ -436,7 +436,7 @@ impl<S, F, Fut, C> IntoNode<S> for NodeFnCommandWithRuntime<F, C>
 where
     S: State,
     C: Clone + Send + Sync + 'static,
-    F: Fn(S, Runtime<C>) -> Fut + Send + Sync + 'static,
+    F: Fn(&S, Runtime<C>) -> Fut + Send + Sync + 'static,
     Fut: std::future::Future<Output = Result<Command<S>, JunctureError>> + Send + 'static,
 {
     fn into_node(self, name: &str) -> Arc<dyn Node<S>> {
@@ -454,7 +454,7 @@ impl<S, F, Fut, C> IntoNode<S> for NodeFnCommandWithConfigAndRuntime<F, C>
 where
     S: State,
     C: Clone + Send + Sync + 'static,
-    F: Fn(S, RunnableConfig, Runtime<C>) -> Fut + Send + Sync + 'static,
+    F: Fn(&S, RunnableConfig, Runtime<C>) -> Fut + Send + Sync + 'static,
     Fut: std::future::Future<Output = Result<Command<S>, JunctureError>> + Send + 'static,
 {
     fn into_node(self, name: &str) -> Arc<dyn Node<S>> {
@@ -474,29 +474,46 @@ where
 struct FnNodeUpdateOnly<S, F, Fut>
 where
     S: State,
-    F: Fn(S) -> Fut + Send + Sync + 'static,
+    F: Fn(&S) -> Fut + Send + Sync + 'static,
     Fut: std::future::Future<Output = Result<S::Update, JunctureError>> + Send + 'static,
 {
     name: String,
     func: F,
-    _phantom: PhantomData<fn(S) -> Fut>,
+    _phantom: PhantomData<fn(&S) -> Fut>,
 }
 
 impl<S, F, Fut> Node<S> for FnNodeUpdateOnly<S, F, Fut>
 where
     S: State,
-    F: Fn(S) -> Fut + Send + Sync + 'static,
+    F: Fn(&S) -> Fut + Send + Sync + 'static,
     Fut: std::future::Future<Output = Result<S::Update, JunctureError>> + Send + 'static,
 {
     fn call(
         &self,
-        state: S,
+        state: &S,
         _config: &RunnableConfig,
     ) -> std::pin::Pin<
         Box<dyn std::future::Future<Output = Result<Command<S>, JunctureError>> + Send + '_>,
     > {
+        let state_clone = state.clone();
+        let func = &self.func;
         Box::pin(async move {
-            let update = (self.func)(state).await?;
+            let update = func(&state_clone).await?;
+            Ok(Command::update(update))
+        })
+    }
+
+    fn call_arc(
+        &self,
+        state: std::sync::Arc<S>,
+        _config: &RunnableConfig,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<Command<S>, JunctureError>> + Send + '_>,
+    > {
+        let state_arc = std::sync::Arc::clone(&state);
+        let func = &self.func;
+        Box::pin(async move {
+            let update = func(&state_arc).await?;
             Ok(Command::update(update))
         })
     }
@@ -513,30 +530,48 @@ where
 struct FnNodeUpdateWithConfig<S, F, Fut>
 where
     S: State,
-    F: Fn(S, RunnableConfig) -> Fut + Send + Sync + 'static,
+    F: Fn(&S, RunnableConfig) -> Fut + Send + Sync + 'static,
     Fut: std::future::Future<Output = Result<S::Update, JunctureError>> + Send + 'static,
 {
     name: String,
     func: F,
-    _phantom: PhantomData<fn(S, RunnableConfig) -> Fut>,
+    _phantom: PhantomData<fn(&S, RunnableConfig) -> Fut>,
 }
 
 impl<S, F, Fut> Node<S> for FnNodeUpdateWithConfig<S, F, Fut>
 where
     S: State,
-    F: Fn(S, RunnableConfig) -> Fut + Send + Sync + 'static,
+    F: Fn(&S, RunnableConfig) -> Fut + Send + Sync + 'static,
     Fut: std::future::Future<Output = Result<S::Update, JunctureError>> + Send + 'static,
 {
     fn call(
         &self,
-        state: S,
+        state: &S,
         config: &RunnableConfig,
     ) -> std::pin::Pin<
         Box<dyn std::future::Future<Output = Result<Command<S>, JunctureError>> + Send + '_>,
     > {
         let config = config.clone();
+        let state_clone = state.clone();
+        let func = &self.func;
         Box::pin(async move {
-            let update = (self.func)(state, config).await?;
+            let update = func(&state_clone, config).await?;
+            Ok(Command::update(update))
+        })
+    }
+
+    fn call_arc(
+        &self,
+        state: std::sync::Arc<S>,
+        config: &RunnableConfig,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<Command<S>, JunctureError>> + Send + '_>,
+    > {
+        let config = config.clone();
+        let state_arc = std::sync::Arc::clone(&state);
+        let func = &self.func;
+        Box::pin(async move {
+            let update = func(&state_arc, config).await?;
             Ok(Command::update(update))
         })
     }
@@ -553,28 +588,42 @@ where
 struct FnNodeCommandOnly<S, F, Fut>
 where
     S: State,
-    F: Fn(S) -> Fut + Send + Sync + 'static,
+    F: Fn(&S) -> Fut + Send + Sync + 'static,
     Fut: std::future::Future<Output = Result<Command<S>, JunctureError>> + Send + 'static,
 {
     name: String,
     func: F,
-    _phantom: PhantomData<fn(S) -> Fut>,
+    _phantom: PhantomData<fn(&S) -> Fut>,
 }
 
 impl<S, F, Fut> Node<S> for FnNodeCommandOnly<S, F, Fut>
 where
     S: State,
-    F: Fn(S) -> Fut + Send + Sync + 'static,
+    F: Fn(&S) -> Fut + Send + Sync + 'static,
     Fut: std::future::Future<Output = Result<Command<S>, JunctureError>> + Send + 'static,
 {
     fn call(
         &self,
-        state: S,
+        state: &S,
         _config: &RunnableConfig,
     ) -> std::pin::Pin<
         Box<dyn std::future::Future<Output = Result<Command<S>, JunctureError>> + Send + '_>,
     > {
-        Box::pin(async move { (self.func)(state).await })
+        let state_clone = state.clone();
+        let func = &self.func;
+        Box::pin(async move { func(&state_clone).await })
+    }
+
+    fn call_arc(
+        &self,
+        state: std::sync::Arc<S>,
+        _config: &RunnableConfig,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<Command<S>, JunctureError>> + Send + '_>,
+    > {
+        let state_arc = std::sync::Arc::clone(&state);
+        let func = &self.func;
+        Box::pin(async move { func(&state_arc).await })
     }
 
     fn name(&self) -> &str {
@@ -589,29 +638,44 @@ where
 struct FnNodeCommandWithConfig<S, F, Fut>
 where
     S: State,
-    F: Fn(S, RunnableConfig) -> Fut + Send + Sync + 'static,
+    F: Fn(&S, RunnableConfig) -> Fut + Send + Sync + 'static,
     Fut: std::future::Future<Output = Result<Command<S>, JunctureError>> + Send + 'static,
 {
     name: String,
     func: F,
-    _phantom: PhantomData<fn(S, RunnableConfig) -> Fut>,
+    _phantom: PhantomData<fn(&S, RunnableConfig) -> Fut>,
 }
 
 impl<S, F, Fut> Node<S> for FnNodeCommandWithConfig<S, F, Fut>
 where
     S: State,
-    F: Fn(S, RunnableConfig) -> Fut + Send + Sync + 'static,
+    F: Fn(&S, RunnableConfig) -> Fut + Send + Sync + 'static,
     Fut: std::future::Future<Output = Result<Command<S>, JunctureError>> + Send + 'static,
 {
     fn call(
         &self,
-        state: S,
+        state: &S,
         config: &RunnableConfig,
     ) -> std::pin::Pin<
         Box<dyn std::future::Future<Output = Result<Command<S>, JunctureError>> + Send + '_>,
     > {
         let config = config.clone();
-        Box::pin(async move { (self.func)(state, config).await })
+        let state_clone = state.clone();
+        let func = &self.func;
+        Box::pin(async move { func(&state_clone, config).await })
+    }
+
+    fn call_arc(
+        &self,
+        state: std::sync::Arc<S>,
+        config: &RunnableConfig,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<Command<S>, JunctureError>> + Send + '_>,
+    > {
+        let config = config.clone();
+        let state_arc = std::sync::Arc::clone(&state);
+        let func = &self.func;
+        Box::pin(async move { func(&state_arc, config).await })
     }
 
     fn name(&self) -> &str {
@@ -628,7 +692,7 @@ struct FnNodeUpdateWithRuntime<S, F, Fut, C>
 where
     S: State,
     C: Clone + Send + Sync + 'static,
-    F: Fn(S, Runtime<C>) -> Fut + Send + Sync + 'static,
+    F: Fn(&S, Runtime<C>) -> Fut + Send + Sync + 'static,
     Fut: std::future::Future<Output = Result<S::Update, JunctureError>> + Send + 'static,
 {
     name: String,
@@ -638,26 +702,44 @@ where
         clippy::type_complexity,
         reason = "PhantomData needs to capture all generic parameters including complex Future type"
     )]
-    _phantom: PhantomData<fn(S, Runtime<C>) -> Fut>,
+    _phantom: PhantomData<fn(&S, Runtime<C>) -> Fut>,
 }
 
 impl<S, F, Fut, C> Node<S> for FnNodeUpdateWithRuntime<S, F, Fut, C>
 where
     S: State,
     C: Clone + Send + Sync + 'static,
-    F: Fn(S, Runtime<C>) -> Fut + Send + Sync + 'static,
+    F: Fn(&S, Runtime<C>) -> Fut + Send + Sync + 'static,
     Fut: std::future::Future<Output = Result<S::Update, JunctureError>> + Send + 'static,
 {
     fn call(
         &self,
-        state: S,
+        state: &S,
         _config: &RunnableConfig,
     ) -> std::pin::Pin<
         Box<dyn std::future::Future<Output = Result<Command<S>, JunctureError>> + Send + '_>,
     > {
         let runtime = self.runtime.clone();
+        let state_clone = state.clone();
+        let func = &self.func;
         Box::pin(async move {
-            let update = (self.func)(state, runtime).await?;
+            let update = func(&state_clone, runtime).await?;
+            Ok(Command::update(update))
+        })
+    }
+
+    fn call_arc(
+        &self,
+        state: std::sync::Arc<S>,
+        _config: &RunnableConfig,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<Command<S>, JunctureError>> + Send + '_>,
+    > {
+        let runtime = self.runtime.clone();
+        let state_arc = std::sync::Arc::clone(&state);
+        let func = &self.func;
+        Box::pin(async move {
+            let update = func(&state_arc, runtime).await?;
             Ok(Command::update(update))
         })
     }
@@ -676,7 +758,7 @@ struct FnNodeUpdateWithConfigAndRuntime<S, F, Fut, C>
 where
     S: State,
     C: Clone + Send + Sync + 'static,
-    F: Fn(S, RunnableConfig, Runtime<C>) -> Fut + Send + Sync + 'static,
+    F: Fn(&S, RunnableConfig, Runtime<C>) -> Fut + Send + Sync + 'static,
     Fut: std::future::Future<Output = Result<S::Update, JunctureError>> + Send + 'static,
 {
     name: String,
@@ -686,27 +768,44 @@ where
         clippy::type_complexity,
         reason = "PhantomData needs to capture all generic parameters including complex Future type"
     )]
-    _phantom: PhantomData<fn(S, RunnableConfig, Runtime<C>) -> Fut>,
+    _phantom: PhantomData<fn(&S, RunnableConfig, Runtime<C>) -> Fut>,
 }
 
 impl<S, F, Fut, C> Node<S> for FnNodeUpdateWithConfigAndRuntime<S, F, Fut, C>
 where
     S: State,
     C: Clone + Send + Sync + 'static,
-    F: Fn(S, RunnableConfig, Runtime<C>) -> Fut + Send + Sync + 'static,
+    F: Fn(&S, RunnableConfig, Runtime<C>) -> Fut + Send + Sync + 'static,
     Fut: std::future::Future<Output = Result<S::Update, JunctureError>> + Send + 'static,
 {
     fn call(
         &self,
-        state: S,
+        state: &S,
         config: &RunnableConfig,
     ) -> std::pin::Pin<
         Box<dyn std::future::Future<Output = Result<Command<S>, JunctureError>> + Send + '_>,
     > {
         let config = config.clone();
         let runtime = self.runtime.clone();
+        let state = state.clone();
         Box::pin(async move {
-            let update = (self.func)(state, config, runtime).await?;
+            let update = (self.func)(&state, config, runtime).await?;
+            Ok(Command::update(update))
+        })
+    }
+
+    fn call_arc(
+        &self,
+        state: std::sync::Arc<S>,
+        config: &RunnableConfig,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<Command<S>, JunctureError>> + Send + '_>,
+    > {
+        let config = config.clone();
+        let runtime = self.runtime.clone();
+        let state_arc = std::sync::Arc::clone(&state);
+        Box::pin(async move {
+            let update = (self.func)(&state_arc, config, runtime).await?;
             Ok(Command::update(update))
         })
     }
@@ -725,7 +824,7 @@ struct FnNodeCommandWithRuntime<S, F, Fut, C>
 where
     S: State,
     C: Clone + Send + Sync + 'static,
-    F: Fn(S, Runtime<C>) -> Fut + Send + Sync + 'static,
+    F: Fn(&S, Runtime<C>) -> Fut + Send + Sync + 'static,
     Fut: std::future::Future<Output = Result<Command<S>, JunctureError>> + Send + 'static,
 {
     name: String,
@@ -735,25 +834,38 @@ where
         clippy::type_complexity,
         reason = "PhantomData needs to capture all generic parameters including complex Future type"
     )]
-    _phantom: PhantomData<fn(S, Runtime<C>) -> Fut>,
+    _phantom: PhantomData<fn(&S, Runtime<C>) -> Fut>,
 }
 
 impl<S, F, Fut, C> Node<S> for FnNodeCommandWithRuntime<S, F, Fut, C>
 where
     S: State,
     C: Clone + Send + Sync + 'static,
-    F: Fn(S, Runtime<C>) -> Fut + Send + Sync + 'static,
+    F: Fn(&S, Runtime<C>) -> Fut + Send + Sync + 'static,
     Fut: std::future::Future<Output = Result<Command<S>, JunctureError>> + Send + 'static,
 {
     fn call(
         &self,
-        state: S,
+        state: &S,
         _config: &RunnableConfig,
     ) -> std::pin::Pin<
         Box<dyn std::future::Future<Output = Result<Command<S>, JunctureError>> + Send + '_>,
     > {
         let runtime = self.runtime.clone();
-        Box::pin(async move { (self.func)(state, runtime).await })
+        let state = state.clone();
+        Box::pin(async move { (self.func)(&state, runtime).await })
+    }
+
+    fn call_arc(
+        &self,
+        state: std::sync::Arc<S>,
+        _config: &RunnableConfig,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<Command<S>, JunctureError>> + Send + '_>,
+    > {
+        let runtime = self.runtime.clone();
+        let state_arc = std::sync::Arc::clone(&state);
+        Box::pin(async move { (self.func)(&state_arc, runtime).await })
     }
 
     fn name(&self) -> &str {
@@ -770,7 +882,7 @@ struct FnNodeCommandWithConfigAndRuntime<S, F, Fut, C>
 where
     S: State,
     C: Clone + Send + Sync + 'static,
-    F: Fn(S, RunnableConfig, Runtime<C>) -> Fut + Send + Sync + 'static,
+    F: Fn(&S, RunnableConfig, Runtime<C>) -> Fut + Send + Sync + 'static,
     Fut: std::future::Future<Output = Result<Command<S>, JunctureError>> + Send + 'static,
 {
     name: String,
@@ -780,26 +892,40 @@ where
         clippy::type_complexity,
         reason = "PhantomData needs to capture all generic parameters including complex Future type"
     )]
-    _phantom: PhantomData<fn(S, RunnableConfig, Runtime<C>) -> Fut>,
+    _phantom: PhantomData<fn(&S, RunnableConfig, Runtime<C>) -> Fut>,
 }
 
 impl<S, F, Fut, C> Node<S> for FnNodeCommandWithConfigAndRuntime<S, F, Fut, C>
 where
     S: State,
     C: Clone + Send + Sync + 'static,
-    F: Fn(S, RunnableConfig, Runtime<C>) -> Fut + Send + Sync + 'static,
+    F: Fn(&S, RunnableConfig, Runtime<C>) -> Fut + Send + Sync + 'static,
     Fut: std::future::Future<Output = Result<Command<S>, JunctureError>> + Send + 'static,
 {
     fn call(
         &self,
-        state: S,
+        state: &S,
         config: &RunnableConfig,
     ) -> std::pin::Pin<
         Box<dyn std::future::Future<Output = Result<Command<S>, JunctureError>> + Send + '_>,
     > {
         let config = config.clone();
         let runtime = self.runtime.clone();
-        Box::pin(async move { (self.func)(state, config, runtime).await })
+        let state = state.clone();
+        Box::pin(async move { (self.func)(&state, config, runtime).await })
+    }
+
+    fn call_arc(
+        &self,
+        state: std::sync::Arc<S>,
+        config: &RunnableConfig,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<Command<S>, JunctureError>> + Send + '_>,
+    > {
+        let config = config.clone();
+        let runtime = self.runtime.clone();
+        let state_arc = std::sync::Arc::clone(&state);
+        Box::pin(async move { (self.func)(&state_arc, config, runtime).await })
     }
 
     fn name(&self) -> &str {
@@ -812,6 +938,10 @@ mod tests {
     use super::*;
     use crate::FieldsChanged;
     use crate::state::FieldVersions;
+
+    type BoxResult<T> = std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<T, crate::JunctureError>> + Send>,
+    >;
 
     // Test state types
     #[derive(Debug, Clone, Default, PartialEq)]
@@ -848,9 +978,15 @@ mod tests {
         user_id: String,
     }
 
-    // Test helper functions for forms E/F
+    // Test helper functions for forms E/F (kept for reference but inlined in tests
+    // due to higher-ranked lifetime constraints with &State closures)
+    #[expect(dead_code, reason = "inlined in tests due to lifetime constraints")]
+    #[allow(
+        clippy::unused_async,
+        reason = "kept as reference for async node pattern"
+    )]
     async fn form_e_update_node(
-        state: TestState,
+        state: &TestState,
         runtime: Runtime<TestContext>,
     ) -> Result<TestStateUpdate, JunctureError> {
         assert_eq!(runtime.context.user_id, "test-user");
@@ -859,8 +995,13 @@ mod tests {
         })
     }
 
+    #[expect(dead_code, reason = "inlined in tests due to lifetime constraints")]
+    #[allow(
+        clippy::unused_async,
+        reason = "kept as reference for async node pattern"
+    )]
     async fn form_f_update_node(
-        state: TestState,
+        state: &TestState,
         config: RunnableConfig,
         _runtime: Runtime<TestContext>,
     ) -> Result<TestStateUpdate, JunctureError> {
@@ -870,8 +1011,13 @@ mod tests {
         })
     }
 
+    #[expect(dead_code, reason = "inlined in tests due to lifetime constraints")]
+    #[allow(
+        clippy::unused_async,
+        reason = "kept as reference for async node pattern"
+    )]
     async fn form_e_command_node(
-        state: TestState,
+        state: &TestState,
         runtime: Runtime<TestContext>,
     ) -> Result<Command<TestState>, JunctureError> {
         assert_eq!(runtime.context.user_id, "test-user-3");
@@ -880,8 +1026,13 @@ mod tests {
         }))
     }
 
+    #[expect(dead_code, reason = "inlined in tests due to lifetime constraints")]
+    #[allow(
+        clippy::unused_async,
+        reason = "kept as reference for async node pattern"
+    )]
     async fn form_f_command_node(
-        state: TestState,
+        state: &TestState,
         config: RunnableConfig,
         _runtime: Runtime<TestContext>,
     ) -> Result<Command<TestState>, JunctureError> {
@@ -891,8 +1042,13 @@ mod tests {
         }))
     }
 
+    #[expect(dead_code, reason = "inlined in tests due to lifetime constraints")]
+    #[allow(
+        clippy::unused_async,
+        reason = "kept as reference for async node pattern"
+    )]
     async fn shared_runtime_node(
-        state: TestState,
+        state: &TestState,
         _runtime: Runtime<TestContext>,
     ) -> Result<TestStateUpdate, JunctureError> {
         Ok(TestStateUpdate {
@@ -907,11 +1063,22 @@ mod tests {
             user_id: "test-user".to_string(),
         });
 
-        let wrapper = NodeFnUpdateWithRuntime::new(form_e_update_node, runtime);
+        let wrapper = NodeFnUpdateWithRuntime::new(
+            |state: &TestState, rt: Runtime<TestContext>| -> BoxResult<_> {
+                let value = state.value;
+                Box::pin(async move {
+                    assert_eq!(rt.context.user_id, "test-user");
+                    Ok(TestStateUpdate {
+                        value: Some(value + 10),
+                    })
+                })
+            },
+            runtime,
+        );
         let node = wrapper.into_node("test_node");
 
         let result = node
-            .call(TestState { value: 5 }, &RunnableConfig::default())
+            .call(&TestState { value: 5 }, &RunnableConfig::default())
             .await
             .unwrap();
 
@@ -926,11 +1093,23 @@ mod tests {
             user_id: "test-user-2".to_string(),
         });
 
-        let wrapper = NodeFnUpdateWithConfigAndRuntime::new(form_f_update_node, runtime);
+        let wrapper = NodeFnUpdateWithConfigAndRuntime::new(
+            |state: &TestState, cfg: RunnableConfig, rt: Runtime<TestContext>| -> BoxResult<_> {
+                let value = state.value;
+                Box::pin(async move {
+                    assert_eq!(rt.context.user_id, "test-user-2");
+                    assert_eq!(cfg.recursion_limit, 0);
+                    Ok(TestStateUpdate {
+                        value: Some(value + 20),
+                    })
+                })
+            },
+            runtime,
+        );
         let node = wrapper.into_node("test_node");
 
         let result = node
-            .call(TestState { value: 5 }, &RunnableConfig::default())
+            .call(&TestState { value: 5 }, &RunnableConfig::default())
             .await
             .unwrap();
 
@@ -944,11 +1123,22 @@ mod tests {
             user_id: "test-user-3".to_string(),
         });
 
-        let wrapper = NodeFnCommandWithRuntime::new(form_e_command_node, runtime);
+        let wrapper = NodeFnCommandWithRuntime::new(
+            |state: &TestState, rt: Runtime<TestContext>| -> BoxResult<_> {
+                let value = state.value;
+                Box::pin(async move {
+                    assert_eq!(rt.context.user_id, "test-user-3");
+                    Ok(crate::Command::update(TestStateUpdate {
+                        value: Some(value + 30),
+                    }))
+                })
+            },
+            runtime,
+        );
         let node = wrapper.into_node("test_node");
 
         let result = node
-            .call(TestState { value: 5 }, &RunnableConfig::default())
+            .call(&TestState { value: 5 }, &RunnableConfig::default())
             .await
             .unwrap();
 
@@ -962,11 +1152,23 @@ mod tests {
             user_id: "test-user-4".to_string(),
         });
 
-        let wrapper = NodeFnCommandWithConfigAndRuntime::new(form_f_command_node, runtime);
+        let wrapper = NodeFnCommandWithConfigAndRuntime::new(
+            |state: &TestState, cfg: RunnableConfig, rt: Runtime<TestContext>| -> BoxResult<_> {
+                let value = state.value;
+                Box::pin(async move {
+                    assert_eq!(rt.context.user_id, "test-user-4");
+                    assert_eq!(cfg.recursion_limit, 0);
+                    Ok(crate::Command::update(TestStateUpdate {
+                        value: Some(value + 40),
+                    }))
+                })
+            },
+            runtime,
+        );
         let node = wrapper.into_node("test_node");
 
         let result = node
-            .call(TestState { value: 5 }, &RunnableConfig::default())
+            .call(&TestState { value: 5 }, &RunnableConfig::default())
             .await
             .unwrap();
 
@@ -980,19 +1182,30 @@ mod tests {
             user_id: "shared-user".to_string(),
         });
 
-        let wrapper = NodeFnUpdateWithRuntime::new(shared_runtime_node, runtime);
+        let wrapper = NodeFnUpdateWithRuntime::new(
+            |state: &TestState, rt: Runtime<TestContext>| -> BoxResult<_> {
+                let value = state.value;
+                Box::pin(async move {
+                    let _ = rt;
+                    Ok(TestStateUpdate {
+                        value: Some(value + 1),
+                    })
+                })
+            },
+            runtime,
+        );
         let node = wrapper.into_node("test_node");
 
         // First invocation
         let result1 = node
-            .call(TestState { value: 0 }, &RunnableConfig::default())
+            .call(&TestState { value: 0 }, &RunnableConfig::default())
             .await
             .unwrap();
         assert_eq!(result1.update.unwrap().value, Some(1));
 
         // Second invocation (should use same Runtime)
         let result2 = node
-            .call(TestState { value: 10 }, &RunnableConfig::default())
+            .call(&TestState { value: 10 }, &RunnableConfig::default())
             .await
             .unwrap();
         assert_eq!(result2.update.unwrap().value, Some(11));

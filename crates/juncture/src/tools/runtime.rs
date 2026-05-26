@@ -184,7 +184,7 @@ mod tests {
     use juncture_core::state::FieldsChanged;
 
     // Dummy State for testing
-    #[derive(Clone, Debug)]
+    #[derive(Clone, Debug, Default)]
     struct TestState;
 
     impl juncture_core::State for TestState {

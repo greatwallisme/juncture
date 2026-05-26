@@ -50,7 +50,7 @@ use serde::{Deserialize, Serialize};
 /// };
 /// let changed = state.apply(update);
 /// ```
-#[derive(State, Clone, Debug, Serialize, Deserialize)]
+#[derive(State, Clone, Debug, Default, Serialize, Deserialize)]
 pub struct MessagesState {
     /// Conversation messages with reducer-based merge semantics.
     ///

@@ -16,7 +16,7 @@ use juncture_derive::State;
 use std::io::Write;
 
 /// Processing state
-#[derive(State, Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(State, Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 struct ProcessingState {
     /// Current operation status
     status: String,
@@ -26,45 +26,51 @@ struct ProcessingState {
     retries: u32,
 }
 
-/// Normal operation node
-async fn process_node(state: ProcessingState) -> Result<ProcessingStateUpdate, JunctureError> {
-    // Simulate processing that might fail
-    if state.retries < 2 {
-        return Err(JunctureError::execution("Simulated transient error"));
-    }
-
-    Ok(ProcessingStateUpdate {
-        status: Some("completed".to_string()),
-        result: Some("Operation successful!".to_string()),
-        ..Default::default()
-    })
-}
-
-/// Recovery node that handles errors
-async fn recovery_node(state: ProcessingState) -> Result<ProcessingStateUpdate, JunctureError> {
-    Ok(ProcessingStateUpdate {
-        status: Some("recovering".to_string()),
-        retries: Some(state.retries + 1),
-        result: Some("Attempting recovery...".to_string()),
-    })
-}
-
-/// Fallback node for when recovery fails
-async fn fallback_node(_state: ProcessingState) -> Result<ProcessingStateUpdate, JunctureError> {
-    Ok(ProcessingStateUpdate {
-        status: Some("fallback".to_string()),
-        result: Some("Using fallback result".to_string()),
-        ..Default::default()
-    })
-}
-
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut graph = StateGraph::<ProcessingState>::new();
 
     // Add nodes
-    graph.add_node_simple("process", NodeFnUpdate(process_node))?;
-    graph.add_node_simple("recovery", NodeFnUpdate(recovery_node))?;
-    graph.add_node_simple("fallback", NodeFnUpdate(fallback_node))?;
+    graph.add_node_simple(
+        "process",
+        NodeFnUpdate(|state: &ProcessingState| {
+            let retries = state.retries;
+            async move {
+                // Simulate processing that might fail
+                if retries < 2 {
+                    return Err(JunctureError::execution("Simulated transient error"));
+                }
+
+                Ok(ProcessingStateUpdate {
+                    status: Some("completed".to_string()),
+                    result: Some("Operation successful!".to_string()),
+                    ..Default::default()
+                })
+            }
+        }),
+    )?;
+    graph.add_node_simple(
+        "recovery",
+        NodeFnUpdate(|state: &ProcessingState| {
+            let retries = state.retries;
+            async move {
+                Ok(ProcessingStateUpdate {
+                    status: Some("recovering".to_string()),
+                    retries: Some(retries + 1),
+                    result: Some("Attempting recovery...".to_string()),
+                })
+            }
+        }),
+    )?;
+    graph.add_node_simple(
+        "fallback",
+        NodeFnUpdate(|_state: &ProcessingState| async move {
+            Ok(ProcessingStateUpdate {
+                status: Some("fallback".to_string()),
+                result: Some("Using fallback result".to_string()),
+                ..Default::default()
+            })
+        }),
+    )?;
 
     // Create a flow: process -> recovery -> process -> fallback
     graph.add_edge("process", "recovery");

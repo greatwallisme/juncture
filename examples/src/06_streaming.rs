@@ -13,12 +13,12 @@
 
 use juncture_core::node::NodeFnUpdate;
 use juncture_core::stream::{StreamEvent, StreamMode};
-use juncture_core::{JunctureError, RunnableConfig, StateGraph};
+use juncture_core::{RunnableConfig, StateGraph};
 use juncture_derive::State;
 use std::io::Write;
 
 /// Streaming state
-#[derive(State, Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(State, Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 struct StreamingState {
     /// Current step number
     step: u32,
@@ -26,38 +26,38 @@ struct StreamingState {
     value: String,
 }
 
-/// Step 1 node
-async fn step1_node(_state: StreamingState) -> Result<StreamingStateUpdate, JunctureError> {
-    Ok(StreamingStateUpdate {
-        step: Some(1),
-        value: Some("Step 1 completed".to_string()),
-    })
-}
-
-/// Step 2 node
-async fn step2_node(_state: StreamingState) -> Result<StreamingStateUpdate, JunctureError> {
-    Ok(StreamingStateUpdate {
-        step: Some(2),
-        value: Some("Step 2 completed".to_string()),
-    })
-}
-
-/// Step 3 node
-async fn step3_node(_state: StreamingState) -> Result<StreamingStateUpdate, JunctureError> {
-    Ok(StreamingStateUpdate {
-        step: Some(3),
-        value: Some("Step 3 completed".to_string()),
-    })
-}
-
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut graph = StateGraph::<StreamingState>::new();
 
     // Add three sequential nodes
-    graph.add_node_simple("step1", NodeFnUpdate(step1_node))?;
-    graph.add_node_simple("step2", NodeFnUpdate(step2_node))?;
-    graph.add_node_simple("step3", NodeFnUpdate(step3_node))?;
+    graph.add_node_simple(
+        "step1",
+        NodeFnUpdate(|_state: &StreamingState| async move {
+            Ok(StreamingStateUpdate {
+                step: Some(1),
+                value: Some("Step 1 completed".to_string()),
+            })
+        }),
+    )?;
+    graph.add_node_simple(
+        "step2",
+        NodeFnUpdate(|_state: &StreamingState| async move {
+            Ok(StreamingStateUpdate {
+                step: Some(2),
+                value: Some("Step 2 completed".to_string()),
+            })
+        }),
+    )?;
+    graph.add_node_simple(
+        "step3",
+        NodeFnUpdate(|_state: &StreamingState| async move {
+            Ok(StreamingStateUpdate {
+                step: Some(3),
+                value: Some("Step 3 completed".to_string()),
+            })
+        }),
+    )?;
 
     // Connect them in sequence
     graph.add_edge("step1", "step2");

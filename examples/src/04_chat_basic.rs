@@ -12,38 +12,39 @@
 use juncture_core::node::NodeFnUpdate;
 use juncture_core::state::messages::{Message, MessagesState, MessagesStateUpdate};
 use juncture_core::state::{Content, Role};
-use juncture_core::{JunctureError, RunnableConfig, StateGraph};
+use juncture_core::{RunnableConfig, StateGraph};
 use std::io::Write;
-
-/// Chatbot node - processes messages and generates responses
-async fn chatbot_node(state: MessagesState) -> Result<MessagesStateUpdate, JunctureError> {
-    let last_message = state.messages.last();
-
-    if let Some(msg) = last_message
-        && matches!(msg.role, Role::Human)
-    {
-        let response = Message {
-            id: uuid::Uuid::new_v4().to_string(),
-            role: Role::Ai,
-            content: Content::Text("Hello! How can I help you today?".to_string()),
-            tool_calls: vec![],
-            tool_call_id: None,
-            name: None,
-            usage: None,
-        };
-
-        return Ok(MessagesStateUpdate {
-            messages: Some(vec![response]),
-        });
-    }
-
-    Ok(MessagesStateUpdate::default())
-}
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut graph = StateGraph::<MessagesState>::new();
 
-    graph.add_node_simple("chatbot", NodeFnUpdate(chatbot_node))?;
+    graph.add_node_simple(
+        "chatbot",
+        NodeFnUpdate(|state: &MessagesState| {
+            let last_message = state.messages.last().cloned();
+            async move {
+                if let Some(msg) = last_message
+                    && matches!(msg.role, Role::Human)
+                {
+                    let response = Message {
+                        id: uuid::Uuid::new_v4().to_string(),
+                        role: Role::Ai,
+                        content: Content::Text("Hello! How can I help you today?".to_string()),
+                        tool_calls: vec![],
+                        tool_call_id: None,
+                        name: None,
+                        usage: None,
+                    };
+
+                    return Ok(MessagesStateUpdate {
+                        messages: Some(vec![response]),
+                    });
+                }
+
+                Ok(MessagesStateUpdate::default())
+            }
+        }),
+    )?;
 
     graph.set_entry_point("chatbot");
     graph.set_finish_point("chatbot");

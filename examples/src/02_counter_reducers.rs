@@ -11,13 +11,13 @@
 //! - Multiple nodes updating the same state field
 
 use juncture_core::node::NodeFnUpdate;
-use juncture_core::{JunctureError, RunnableConfig, StateGraph};
+use juncture_core::{RunnableConfig, StateGraph};
 use juncture_derive::State;
 use std::collections::HashMap;
 use std::io::Write;
 
 /// Counter state demonstrating different reducer types
-#[derive(State, Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(State, Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 struct CounterState {
     /// Default replace reducer - last writer wins
     value: u32,
@@ -44,35 +44,41 @@ fn merge_scores(
     result
 }
 
-/// Increment node - increases value and appends an item
-async fn increment_node(state: CounterState) -> Result<CounterStateUpdate, JunctureError> {
-    Ok(CounterStateUpdate {
-        value: Some(state.value + 1),
-        items: Some(vec![format!("step_{}", state.value + 1)]),
-        ..Default::default()
-    })
-}
-
-/// Set status node - updates the status field
-async fn set_status_node(state: CounterState) -> Result<CounterStateUpdate, JunctureError> {
-    Ok(CounterStateUpdate {
-        status: Some(format!("processed_{}", state.value)),
-        ..Default::default()
-    })
-}
-
-/// Collect node - displays the final state
-async fn collect_node(_state: CounterState) -> Result<CounterStateUpdate, JunctureError> {
-    Ok(CounterStateUpdate::default())
-}
-
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut graph = StateGraph::<CounterState>::new();
 
     // Add nodes with different update patterns
-    graph.add_node_simple("increment", NodeFnUpdate(increment_node))?;
-    graph.add_node_simple("set_status", NodeFnUpdate(set_status_node))?;
-    graph.add_node_simple("collect", NodeFnUpdate(collect_node))?;
+    graph.add_node_simple(
+        "increment",
+        NodeFnUpdate(|state: &CounterState| {
+            let value = state.value;
+            async move {
+                Ok(CounterStateUpdate {
+                    value: Some(value + 1),
+                    items: Some(vec![format!("step_{}", value + 1)]),
+                    ..Default::default()
+                })
+            }
+        }),
+    )?;
+
+    graph.add_node_simple(
+        "set_status",
+        NodeFnUpdate(|state: &CounterState| {
+            let value = state.value;
+            async move {
+                Ok(CounterStateUpdate {
+                    status: Some(format!("processed_{value}")),
+                    ..Default::default()
+                })
+            }
+        }),
+    )?;
+
+    graph.add_node_simple(
+        "collect",
+        NodeFnUpdate(|_state: &CounterState| async move { Ok(CounterStateUpdate::default()) }),
+    )?;
 
     // Create a linear flow
     graph.add_edge("increment", "set_status");

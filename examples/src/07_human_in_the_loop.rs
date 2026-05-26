@@ -12,12 +12,12 @@
 
 use juncture_core::graph::CompileConfig;
 use juncture_core::node::NodeFnUpdate;
-use juncture_core::{JunctureError, RunnableConfig, StateGraph};
+use juncture_core::{RunnableConfig, StateGraph};
 use juncture_derive::State;
 use std::io::Write;
 
 /// Approval workflow state
-#[derive(State, Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(State, Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 struct ApprovalState {
     /// Current step in the workflow
     step: String,
@@ -27,39 +27,39 @@ struct ApprovalState {
     action: String,
 }
 
-/// Propose node - proposes an action for review
-async fn propose_node(_state: ApprovalState) -> Result<ApprovalStateUpdate, JunctureError> {
-    Ok(ApprovalStateUpdate {
-        step: Some("proposed".to_string()),
-        action: Some("Deploy to production".to_string()),
-        ..Default::default()
-    })
-}
-
-/// Review node - requires human approval
-async fn review_node(_state: ApprovalState) -> Result<ApprovalStateUpdate, JunctureError> {
-    Ok(ApprovalStateUpdate {
-        step: Some("reviewed".to_string()),
-        approved: Some(true),
-        ..Default::default()
-    })
-}
-
-/// Execute node - performs the approved action
-async fn execute_node(_state: ApprovalState) -> Result<ApprovalStateUpdate, JunctureError> {
-    Ok(ApprovalStateUpdate {
-        step: Some("executed".to_string()),
-        ..Default::default()
-    })
-}
-
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut graph = StateGraph::<ApprovalState>::new();
 
     // Add nodes
-    graph.add_node_simple("propose", NodeFnUpdate(propose_node))?;
-    graph.add_node_simple("review", NodeFnUpdate(review_node))?;
-    graph.add_node_simple("execute", NodeFnUpdate(execute_node))?;
+    graph.add_node_simple(
+        "propose",
+        NodeFnUpdate(|_state: &ApprovalState| async move {
+            Ok(ApprovalStateUpdate {
+                step: Some("proposed".to_string()),
+                action: Some("Deploy to production".to_string()),
+                ..Default::default()
+            })
+        }),
+    )?;
+    graph.add_node_simple(
+        "review",
+        NodeFnUpdate(|_state: &ApprovalState| async move {
+            Ok(ApprovalStateUpdate {
+                step: Some("reviewed".to_string()),
+                approved: Some(true),
+                ..Default::default()
+            })
+        }),
+    )?;
+    graph.add_node_simple(
+        "execute",
+        NodeFnUpdate(|_state: &ApprovalState| async move {
+            Ok(ApprovalStateUpdate {
+                step: Some("executed".to_string()),
+                ..Default::default()
+            })
+        }),
+    )?;
 
     // Connect nodes
     graph.add_edge("propose", "review");

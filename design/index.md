@@ -62,81 +62,123 @@ Juncture 是 LangGraph 的 Rust 实现，保留其核心编程模型（StateGrap
 
 ```
 juncture/
-├── Cargo.toml                         # workspace
+├── Cargo.toml                         # workspace root
 ├── crates/
 │   ├── juncture-derive/               # proc-macro crate
 │   │   └── src/
 │   │       ├── lib.rs                 # 导出 #[derive(State)]
-│   │       ├── state_derive.rs        # State derive 主逻辑
-│   │       ├── reducer.rs             # reducer 属性解析与代码生成
-│   │       ├── update_gen.rs          # StateUpdate 结构体生成
-│   │       ├── version_gen.rs         # field_versions 追踪代码生成
-│   │       └── migration_gen.rs       # schema 版本迁移代码生成
+│   │       └── state_derive.rs        # State derive 主逻辑（生成 Update/merge/versions）
 │   │
 │   ├── juncture-core/                 # 核心引擎
 │   │   └── src/
-│   │       ├── lib.rs
+│   │       ├── lib.rs                 # 公共 API 导出
 │   │       ├── state/
-│   │       │   ├── trait.rs           # State trait + FieldVersions
+│   │       │   ├── trait_.rs          # State trait + FieldVersions
 │   │       │   ├── channel.rs         # Channel 语义抽象（Reducer trait）
 │   │       │   └── messages.rs        # MessagesState 内置实现
 │   │       ├── graph/
 │   │       │   ├── builder.rs         # StateGraph（构建阶段）
 │   │       │   ├── compiled.rs        # CompiledGraph（执行入口）
-│   │       │   └── topology.rs        # 拓扑验证器
+│   │       │   ├── topology.rs        # 拓扑验证器
+│   │       │   └── remote.rs          # RemoteGraph（跨进程调用）
 │   │       ├── node/
-│   │       │   ├── trait.rs           # Node<S> trait
-│   │       │   ├── blanket.rs         # async fn → Node 自动包装
-│   │       │   └── prebuilt.rs        # ToolNode 等内置节点
+│   │       │   ├── trait.rs           # Node<S> trait（含 call_arc 优化）
+│   │       │   └── into_node.rs       # 8 种 IntoNode wrapper 类型
 │   │       ├── edge/
-│   │       │   ├── fixed.rs           # 静态边
-│   │       │   ├── conditional.rs     # 条件边（同步 + 异步路由）
-│   │       │   └── barrier.rs         # NamedBarrier（wait-all）
+│   │       │   ├── types.rs           # Edge, Router, PathMap, TriggerTable
+│   │       │   └── compiled.rs        # 编译后边结构
 │   │       ├── pregel/
 │   │       │   ├── loop_.rs           # PregelLoop 主循环
-│   │       │   ├── runner.rs          # PregelRunner（superstep 并发执行）
+│   │       │   ├── runner.rs          # execute_superstep（tokio::spawn + JoinSet）
 │   │       │   ├── scheduler.rs       # 基于 versions_seen 的节点调度
-│   │       │   └── budget.rs          # 预算追踪器
-│   │       ├── command.rs             # Command 类型（update + goto + resume）
-│   │       ├── send.rs                # Send API（动态 fan-out）
-│   │       ├── interrupt.rs           # HITL interrupt/resume
-│   │       ├── subgraph.rs            # 子图挂载与命名空间隔离
-│   │       ├── stream.rs              # StreamMode + StreamEvent
-│   │       ├── config.rs              # RunnableConfig
-│   │       └── error.rs              # 错误类型层次
+│   │       │   ├── budget.rs          # 预算追踪器
+│   │       │   ├── context.rs         # Pregel 执行上下文
+│   │       │   ├── durability.rs      # Durability 模式（Sync/Async/Exit）
+│   │       │   ├── protocol.rs        # Pregel 协议类型
+│   │       │   └── types.rs           # PendingTask, SuperstepResult 等
+│   │       ├── interrupt/
+│   │       │   ├── mod.rs             # interrupt! 宏, ResumeValue, Scratchpad
+│   │       │   └── context.rs         # InterruptContext
+│   │       ├── command.rs             # Command<S>, Goto, SendTarget, GraphTarget
+│   │       ├── send.rs                # Send<S>（动态 fan-out）
+│   │       ├── subgraph.rs            # SubgraphNode, SubgraphConfig, StateSubset
+│   │       ├── stream.rs              # StreamMode, StreamEvent, EventEmitter
+│   │       ├── config.rs              # RunnableConfig, CompileConfig
+│   │       ├── runtime.rs             # Runtime<C>（context, store, stream, heartbeat）
+│   │       ├── func/                  # 函数式 API
+│   │       │   └── mod.rs             # compile_entrypoint(), Runtime<S>
+│   │       ├── checkpoint.rs          # CheckpointSaver trait, Checkpoint types
+│   │       ├── store.rs               # Store trait re-exports
+│   │       ├── llm.rs                 # ChatModel trait re-exports
+│   │       ├── tools.rs               # Tool trait re-exports
+│   │       ├── prebuilt.rs            # ReactAgentConfig re-exports
+│   │       ├── observability.rs       # MetricsCollector, GraphLifecycleCallback
+│   │       ├── chat.rs                # Chat provider re-exports
+│   │       ├── client.rs              # GraphClient, JununctureClient
+│   │       └── error.rs               # JunctureError, ErrorCode
 │   │
 │   ├── juncture-checkpoint/
 │   │   └── src/
-│   │       ├── trait.rs               # CheckpointSaver trait
-│   │       ├── types.rs               # Checkpoint, CheckpointMetadata
+│   │       ├── lib.rs                 # CheckpointSaver trait 导出
+│   │       ├── types.rs               # Checkpoint, CheckpointMetadata, PendingWrite
 │   │       ├── memory.rs              # MemorySaver（开发用）
-│   │       └── serde.rs              # 序列化策略
-│   │
-│   ├── juncture-checkpoint-sqlite/
-│   ├── juncture-checkpoint-postgres/
+│   │       ├── sqlite.rs              # SqliteSaver（feature sqlite）
+│   │       ├── postgres.rs            # PostgresSaver（feature postgres）
+│   │       ├── serde.rs               # 序列化策略（JSON/MessagePack/加密）
+│   │       ├── cache.rs               # 检查点缓存
+│   │       └── error.rs               # CheckpointError
 │   │
 │   ├── juncture-tracing/
 │   │   └── src/
-│   │       ├── lib.rs                 # OpenTelemetry 初始化
-│   │       └── instrument.rs          # 自动插桩逻辑
+│   │       ├── lib.rs                 # 模块导出
+│   │       ├── spans.rs               # Span 名称常量 + 属性键
+│   │       ├── callback.rs            # GraphCallbackHandler 生命周期回调
+│   │       ├── config.rs              # TracingConfig, init() builder（feature otel）
+│   │       ├── metrics.rs             # MetricsRegistry（feature otel）
+│   │       ├── propagation.rs         # 跨服务 trace context 传播
+│   │       ├── test_utils.rs          # TestMetricsCollector
+│   │       └── types.rs               # LlmCacheKeyInput, ServerInfo 等
+│   │
+│   ├── juncture-store/
+│   │   └── src/
+│   │       └── lib.rs                 # re-export juncture-core::store 模块
 │   │
 │   └── juncture/                      # 门面 crate
 │       └── src/
-│           ├── prelude.rs
+│           ├── lib.rs                 # prelude, re-exports juncture-core::*
 │           ├── llm/
-│           │   ├── trait.rs           # ChatModel trait
-│           │   ├── anthropic.rs
-│           │   ├── openai.rs
-│           │   ├── ollama.rs
-│           │   └── mock.rs
+│           │   ├── trait_.rs          # ChatModel trait, CallOptions, LlmError
+│           │   ├── message.rs          # Message builder
+│           │   ├── anthropic.rs        # ChatAnthropic（feature anthropic）
+│           │   ├── openai.rs          # ChatOpenAI（feature openai）
+│           │   ├── ollama.rs          # ChatOllama（feature ollama）
+│           │   ├── mock.rs            # MockChatModel（测试用）
+│           │   ├── retry.rs           # RetryingModel 包装器
+│           │   ├── pricing.rs         # ModelPricing, PricingTable
+│           │   └── structured.rs      # 结构化输出（feature structured-output）
 │           ├── tools/
-│           │   └── trait.rs           # Tool trait
+│           │   ├── trait_.rs          # Tool trait, ToolDefinition
+│           │   ├── node.rs            # ToolNode, ToolNodeConfig
+│           │   ├── runtime.rs         # ToolRuntime
+│           │   ├── interceptor.rs     # ToolInterceptor
+│           │   ├── transformer.rs     # ToolCallTransformer
+│           │   ├── condition.rs       # tools_condition
+│           │   ├── validation.rs      # ValidationNode
+│           │   └── error.rs           # ToolError
 │           └── prebuilt/
-│               ├── react.rs           # create_react_agent
-│               └── tool_node.rs
+│               ├── react.rs           # create_react_agent()
+│               └── messages_state.rs  # MessagesState
 │
-├── examples/
-└── tests/
+├── benchmarks/                        # Juncture vs LangGraph 性能对比
+│   ├── benches/                       # Criterion 基准测试（6 场景）
+│   ├── src/bin/profile.rs             # CPU/RSS 性能分析器
+│   ├── python/                        # LangGraph Python 等价脚本
+│   └── scripts/compare.py             # 双边对比报告生成
+│
+├── examples/                          # 9 个教学示例（01-09）
+│   └── src/                           # 从基础状态机到错误恢复
+│
+└── tests/                             # 集成测试
 ```
 
 ---

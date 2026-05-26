@@ -12,13 +12,13 @@
 
 use juncture_checkpoint::MemorySaver;
 use juncture_core::node::NodeFnUpdate;
-use juncture_core::{JunctureError, RunnableConfig, StateGraph};
+use juncture_core::{RunnableConfig, StateGraph};
 use juncture_derive::State;
 use std::io::Write;
 use std::sync::Arc;
 
 /// Workflow state with counter
-#[derive(State, Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(State, Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 struct CheckpointState {
     /// Execution counter
     count: u32,
@@ -26,28 +26,34 @@ struct CheckpointState {
     last_step: String,
 }
 
-/// Step 1 node
-async fn step1_node(state: CheckpointState) -> Result<CheckpointStateUpdate, JunctureError> {
-    Ok(CheckpointStateUpdate {
-        count: Some(state.count + 1),
-        last_step: Some("step1".to_string()),
-    })
-}
-
-/// Step 2 node
-async fn step2_node(state: CheckpointState) -> Result<CheckpointStateUpdate, JunctureError> {
-    Ok(CheckpointStateUpdate {
-        count: Some(state.count + 1),
-        last_step: Some("step2".to_string()),
-    })
-}
-
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut graph = StateGraph::<CheckpointState>::new();
 
     // Add nodes
-    graph.add_node_simple("step1", NodeFnUpdate(step1_node))?;
-    graph.add_node_simple("step2", NodeFnUpdate(step2_node))?;
+    graph.add_node_simple(
+        "step1",
+        NodeFnUpdate(|state: &CheckpointState| {
+            let count = state.count;
+            async move {
+                Ok(CheckpointStateUpdate {
+                    count: Some(count + 1),
+                    last_step: Some("step1".to_string()),
+                })
+            }
+        }),
+    )?;
+    graph.add_node_simple(
+        "step2",
+        NodeFnUpdate(|state: &CheckpointState| {
+            let count = state.count;
+            async move {
+                Ok(CheckpointStateUpdate {
+                    count: Some(count + 1),
+                    last_step: Some("step2".to_string()),
+                })
+            }
+        }),
+    )?;
 
     // Create a cycle to demonstrate checkpointing
     graph.add_edge("step1", "step2");

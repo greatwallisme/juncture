@@ -381,13 +381,11 @@ impl VersionsSeen {
 pub async fn compute_next_tasks<S: State>(
     completed_tasks: &[TaskOutput<S>],
     trigger_table: &TriggerTable<S>,
+    trigger_to_nodes: &TriggerToNodes,
     state: &S,
 ) -> Result<Vec<PendingTask<S>>, JunctureError> {
     let mut next_tasks = Vec::new();
     let mut seen_nodes = HashSet::new();
-
-    // Build reverse mapping for efficient trigger lookup
-    let trigger_to_nodes = TriggerToNodes::from_trigger_table(trigger_table);
 
     // First, check if any task returned a Command with explicit routing
     for task_output in completed_tasks {
@@ -440,18 +438,16 @@ pub async fn compute_next_tasks<S: State>(
                 }
             }
             crate::Goto::Send(send_targets) => {
-                // Dynamic fan-out with state overrides
+                // Dynamic fan-out with state overrides.
+                // Each Send target creates a separate task even if multiple targets
+                // share the same node name, because each carries a distinct state override.
                 for (idx, target) in send_targets.iter().enumerate() {
-                    if !seen_nodes.contains(&target.node) {
-                        seen_nodes.insert(target.node.clone());
-                        // State override is stored as JSON and deserialized during task execution
-                        next_tasks.push(PendingTask::push(
-                            uuid::Uuid::new_v4().to_string(),
-                            target.node.clone(),
-                            idx,
-                            target.state.clone(),
-                        ));
-                    }
+                    next_tasks.push(PendingTask::push(
+                        uuid::Uuid::new_v4().to_string(),
+                        target.node.clone(),
+                        idx,
+                        target.state.clone(),
+                    ));
                 }
             }
             crate::Goto::End => {
@@ -893,7 +889,7 @@ mod scheduler_tests {
     use crate::node::IntoNode;
     use crate::state::FieldVersions;
 
-    #[derive(Clone, Debug)]
+    #[derive(Clone, Debug, Default)]
     struct TestState;
 
     impl State for TestState {
@@ -1035,7 +1031,7 @@ mod scheduler_tests {
             indexmap::IndexMap::new();
         nodes.insert(
             "error_handler_a".to_string(),
-            crate::node::NodeFnCommand(|_s| async move { Ok(Command::end()) })
+            crate::node::NodeFnCommand(|_s: &TestState| async move { Ok(Command::end()) })
                 .into_node("error_handler_a"),
         );
 

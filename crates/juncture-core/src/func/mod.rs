@@ -442,7 +442,7 @@ mod tests {
     #[test]
     fn test_compile_entrypoint_basic() {
         let result = compile_entrypoint::<TestState, TestState, TestState, _>(
-            NodeFnUpdate(|_state: TestState| async {
+            NodeFnUpdate(|_state: &TestState| async {
                 Ok::<TestStateUpdate, JunctureError>(TestStateUpdate::default())
             }),
             None,
@@ -464,7 +464,7 @@ mod tests {
         };
 
         let result = compile_entrypoint_with_config::<TestState, TestState, TestState, _>(
-            NodeFnUpdate(|_state: TestState| async {
+            NodeFnUpdate(|_state: &TestState| async {
                 Ok::<TestStateUpdate, JunctureError>(TestStateUpdate::default())
             }),
             &config,

@@ -41,7 +41,7 @@ use crate::{State, command::Command, config::RunnableConfig, error::JunctureErro
 pub trait Node<S: State>: Send + Sync + 'static {
     /// Execute the node logic
     ///
-    /// Receives an owned state snapshot and configuration, returns a command
+    /// Receives a shared state reference and configuration, returns a command
     /// indicating state updates and routing decisions.
     ///
     /// # Errors
@@ -50,11 +50,32 @@ pub trait Node<S: State>: Send + Sync + 'static {
     /// propagated to error handlers if configured.
     fn call(
         &self,
-        state: S,
+        state: &S,
         config: &RunnableConfig,
     ) -> std::pin::Pin<
         Box<dyn std::future::Future<Output = Result<Command<S>, JunctureError>> + Send + '_>,
     >;
+
+    /// Execute node logic with `Arc<S>` to avoid O(N) state clone.
+    ///
+    /// When the caller already holds `Arc<S>` (e.g., the Pregel runner), this
+    /// method avoids the `O(state_size)` clone that `call()` requires for lifetime
+    /// extension into async blocks. The default implementation delegates to
+    /// [`call`](Self::call), which still clones. Wrapper types override this to
+    /// use O(1) `Arc::clone` instead.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`JunctureError`] if node execution fails.
+    fn call_arc(
+        &self,
+        state: std::sync::Arc<S>,
+        config: &RunnableConfig,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<Command<S>, JunctureError>> + Send + '_>,
+    > {
+        self.call(&state, config)
+    }
 
     /// Get the node name
     ///

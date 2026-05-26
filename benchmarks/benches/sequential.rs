@@ -6,13 +6,7 @@
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use juncture_core::node::NodeFnUpdate;
 use juncture_core::state::messages::{MessagesState, MessagesStateUpdate};
-use juncture_core::{JunctureError, RunnableConfig, StateGraph};
-
-/// No-op node matching `LangGraph`'s `def noop(state): pass`.
-/// Returns an empty update (no field changes).
-async fn noop_node(_state: MessagesState) -> Result<MessagesStateUpdate, JunctureError> {
-    Ok(MessagesStateUpdate { messages: None })
-}
+use juncture_core::{RunnableConfig, StateGraph};
 
 /// Build a linear chain of `num_nodes` no-op nodes:
 /// `START -> node_0 -> node_1 -> ... -> node_{N-1} -> END`
@@ -23,7 +17,12 @@ fn create_sequential_graph(num_nodes: usize) -> StateGraph<MessagesState> {
 
     for name in &names {
         graph
-            .add_node_simple(name.as_str(), NodeFnUpdate(noop_node))
+            .add_node_simple(
+                name.as_str(),
+                NodeFnUpdate(|_state: &MessagesState| async move {
+                    Ok(MessagesStateUpdate { messages: None })
+                }),
+            )
             .expect("add_node_simple should succeed for unique names");
     }
 

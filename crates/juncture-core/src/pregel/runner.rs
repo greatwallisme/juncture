@@ -22,6 +22,142 @@ use tracing::Instrument;
 #[cfg(feature = "otel")]
 use tracing::{Level, event};
 
+/// Execute a single task inline when the superstep has exactly one task with
+/// no retry, timeout, or error-handler configuration.
+///
+/// Returns `Some(SuperstepResult)` when inline execution was performed, or
+/// `None` when the task requires full spawn-based execution (retry/timeout/error-handler).
+///
+/// This eliminates `tokio::spawn`/`JoinSet` overhead for the common case of
+/// sequential single-node supersteps, which dominate in linear chain graphs
+/// (e.g., `wide_state` with 300-1200 iterations).
+#[expect(
+    clippy::too_many_arguments,
+    reason = "mirrors execute_superstep's parameter list for consistency; all parameters are necessary for single-task execution"
+)]
+async fn try_execute_single_task_inline<S: State>(
+    pending_tasks: &[PendingTask<S>],
+    arc_state: &Arc<S>,
+    nodes: &indexmap::IndexMap<String, Arc<dyn Node<S>>>,
+    config: &RunnableConfig,
+    cancellation_token: &CancellationToken,
+    checkpointer: Option<&Arc<dyn crate::checkpoint::CheckpointSaver>>,
+    error_handler_map: &HashMap<String, String>,
+    retry_policies: &HashMap<String, RetryPolicy>,
+    timeout_policies: &HashMap<String, TimeoutPolicy>,
+) -> Result<Option<SuperstepResult<S>>, JunctureError>
+where
+    S::Update: serde::Serialize,
+{
+    if pending_tasks.len() != 1 {
+        return Ok(None);
+    }
+
+    let task = &pending_tasks[0];
+    let has_error_handler = error_handler_map.contains_key(&task.node_name);
+    let has_retry = retry_policies.contains_key(&task.node_name);
+    let has_timeout = timeout_policies.contains_key(&task.node_name);
+
+    if has_error_handler || has_retry || has_timeout {
+        return Ok(None);
+    }
+
+    let node = nodes.get(&task.node_name).ok_or_else(|| {
+        JunctureError::execution(format!("Node '{}' not found", task.node_name))
+    })?;
+
+    let task_state: Arc<S> = task
+        .state_override
+        .clone()
+        .map_or_else(|| Arc::clone(arc_state), Arc::new);
+
+    let task_config = config.clone();
+    let task_id = task.id.clone();
+    let node_name = task.node_name.clone();
+    let task_trigger = task.trigger.clone();
+
+    // Check cancellation once before executing
+    if cancellation_token.is_cancelled() {
+        return Err(JunctureError::execution("Task cancelled"));
+    }
+
+    let start = Instant::now();
+
+    let result = if let Some(ref tracker) = task_config.budget_tracker {
+        let tracker_ref = Arc::clone(tracker);
+        crate::pregel::BUDGET_TRACKER
+            .scope(tracker_ref, node.call_arc(task_state, &task_config))
+            .await
+    } else {
+        node.call_arc(task_state, &task_config).await
+    };
+
+    let duration = start.elapsed();
+
+    // Emit node duration metric
+    if let Some(ref collector) = config.metrics_collector {
+        #[allow(
+            clippy::cast_precision_loss,
+            reason = "Milliseconds as f64 is sufficient for histogram metrics"
+        )]
+        collector.record_histogram("juncture.node.duration_ms", duration.as_millis() as f64);
+    }
+
+    #[cfg(feature = "otel")]
+    {
+        event!(
+            name: "juncture.node.execute.metrics",
+            Level::DEBUG,
+            node_name = %node_name,
+            duration_ms = duration.as_millis(),
+            success = result.is_ok(),
+            output_type = "inline",
+        );
+    };
+
+    // Notify callback handler
+    if let Some(ref handler) = config.callback_handler {
+        match &result {
+            Ok(_) => {
+                let duration_ms = u64::try_from(duration.as_millis()).unwrap_or(u64::MAX);
+                handler.on_node_end(&node_name, &task_id, duration_ms);
+            }
+            Err(err) => {
+                handler.on_node_error(&node_name, err);
+            }
+        }
+    }
+
+    let command = result.inspect_err(|_e| {
+        cancellation_token.cancel();
+    })?;
+
+    let output = TaskOutput {
+        task_id,
+        node_name,
+        command,
+        duration,
+        trigger: task_trigger,
+        triggered_fields: Vec::new(),
+        error: None,
+    };
+
+    // Persist writes for the single completed task
+    if let Some(cp) = checkpointer
+        && let Some(ref update) = output.command.update
+    {
+        let writes = serialize_pending_writes(&output.task_id, update);
+        if !writes.is_empty() {
+            let _ = cp.put_writes(config, writes, &output.task_id).await;
+        }
+    }
+
+    Ok(Some(SuperstepResult {
+        task_outputs: vec![output],
+        bubble_ups: Vec::new(),
+    }))
+}
+
 /// Execute a single superstep in parallel
 ///
 /// This function spawns all pending tasks concurrently, respecting the
@@ -95,6 +231,9 @@ use tracing::{Level, event};
 ///     0, // step
 /// ).await?;
 /// ```
+///
+/// Single-task inline execution: bypasses `tokio::spawn`/`JoinSet` for sequential
+/// supersteps to eliminate scheduler dispatch overhead.
 #[expect(
     clippy::too_many_lines,
     reason = "execute_superstep requires: early return, semaphore creation, interrupt context setup, task spawning with span creation, timeout/retry wrapping, and result collection. The length is justified by the complexity of parallel execution with proper error handling and observability."
@@ -109,7 +248,7 @@ use tracing::{Level, event};
 )]
 pub async fn execute_superstep<S: State>(
     pending_tasks: &[PendingTask<S>],
-    state: &S,
+    state: &Arc<S>,
     nodes: &indexmap::IndexMap<String, Arc<dyn Node<S>>>,
     config: &RunnableConfig,
     cancellation_token: &CancellationToken,
@@ -145,6 +284,28 @@ where
     let (interrupt_tx, interrupt_rx) = mpsc::unbounded_channel();
     let interrupt_context = Arc::new(InterruptContext::new(resume_values, interrupt_tx));
 
+    let arc_state: Arc<S> = Arc::clone(state);
+
+    // Fast path for single-task supersteps without retry/timeout/error-handler.
+    // Execute inline (no tokio::spawn/JoinSet) to eliminate scheduler dispatch
+    // overhead that accumulates over thousands of sequential supersteps (e.g.,
+    // wide_state with 300-1200 iterations of single-node supersteps).
+    if let Some(result) = try_execute_single_task_inline(
+        pending_tasks,
+        &arc_state,
+        nodes,
+        config,
+        cancellation_token,
+        checkpointer,
+        error_handler_map,
+        retry_policies,
+        timeout_policies,
+    )
+    .await?
+    {
+        return Ok((result, interrupt_rx));
+    }
+
     let semaphore = Arc::new(tokio::sync::Semaphore::new(config.max_parallel_tasks));
     let mut join_set = JoinSet::new();
 
@@ -154,7 +315,13 @@ where
             JunctureError::execution(format!("Node '{}' not found", task.node_name))
         })?);
 
-        let task_state = task.state_override.clone().unwrap_or_else(|| state.clone());
+        // Resolve task state: typed override > shared Arc state.
+        // state_json must be resolved to state_override before calling execute_superstep
+        // (handled in PregelLoop::execute_superstep which has the DeserializeOwned bound).
+        let task_state: Arc<S> = task
+            .state_override
+            .clone()
+            .map_or_else(|| Arc::clone(&arc_state), Arc::new);
 
         let mut task_config = config.clone();
         let task_id = task.id.clone();
@@ -272,7 +439,7 @@ where
                                                 &exec_node_name,
                                                 policy,
                                                 |s, cfg| node.call(s, cfg),
-                                                task_state,
+                                                &*task_state,
                                                 &task_config,
                                             )
                                             .await
@@ -282,7 +449,7 @@ where
                                             &exec_node_name,
                                             policy,
                                             |s, cfg| node.call(s, cfg),
-                                            task_state,
+                                            &*task_state,
                                             &task_config,
                                         )
                                         .await
@@ -294,10 +461,10 @@ where
                                     if let Some(ref tracker) = task_config.budget_tracker {
                                         let tracker_ref = Arc::clone(tracker);
                                         crate::pregel::BUDGET_TRACKER.scope(tracker_ref, async move {
-                                            node.call(task_state, &task_config).await
+                                            node.call_arc(Arc::clone(&task_state), &task_config).await
                                         }).await
                                     } else {
-                                        node.call(task_state, &task_config).await
+                                        node.call_arc(Arc::clone(&task_state), &task_config).await
                                     }
                                 }).await
                             }
@@ -691,7 +858,7 @@ mod tests {
 
         let (result, _rx) = execute_superstep(
             &[],
-            &state,
+            &Arc::new(state.clone()),
             &nodes,
             &config,
             &token,
@@ -715,7 +882,8 @@ mod tests {
         let mut nodes = indexmap::IndexMap::new();
         nodes.insert(
             "test_node".to_string(),
-            NodeFnCommand(|_s| async move { Ok(crate::Command::end()) }).into_node("test_node"),
+            NodeFnCommand(|_s: &TestState| async move { Ok(crate::Command::end()) })
+                .into_node("test_node"),
         );
 
         let config = RunnableConfig::new();
@@ -730,7 +898,7 @@ mod tests {
 
         let (result, _rx) = execute_superstep(
             &tasks,
-            &state,
+            &Arc::new(state.clone()),
             &nodes,
             &config,
             &token,
@@ -757,7 +925,7 @@ mod tests {
         for i in 0..3 {
             nodes.insert(
                 format!("node_{i}"),
-                NodeFnCommand(move |_s| async move { Ok(crate::Command::end()) })
+                NodeFnCommand(move |_s: &TestState| async move { Ok(crate::Command::end()) })
                     .into_node(format!("node_{i}").as_str()),
             );
         }
@@ -773,7 +941,7 @@ mod tests {
 
         let (result, _rx) = execute_superstep(
             &tasks,
-            &state,
+            &Arc::new(state.clone()),
             &nodes,
             &config,
             &token,
@@ -798,7 +966,7 @@ mod tests {
         let mut nodes = indexmap::IndexMap::new();
         nodes.insert(
             "slow_node".to_string(),
-            NodeFnCommand(|_s| async move {
+            NodeFnCommand(|_s: &TestState| async move {
                 tokio::time::sleep(std::time::Duration::from_secs(10)).await;
                 Ok(crate::Command::end())
             })
@@ -820,7 +988,7 @@ mod tests {
 
         let result = execute_superstep(
             &tasks,
-            &state,
+            &Arc::new(state.clone()),
             &nodes,
             &config,
             &token,
@@ -854,7 +1022,7 @@ mod tests {
 
         let result = execute_superstep(
             &tasks,
-            &state,
+            &Arc::new(state.clone()),
             &nodes,
             &config,
             &token,
@@ -1177,7 +1345,7 @@ mod tests {
         assert_eq!(result, vec![None]);
     }
 
-    #[derive(Clone, Debug)]
+    #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
     struct TestState;
 
     impl State for TestState {
@@ -1271,7 +1439,7 @@ mod tests {
         let mut nodes = indexmap::IndexMap::new();
         nodes.insert(
             "flaky_node".to_string(),
-            NodeFnCommand(move |_s: TestState| {
+            NodeFnCommand(move |_s: &TestState| {
                 let counter = Arc::clone(&attempt_clone);
                 async move {
                     let n = counter.fetch_add(1, Ordering::Relaxed);
@@ -1313,7 +1481,7 @@ mod tests {
 
         let (result, _rx) = execute_superstep(
             &tasks,
-            &state,
+            &Arc::new(state.clone()),
             &nodes,
             &config,
             &token,
@@ -1348,7 +1516,7 @@ mod tests {
         let mut nodes = indexmap::IndexMap::new();
         nodes.insert(
             "always_fail".to_string(),
-            NodeFnCommand(move |_s: TestState| {
+            NodeFnCommand(move |_s: &TestState| {
                 let counter = Arc::clone(&attempt_clone);
                 async move {
                     counter.fetch_add(1, Ordering::Relaxed);
@@ -1386,7 +1554,7 @@ mod tests {
 
         let result = execute_superstep(
             &tasks,
-            &state,
+            &Arc::new(state.clone()),
             &nodes,
             &config,
             &token,
@@ -1420,7 +1588,7 @@ mod tests {
         let mut nodes = indexmap::IndexMap::new();
         nodes.insert(
             "cancel_node".to_string(),
-            NodeFnCommand(move |_s: TestState| {
+            NodeFnCommand(move |_s: &TestState| {
                 let counter = Arc::clone(&attempt_clone);
                 async move {
                     counter.fetch_add(1, Ordering::Relaxed);
@@ -1458,7 +1626,7 @@ mod tests {
 
         let result = execute_superstep(
             &tasks,
-            &state,
+            &Arc::new(state.clone()),
             &nodes,
             &config,
             &token,
@@ -1498,7 +1666,7 @@ mod tests {
         // node_a has a retry policy
         nodes.insert(
             "node_a".to_string(),
-            NodeFnCommand(move |_s: TestState| {
+            NodeFnCommand(move |_s: &TestState| {
                 let counter = Arc::clone(&clone_a);
                 async move {
                     counter.fetch_add(1, Ordering::Relaxed);
@@ -1510,7 +1678,7 @@ mod tests {
         // node_b has NO retry policy
         nodes.insert(
             "node_b".to_string(),
-            NodeFnCommand(move |_s: TestState| {
+            NodeFnCommand(move |_s: &TestState| {
                 let counter = Arc::clone(&clone_b);
                 async move {
                     counter.fetch_add(1, Ordering::Relaxed);
@@ -1556,7 +1724,7 @@ mod tests {
 
         let result = execute_superstep(
             &tasks,
-            &state,
+            &Arc::new(state.clone()),
             &nodes,
             &config,
             &token,
@@ -1594,7 +1762,8 @@ mod tests {
         let mut nodes = indexmap::IndexMap::new();
         nodes.insert(
             "simple_node".to_string(),
-            NodeFnCommand(|_s| async move { Ok(crate::Command::end()) }).into_node("simple_node"),
+            NodeFnCommand(|_s: &TestState| async move { Ok(crate::Command::end()) })
+                .into_node("simple_node"),
         );
 
         let config = RunnableConfig::new();
@@ -1609,7 +1778,7 @@ mod tests {
 
         let (result, _rx) = execute_superstep(
             &tasks,
-            &state,
+            &Arc::new(state.clone()),
             &nodes,
             &config,
             &token,
@@ -1637,7 +1806,7 @@ mod tests {
         let mut nodes = indexmap::IndexMap::new();
         nodes.insert(
             "fast_node".to_string(),
-            NodeFnCommand(|_s| async move {
+            NodeFnCommand(|_s: &TestState| async move {
                 // Completes quickly
                 Ok(crate::Command::end())
             })
@@ -1666,7 +1835,7 @@ mod tests {
 
         let (result, _rx) = execute_superstep(
             &tasks,
-            &state,
+            &Arc::new(state.clone()),
             &nodes,
             &config,
             &token,
@@ -1692,7 +1861,7 @@ mod tests {
         let mut nodes = indexmap::IndexMap::new();
         nodes.insert(
             "slow_node".to_string(),
-            NodeFnCommand(|_s| async move {
+            NodeFnCommand(|_s: &TestState| async move {
                 // Sleep longer than the timeout
                 tokio::time::sleep(std::time::Duration::from_secs(10)).await;
                 Ok(crate::Command::end())
@@ -1722,7 +1891,7 @@ mod tests {
 
         let result = execute_superstep(
             &tasks,
-            &state,
+            &Arc::new(state.clone()),
             &nodes,
             &config,
             &token,
@@ -1755,7 +1924,7 @@ mod tests {
         let mut nodes = indexmap::IndexMap::new();
         nodes.insert(
             "slow_retry_node".to_string(),
-            NodeFnCommand(move |_s: TestState| {
+            NodeFnCommand(move |_s: &TestState| {
                 let counter = Arc::clone(&attempt_clone);
                 async move {
                     let _n = counter.fetch_add(1, Ordering::Relaxed);
@@ -1806,7 +1975,7 @@ mod tests {
 
         let result = execute_superstep(
             &tasks,
-            &state,
+            &Arc::new(state.clone()),
             &nodes,
             &config,
             &token,
@@ -1847,11 +2016,12 @@ mod tests {
         // fast_node has no timeout -- should succeed even though slow_node times out
         nodes.insert(
             "fast_node".to_string(),
-            NodeFnCommand(|_s| async move { Ok(crate::Command::end()) }).into_node("fast_node"),
+            NodeFnCommand(|_s: &TestState| async move { Ok(crate::Command::end()) })
+                .into_node("fast_node"),
         );
         nodes.insert(
             "slow_node".to_string(),
-            NodeFnCommand(|_s| async move {
+            NodeFnCommand(|_s: &TestState| async move {
                 tokio::time::sleep(std::time::Duration::from_secs(10)).await;
                 Ok(crate::Command::end())
             })
@@ -1888,7 +2058,7 @@ mod tests {
 
         let (result, _rx) = execute_superstep(
             &tasks,
-            &state,
+            &Arc::new(state.clone()),
             &nodes,
             &config,
             &token,
@@ -1931,7 +2101,8 @@ mod tests {
         let mut nodes = indexmap::IndexMap::new();
         nodes.insert(
             "simple_node".to_string(),
-            NodeFnCommand(|_s| async move { Ok(crate::Command::end()) }).into_node("simple_node"),
+            NodeFnCommand(|_s: &TestState| async move { Ok(crate::Command::end()) })
+                .into_node("simple_node"),
         );
 
         let config = RunnableConfig::new();
@@ -1946,7 +2117,7 @@ mod tests {
 
         let (result, _rx) = execute_superstep(
             &tasks,
-            &state,
+            &Arc::new(state.clone()),
             &nodes,
             &config,
             &token,

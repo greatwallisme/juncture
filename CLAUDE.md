@@ -8,7 +8,7 @@ Juncture is a Rust implementation of LangGraph. The programming model is semanti
 
 ## Architecture
 
-6-crate workspace:
+6-crate workspace + 2 supporting directories:
 
 ```
 juncture/              # facade crate - prelude, LLM providers, Tool trait, prebuilt agents
@@ -17,9 +17,11 @@ juncture-derive/       # #[derive(State)] proc-macro generating Update structs, 
 juncture-checkpoint/   # CheckpointSaver trait, MemorySaver, SqliteSaver, PostgresSaver
 juncture-tracing/      # OpenTelemetry integration, node-level spans, token metrics
 juncture-store/        # Cross-thread persistent key-value storage (Store trait, MemoryStore)
+benchmarks/            # Juncture vs LangGraph performance comparison (6 scenarios, Rust + Python)
+examples/              # 9 self-contained examples (01-09, from basic state machine to error recovery)
 ```
 
-Each crate has its own `CLAUDE.md` with module-level details.
+Each crate, `benchmarks/`, and `examples/` has its own `CLAUDE.md` with module-level details.
 
 Key design: `#[derive(State)]` generates typed State/Update pairs with per-field `Reducer<T>` semantics at compile time. `FieldsChanged` is a u64 bitmask tracking which fields changed. `CowState<S>` (Arc-based copy-on-write) is the default State wrapper to avoid expensive clones. Pregel engine uses `tokio::spawn` + `JoinSet` for true multi-core parallelism with `Semaphore`-based bounded concurrency.
 

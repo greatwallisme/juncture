@@ -9,6 +9,7 @@ import sys
 import time
 
 import uvloop
+from bench_utils import get_cpu_time_ms, get_peak_rss_mb
 from langgraph._internal._runnable import RunnableCallable
 from langgraph.graph import MessagesState, StateGraph
 
@@ -66,20 +67,29 @@ def run_benchmark(num_nodes: int, num_iterations: int = 20) -> dict:
 
     # Timed runs
     times: list[float] = []
+    cpu_before = get_cpu_time_ms()
     for _ in range(num_iterations):
         start = time.perf_counter()
         uvloop.run(arun(graph, input_data, config))
         elapsed = time.perf_counter() - start
         times.append(elapsed)
+    cpu_after = get_cpu_time_ms()
+    rss = get_peak_rss_mb()
+
+    mean_ms = sum(times) / len(times) * 1000
 
     result = {
         "scenario": f"sequential_{num_nodes}",
         "num_nodes": num_nodes,
+        "node_count": num_nodes,
         "iterations": num_iterations,
         "times_ms": [t * 1000 for t in times],
-        "mean_ms": sum(times) / len(times) * 1000,
+        "mean_ms": mean_ms,
         "min_ms": min(times) * 1000,
         "max_ms": max(times) * 1000,
+        "cpu_ms": cpu_after - cpu_before,
+        "peak_rss_mb": rss,
+        "per_node_wall_us": mean_ms * 1000 / num_nodes,
     }
     return result
 

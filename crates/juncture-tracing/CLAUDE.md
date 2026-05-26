@@ -12,6 +12,7 @@ OpenTelemetry integration and structured tracing for Juncture graph execution.
 | `types.rs` | `LlmCacheKeyInput`, `LlmCachePolicy`, `ServerInfo` |
 | `config.rs` | `TracingConfig`, `init()` builder for OTLP setup (feature `otel`) |
 | `metrics.rs` | `MetricsRegistry` for OpenTelemetry metrics (feature `otel`) |
+| `propagation.rs` | Trace context propagation helpers for cross-service span linking |
 
 ## Span Naming Convention
 

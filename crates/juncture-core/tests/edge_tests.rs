@@ -5,7 +5,7 @@ use juncture_derive::State;
 use std::sync::Arc;
 
 // Test state
-#[derive(Debug, Clone, State)]
+#[derive(Debug, Clone, Default, State)]
 struct TestState {
     value: u32,
 }
