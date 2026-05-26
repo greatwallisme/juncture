@@ -1282,6 +1282,7 @@ name = "juncture"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "bytes",
  "chrono",
  "futures",
  "juncture-core",
@@ -1374,6 +1375,7 @@ name = "juncture-simple-example"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "dotenvy",
  "futures",
  "juncture",
  "juncture-checkpoint",

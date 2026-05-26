@@ -4,10 +4,12 @@
 //! Supports both streaming and non-streaming requests, function calling, and
 //! multimodal inputs.
 
+use std::pin::Pin;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use futures::{StreamExt, stream};
+use bytes::Bytes;
+use futures::{Stream, StreamExt, stream};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
@@ -219,6 +221,25 @@ impl ChatOpenAI {
     }
 }
 
+/// Boxed byte stream from an `OpenAI` SSE response.
+type ByteStream = Pin<Box<dyn Stream<Item = Result<Bytes, reqwest::Error>> + Send>>;
+
+/// State machine for the streaming unfold.
+///
+/// - `Pending`: initial state, need to send the HTTP request
+/// - `Active`: byte stream is open, reading SSE chunks from the same connection
+/// - `Done`: terminal state, no more data
+enum StreamState {
+    Pending {
+        client: Client,
+        api_key: String,
+        base_url: String,
+        request: OpenAIRequest,
+    },
+    Active(ByteStream),
+    Done,
+}
+
 #[async_trait]
 impl ChatModel for ChatOpenAI {
     #[allow(
@@ -300,8 +321,8 @@ impl ChatModel for ChatOpenAI {
 
         // Record span attributes
         if let Some(usage) = &api_response.usage {
-            tracing::Span::current().record(attrs::TOKENS_INPUT, usage.input_tokens);
-            tracing::Span::current().record(attrs::TOKENS_OUTPUT, usage.output_tokens);
+            tracing::Span::current().record(attrs::TOKENS_INPUT, usage.prompt_tokens);
+            tracing::Span::current().record(attrs::TOKENS_OUTPUT, usage.completion_tokens);
         }
 
         let has_tool_calls = api_response
@@ -329,12 +350,12 @@ impl ChatModel for ChatOpenAI {
         if let Some(usage) = &api_response.usage {
             tracing::debug!(
                 name: "juncture.llm.tokens.input",
-                tokens = usage.input_tokens,
+                tokens = usage.prompt_tokens,
                 model = %model,
             );
             tracing::debug!(
                 name: "juncture.llm.tokens.output",
-                tokens = usage.output_tokens,
+                tokens = usage.completion_tokens,
                 model = %model,
             );
         }
@@ -427,64 +448,80 @@ impl ChatModel for ChatOpenAI {
         let base_url = self.base_url.clone();
         let client = self.client.clone();
 
+        // Send ONE HTTP request, then keep the byte_stream in unfold state so all
+        // SSE chunks are read from the same connection.
+        let init: StreamState = StreamState::Pending {
+            client,
+            api_key,
+            base_url,
+            request,
+        };
+
         Box::pin(stream::unfold(
-            (client, api_key, base_url, request, false, Vec::new()),
-            |(client, api_key, base_url, request, done, mut buffer)| async move {
-                if done {
-                    return None;
-                }
+            (init, Vec::new()),
+            |(state, mut buffer)| async move {
+                let mut byte_stream = match state {
+                    StreamState::Pending {
+                        client,
+                        api_key,
+                        base_url,
+                        request,
+                    } => {
+                        let response = match client
+                            .post(format!("{}/chat/completions", base_url))
+                            .header("authorization", format!("Bearer {}", api_key))
+                            .header("content-type", "application/json")
+                            .json(&request)
+                            .send()
+                            .await
+                        {
+                            Ok(r) => r,
+                            Err(e) => {
+                                return Some((
+                                    Err(LlmError::NetworkError(e)),
+                                    (StreamState::Done, buffer),
+                                ));
+                            }
+                        };
 
-                let response = match client
-                    .post(format!("{}/chat/completions", base_url))
-                    .header("authorization", format!("Bearer {}", api_key))
-                    .header("content-type", "application/json")
-                    .json(&request)
-                    .send()
-                    .await
-                {
-                    Ok(r) => r,
-                    Err(e) => {
-                        return Some((
-                            Err(LlmError::NetworkError(e)),
-                            (client, api_key, base_url, request, true, buffer),
-                        ));
+                        let status = response.status();
+
+                        if !status.is_success() {
+                            let response_text = match response.text().await {
+                                Ok(t) => t,
+                                Err(e) => {
+                                    return Some((
+                                        Err(LlmError::NetworkError(e)),
+                                        (StreamState::Done, buffer),
+                                    ));
+                                }
+                            };
+
+                            let error = match parse_openai_error(&response_text, status) {
+                                Ok(_) => crate::llm::MessageChunk {
+                                    content: String::new(),
+                                    tool_call_chunks: Vec::new(),
+                                    usage_delta: None,
+                                },
+                                Err(e) => {
+                                    return Some((
+                                        Err(e),
+                                        (StreamState::Done, buffer),
+                                    ));
+                                }
+                            };
+
+                            return Some((
+                                Ok(error),
+                                (StreamState::Done, buffer),
+                            ));
+                        }
+
+                        Box::pin(response.bytes_stream())
                     }
+                    StreamState::Active(s) => s,
+                    StreamState::Done => return None,
                 };
-
-                let status = response.status();
-
-                if !status.is_success() {
-                    let response_text = match response.text().await {
-                        Ok(t) => t,
-                        Err(e) => {
-                            return Some((
-                                Err(LlmError::NetworkError(e)),
-                                (client, api_key, base_url, request, true, buffer),
-                            ));
-                        }
-                    };
-
-                    let error = match parse_openai_error(&response_text, status) {
-                        Ok(_) => crate::llm::MessageChunk {
-                            content: String::new(),
-                            tool_call_chunks: Vec::new(),
-                            usage_delta: None,
-                        },
-                        Err(e) => {
-                            return Some((
-                                Err(e),
-                                (client, api_key, base_url, request, true, buffer),
-                            ));
-                        }
-                    };
-
-                    return Some((
-                        Ok(error),
-                        (client, api_key, base_url, request, true, buffer),
-                    ));
-                }
-
-                let mut byte_stream = response.bytes_stream();
 
                 while let Some(chunk_result) = byte_stream.next().await {
                     let chunk = match chunk_result {
@@ -492,7 +529,7 @@ impl ChatModel for ChatOpenAI {
                         Err(e) => {
                             return Some((
                                 Err(LlmError::NetworkError(e)),
-                                (client, api_key, base_url, request, true, buffer),
+                                (StreamState::Done, buffer),
                             ));
                         }
                     };
@@ -503,19 +540,18 @@ impl ChatModel for ChatOpenAI {
                         let line_bytes = buffer.drain(..=newline_pos).collect::<Vec<_>>();
                         let line = String::from_utf8_lossy(&line_bytes[..line_bytes.len() - 1]);
 
-                        // Skip empty lines and comments
                         let line = line.trim();
                         if line.is_empty() || line.starts_with(':') {
                             continue;
                         }
 
-                        // Parse SSE line format: "data: {...}" or "data: [DONE]"
                         if let Some(data_str) = line.strip_prefix("data: ") {
                             if data_str == "[DONE]" {
                                 return None;
                             }
 
-                            if let Ok(sse_chunk) = serde_json::from_str::<OpenAISSEChunk>(data_str)
+                            if let Ok(sse_chunk) =
+                                serde_json::from_str::<OpenAISSEChunk>(data_str)
                             {
                                 match convert_openai_sse_chunk(sse_chunk) {
                                     Ok(chunk) => {
@@ -525,14 +561,14 @@ impl ChatModel for ChatOpenAI {
                                         {
                                             return Some((
                                                 Ok(chunk),
-                                                (client, api_key, base_url, request, false, buffer),
+                                                (StreamState::Active(byte_stream), buffer),
                                             ));
                                         }
                                     }
                                     Err(e) => {
                                         return Some((
                                             Err(e),
-                                            (client, api_key, base_url, request, true, buffer),
+                                            (StreamState::Done, buffer),
                                         ));
                                     }
                                 }
@@ -659,7 +695,30 @@ enum OpenAIToolChoice {
 #[derive(Debug, Deserialize)]
 struct OpenAIResponse {
     choices: Vec<OpenAIChoice>,
-    usage: Option<TokenUsage>,
+    usage: Option<OpenAIUsage>,
+}
+
+/// `OpenAI` API usage object.
+///
+/// `OpenAI` uses `prompt_tokens` / `completion_tokens` (not `input_tokens` / `output_tokens`).
+#[derive(Debug, Clone, Deserialize)]
+#[expect(clippy::struct_field_names, reason = "field names must match OpenAI API JSON format")]
+struct OpenAIUsage {
+    #[allow(dead_code, reason = "deserialization target, field read indirectly")]
+    prompt_tokens: u64,
+    #[allow(dead_code, reason = "deserialization target, field read indirectly")]
+    completion_tokens: u64,
+    total_tokens: u64,
+}
+
+impl From<OpenAIUsage> for TokenUsage {
+    fn from(val: OpenAIUsage) -> Self {
+        Self {
+            input_tokens: val.prompt_tokens,
+            output_tokens: val.completion_tokens,
+            total_tokens: val.total_tokens,
+        }
+    }
 }
 
 /// `OpenAI` API choice.
@@ -829,7 +888,7 @@ fn convert_api_response(response: &OpenAIResponse) -> Result<Message, LlmError> 
     };
 
     let mut msg = Message::ai_with_tool_calls(content, tool_calls);
-    msg.usage.clone_from(&response.usage);
+    msg.usage = response.usage.clone().map(TokenUsage::from);
     Ok(msg)
 }
 
@@ -846,7 +905,7 @@ struct OpenAISSEChunk {
     #[allow(dead_code, reason = "deserialization target, fields read indirectly")]
     model: String,
     choices: Vec<OpenAIChoiceChunk>,
-    usage: Option<TokenUsage>,
+    usage: Option<OpenAIUsage>,
 }
 
 /// `OpenAI` SSE choice chunk.
@@ -922,7 +981,7 @@ fn convert_openai_sse_chunk(chunk: OpenAISSEChunk) -> Result<crate::llm::Message
     Ok(crate::llm::MessageChunk {
         content,
         tool_call_chunks,
-        usage_delta: chunk.usage,
+        usage_delta: chunk.usage.map(TokenUsage::from),
     })
 }
 

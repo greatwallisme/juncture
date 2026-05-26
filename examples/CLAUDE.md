@@ -1,13 +1,18 @@
 # CLAUDE.md -- examples
 
-9 self-contained binaries demonstrating Juncture graph execution patterns, from basic state machines to advanced features.
+15 self-contained binaries demonstrating Juncture graph execution patterns, from basic state machines to real LLM applications.
 
 ## Run Commands
 
 ```bash
-# Run any example
+# Run any mock example (no API key needed)
 cargo run -p juncture-simple-example --bin 01_state_machine
 cargo run -p juncture-simple-example --bin 07_human_in_the_loop
+
+# Run any real LLM example (requires .env configuration)
+cp .env.example .env  # then fill in your API key
+cargo run -p juncture-simple-example --bin 10_basic_chat
+cargo run -p juncture-simple-example --bin 13_react_agent
 ```
 
 ## Examples Overview
@@ -23,12 +28,31 @@ cargo run -p juncture-simple-example --bin 07_human_in_the_loop
 | 07 | `07_human_in_the_loop` | `CompileConfig` interrupts, `interrupt_before` |
 | 08 | `08_checkpoint_resume` | `MemorySaver`, `compile_with_checkpointer()`, thread_id |
 | 09 | `09_error_recovery` | Result propagation, error handling with `?` |
+| 10 | `10_basic_chat` | `ChatOpenAI`, single/multi-turn with real LLM |
+| 11 | `11_streaming_chat` | `ChatModel::stream`, token-by-token display |
+| 12 | `12_tool_calling` | `bind_tools`, tool execution loop with real LLM |
+| 13 | `13_react_agent` | `create_react_agent`, weather + math tools |
+| 14 | `14_multi_turn` | Conversation history accumulation, system prompts |
+| 15 | `15_structured_output` | `ToolChoice::Required`, JSON entity extraction |
 
 ## Progression
 
 01-03: Core graph patterns (state, reducers, routing)
-04-05: LLM integration (chat model, tool calling)
+04-05: LLM integration patterns (chat model, tool calling)
 06-09: Advanced features (streaming, HITL, checkpointing, errors)
+10-15: Real LLM applications (requires `.env` with API key)
+
+## Environment Configuration (Examples 10-15)
+
+Real LLM examples load configuration from `.env` via `dotenvy`:
+
+```bash
+OPENAI_API_KEY=sk-your-key          # Required
+OPENAI_BASE_URL=https://...         # Optional, for OpenAI-compatible APIs
+OPENAI_MODEL=gpt-4o                 # Optional, defaults to gpt-4o
+```
+
+Shared env loading is in `src/common.rs` (loaded via `#[path = "common.rs"] mod common;`).
 
 ## Package Name
 

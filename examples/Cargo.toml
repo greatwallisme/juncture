@@ -10,7 +10,7 @@ categories.workspace = true
 description = "Simple examples demonstrating Juncture graph execution patterns"
 
 [dependencies]
-juncture = { path = "../crates/juncture" }
+juncture = { path = "../crates/juncture", features = ["openai"] }
 juncture-core = { path = "../crates/juncture-core" }
 juncture-derive = { path = "../crates/juncture-derive" }
 juncture-checkpoint = { path = "../crates/juncture-checkpoint" }
@@ -20,6 +20,7 @@ serde_json = "1"
 futures = "0.3"
 async-trait = "0.1"
 uuid = { version = "1", features = ["v4"] }
+dotenvy = "0.15"
 
 [[bin]]
 name = "01_state_machine"
@@ -56,6 +57,30 @@ path = "src/08_checkpoint_resume.rs"
 [[bin]]
 name = "09_error_recovery"
 path = "src/09_error_recovery.rs"
+
+[[bin]]
+name = "10_basic_chat"
+path = "src/10_basic_chat.rs"
+
+[[bin]]
+name = "11_streaming_chat"
+path = "src/11_streaming_chat.rs"
+
+[[bin]]
+name = "12_tool_calling"
+path = "src/12_tool_calling.rs"
+
+[[bin]]
+name = "13_react_agent"
+path = "src/13_react_agent.rs"
+
+[[bin]]
+name = "14_multi_turn"
+path = "src/14_multi_turn.rs"
+
+[[bin]]
+name = "15_structured_output"
+path = "src/15_structured_output.rs"
 
 [lints]
 workspace = true
