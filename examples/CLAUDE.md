@@ -1,6 +1,6 @@
 # CLAUDE.md -- examples
 
-15 self-contained binaries demonstrating Juncture graph execution patterns, from basic state machines to real LLM applications.
+15 self-contained binaries (01-15) plus a standalone multi-agent deep-research application, demonstrating Juncture graph execution patterns from basic state machines to production-grade LLM pipelines.
 
 ## Run Commands
 
@@ -13,6 +13,11 @@ cargo run -p juncture-simple-example --bin 07_human_in_the_loop
 cp .env.example .env  # then fill in your API key
 cargo run -p juncture-simple-example --bin 10_basic_chat
 cargo run -p juncture-simple-example --bin 13_react_agent
+
+# Run deep-research (separate package, requires .env with OPENAI_* and optionally TAVILY_API_KEY)
+cargo run -p deep-research -- "What is the current state of quantum computing?"
+cargo run -p deep-research -- --model gpt-4o-mini "Explain recent AI breakthroughs"
+cargo run -p deep-research -- --verbose "Research topic here"
 ```
 
 ## Examples Overview
@@ -41,6 +46,27 @@ cargo run -p juncture-simple-example --bin 13_react_agent
 04-05: LLM integration patterns (chat model, tool calling)
 06-09: Advanced features (streaming, HITL, checkpointing, errors)
 10-15: Real LLM applications (requires `.env` with API key)
+deep-research: Multi-agent research assistant (separate package, see below)
+
+## Deep-Research Example
+
+A standalone multi-agent research application in its own package (`deep-research`). Demonstrates production-grade patterns: planner/researcher/writer orchestration, parallel sub-task execution, LLM middleware (logging + circuit breaker), fact extraction, and session persistence.
+
+```bash
+# Build and test
+cargo build -p deep-research
+cargo test -p deep-research
+
+# Run with default model (reads OPENAI_MODEL from .env, falls back to gpt-4o)
+cargo run -p deep-research -- "Your research question"
+
+# Options
+cargo run -p deep-research -- --model gpt-4o-mini "Topic"   # override model
+cargo run -p deep-research -- --verbose "Topic"              # verbose logging
+cargo run -p deep-research -- --thread-id session-1 "Topic"  # checkpoint persistence
+```
+
+Requires `.env` with `OPENAI_API_KEY`, `OPENAI_BASE_URL` (for OpenAI-compatible APIs), and optionally `TAVILY_API_KEY` for web search. See `examples/deep-research/CLAUDE.md` for full architecture details.
 
 ## Environment Configuration (Examples 10-15)
 
