@@ -32,7 +32,6 @@ mod config;
 mod llm;
 mod memory;
 mod orchestrator;
-mod permissions;
 mod state;
 mod tools;
 

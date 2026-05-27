@@ -50,7 +50,7 @@ deep-research: Multi-agent research assistant (separate package, see below)
 
 ## Deep-Research Example
 
-A standalone multi-agent research application in its own package (`deep-research`). Demonstrates production-grade patterns: planner/researcher/writer orchestration, parallel sub-task execution, LLM middleware (logging + circuit breaker), fact extraction, and session persistence.
+A standalone multi-agent research application in its own package (`deep-research`). Demonstrates production-grade patterns: LLM-driven orchestration via ReAct agent, subagent delegation, middleware chain (loop detection + error handling), fact extraction, and session persistence.
 
 ```bash
 # Build and test

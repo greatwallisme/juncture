@@ -57,6 +57,7 @@ impl FactStore {
     /// # Errors
     ///
     /// Returns error if search operation fails.
+    #[allow(dead_code, reason = "Public API reserved for future orchestrator integration")]
     pub async fn search_facts(&self, query: &str, limit: usize) -> Result<Vec<Fact>> {
         let search_query = SearchQuery {
             namespace_prefix: self.namespace.clone(),
@@ -72,7 +73,6 @@ impl FactStore {
             .await
             .map_err(|e| anyhow::anyhow!("Failed to search facts: {e}"))?;
 
-        // Parse results back into Fact structs
         let mut facts = Vec::new();
         for search_item in result.items {
             if let Ok(fact) = serde_json::from_value::<Fact>(search_item.item.value) {
@@ -85,6 +85,7 @@ impl FactStore {
 
     /// Get the underlying store reference.
     #[must_use]
+    #[allow(dead_code, reason = "Public API reserved for future orchestrator integration")]
     pub const fn store(&self) -> &Arc<MemoryStore> {
         &self.store
     }

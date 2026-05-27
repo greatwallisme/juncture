@@ -31,9 +31,10 @@ schemars = { version = "0.8", optional = true }
 
 [features]
 default = []
-anthropic = ["reqwest", "bytes"]
-openai = ["reqwest", "bytes"]
-ollama = ["reqwest", "bytes"]
+anthropic = ["dep:reqwest", "dep:bytes"]
+openai = ["dep:reqwest", "dep:bytes"]
+ollama = ["dep:reqwest", "dep:bytes"]
+reqwest = ["dep:reqwest", "dep:bytes"]
 structured-output = ["schemars"]
 store = ["juncture-store"]
 

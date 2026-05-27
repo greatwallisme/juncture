@@ -5,11 +5,9 @@
 
 use juncture::llm::{ChatModel, Message, MockChatModel, ToolCall};
 use juncture::tools::Tool;
-use juncture_core::store::MemoryStore;
 
 // Import from the library being tested
-use deep_research::ResearchState;
-use deep_research::tools::{Calculator, MemorySearch, ReadFile, WebSearch};
+use deep_research::tools::{Calculator, ReadFile, WebSearch};
 
 // ---------------------------------------------------------------------------
 // Calculator Tool Tests
@@ -27,7 +25,6 @@ async fn test_calculator_tool() {
         "Calculator should successfully evaluate '2 + 3': {result:?}"
     );
     assert_eq!(result.unwrap(), "5");
-    // Calculator result is straightforward arithmetic
 }
 
 #[tokio::test]
@@ -61,10 +58,7 @@ async fn test_calculator_complex_expression() {
         result.is_ok(),
         "Calculator should evaluate complex expression: {result:?}"
     );
-    // Calculator evaluates left-to-right without operator precedence:
-    // ((10 + 2) * 5) - 3 = (12 * 5) - 3 = 60 - 3 = 57
     assert_eq!(result.unwrap(), "57");
-    // Calculator result is straightforward arithmetic
 }
 
 #[tokio::test]
@@ -182,78 +176,6 @@ async fn test_web_search_missing_query() {
 }
 
 // ---------------------------------------------------------------------------
-// Memory Search Tool Tests
-// ---------------------------------------------------------------------------
-
-#[tokio::test]
-async fn test_memory_search_without_store() {
-    let search = MemorySearch::new(None);
-    let result = search.invoke(serde_json::json!({"query": "test"})).await;
-
-    assert!(
-        result.is_err(),
-        "MemorySearch should return error when store is not configured: {result:?}"
-    );
-
-    let err = result.unwrap_err();
-    let err_msg = err.to_string();
-    assert!(
-        err_msg.contains("store") || err_msg.contains("configured") || err_msg.contains("disabled"),
-        "Error message should mention missing store configuration: {err_msg}"
-    );
-}
-
-#[tokio::test]
-async fn test_memory_search_with_empty_store() {
-    let store = MemoryStore::new();
-    let search = MemorySearch::new(Some(std::sync::Arc::new(store)));
-    let result = search
-        .invoke(serde_json::json!({"query": "test", "limit": 5}))
-        .await;
-
-    assert!(
-        result.is_ok(),
-        "MemorySearch should succeed even with empty store: {result:?}"
-    );
-
-    let output = result.unwrap();
-    assert!(
-        output.contains("No relevant facts") || output.contains("not found"),
-        "Output should indicate no facts found: {output}"
-    );
-}
-
-// ---------------------------------------------------------------------------
-// State Initialization Tests
-// ---------------------------------------------------------------------------
-
-#[test]
-fn test_research_state_default() {
-    let state = ResearchState::default();
-
-    assert!(
-        state.messages.is_empty(),
-        "Default state should have empty messages"
-    );
-    assert!(
-        state.plan.is_empty(),
-        "Default state should have empty plan"
-    );
-    assert!(
-        state.findings.is_empty(),
-        "Default state should have empty findings"
-    );
-    assert!(
-        state.report.is_none(),
-        "Default state should have None report"
-    );
-    assert!(
-        state.query.is_empty(),
-        "Default state should have empty query"
-    );
-}
-
-// ---------------------------------------------------------------------------
 // MockChatModel Tests
 // ---------------------------------------------------------------------------
 
@@ -270,7 +192,6 @@ async fn test_mock_chat_model_basic() {
     );
 
     let response = result.unwrap();
-    // Verify response role is AI
     assert_eq!(response.role, juncture::llm::Role::Ai);
     assert_eq!(mock.model_name(), "test-model");
 }

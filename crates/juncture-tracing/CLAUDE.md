@@ -2,17 +2,19 @@
 
 OpenTelemetry integration and structured tracing for Juncture graph execution.
 
-## Module Map
+## Structure
 
-| Module | Responsibility |
-|--------|---------------|
-| `spans.rs` | Span name constants (`juncture.graph.invoke`, etc.) and attribute key constants (`juncture.thread.id`, etc.) |
-| `callback.rs` | `GraphCallbackHandler`, `GraphInterruptEvent`, `GraphResumeEvent` for hooking into graph lifecycle |
-| `test_utils.rs` | `TestMetricsCollector` for asserting metrics in tests |
-| `types.rs` | `LlmCacheKeyInput`, `LlmCachePolicy`, `ServerInfo` |
-| `config.rs` | `TracingConfig`, `init()` builder for OTLP setup (feature `otel`) |
-| `metrics.rs` | `MetricsRegistry` for OpenTelemetry metrics (feature `otel`) |
-| `propagation.rs` | Trace context propagation helpers for cross-service span linking |
+```
+src/
+  lib.rs          -- crate root, re-exports
+  spans.rs        -- Span name constants and attribute key constants
+  callback.rs     -- GraphCallbackHandler, GraphInterruptEvent, GraphResumeEvent
+  test_utils.rs   -- TestMetricsCollector for asserting metrics in tests
+  types.rs        -- LlmCacheKeyInput, LlmCachePolicy, ServerInfo
+  config.rs       -- TracingConfig, init() builder for OTLP setup (feature `otel`)
+  metrics.rs      -- MetricsRegistry for OpenTelemetry metrics (feature `otel`)
+  propagation.rs  -- Trace context propagation helpers for cross-service span linking
+```
 
 ## Span Naming Convention
 

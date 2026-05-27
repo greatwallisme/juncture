@@ -4,30 +4,37 @@ Core types and engine for Juncture. This is the largest crate; all other crates 
 
 ## Module Map
 
+### Directory modules (multi-file)
+
+| Module | Files | Responsibility |
+|--------|-------|---------------|
+| `state/` | `mod.rs`, `trait_.rs`, `channel.rs`, `messages.rs` | `State` trait, `CowState<S>` (Arc copy-on-write), `FieldsChanged` (u64 bitmask), `Reducer<T>` trait, channel types (`UntrackedChannel`, `EphemeralChannel`, `DeltaChannel`, `LastValueAfterFinishChannel`, `NamedBarrierChannel`, `TopicChannel`), `Overwrite<T>` serde wrapper, `MessagesState`/`MessagesStateUpdate` (pre-built chat state with append reducer), `Message`, `Content`, `Role`, `ToolCall` |
+| `graph/` | `mod.rs`, `builder.rs`, `compiled.rs`, `remote.rs`, `topology.rs` | `StateGraph<S,I,O>` builder (3 type params), `CompiledGraph<S,I,O>`, topology validation, `RemoteGraph`, `RetryPolicy`, `TimeoutPolicy`, `CompileConfig`, `GraphOutput`, `DrawableGraph` |
+| `pregel/` | `mod.rs`, `loop_.rs`, `runner.rs`, `scheduler.rs`, `protocol.rs`, `budget.rs`, `context.rs`, `durability.rs`, `types.rs` | Pregel execution engine: `PregelLoop<S>`, `execute_superstep()`, task scheduling (`compute_next_tasks`, `apply_writes`), `BudgetConfig`, `BudgetTracker`, `Durability` modes, streaming, `PregelProtocol` |
+| `node/` | `mod.rs`, `trait.rs`, `into_node.rs` | `Node<S>` trait, `IntoNode` conversions via wrapper types (`NodeFnUpdate`, `NodeFnCommand`, `NodeFnUpdateWithRuntime`, etc.) |
+| `edge/` | `mod.rs`, `types.rs`, `compiled.rs` | `Edge`, `Router`, `PathMap`, `TriggerTable<S>`, `START`/`END` sentinels |
+| `interrupt/` | `mod.rs`, `context.rs` | HITL: `InterruptSignal` (with timestamp), `ResumeValue` (single/ID-based/namespace-based), `Scratchpad`, `interrupt!` macro, `interrupt_with_ctx!` macro, `InterruptContext`, `validate_resume_coverage()` |
+| `func/` | `mod.rs` | Functional API: `Runtime<S>`, `compile_entrypoint()`, `compile_entrypoint_with_config()` -- lightweight wrapper around StateGraph for function-based workflow definition |
+
+### Flat file modules
+
 | Module | Responsibility |
 |--------|---------------|
-| `state/` | `State` trait, `CowState<S>` (Arc copy-on-write), `FieldsChanged` (u64 bitmask), `Reducer<T>` trait, channel types (`UntrackedChannel`, `EphemeralChannel`, `DeltaChannel`, `LastValueAfterFinishChannel`, `NamedBarrierChannel`, `TopicChannel`), `Overwrite<T>` serde wrapper, `MessagesState` (pre-built chat state with append reducer) |
-| `graph/` | `StateGraph<S,I,O>` builder (3 type params), `CompiledGraph<S,I,O>`, topology validation, `RemoteGraph`, `RetryPolicy`, `TimeoutPolicy`, `CompileConfig` |
-| `pregel/` | Pregel execution engine: `PregelLoop<S>`, `execute_superstep()`, task scheduling (`compute_next_tasks`, `apply_writes`), `BudgetConfig`, `BudgetTracker`, `Durability` modes, streaming |
-| `node/` | `Node<S>` trait, `IntoNode` conversions via wrapper types (`NodeFnUpdate`, `NodeFnCommand`, `NodeFnUpdateWithRuntime`, etc.) |
-| `edge/` | `Edge`, `Router`, `PathMap`, `TriggerTable<S>`, `START`/`END` sentinels |
-| `interrupt/` | HITL: `InterruptSignal` (with timestamp), `ResumeValue` (single/ID-based/namespace-based), `Scratchpad`, `interrupt!` macro, `InterruptContext`, `validate_resume_coverage()` |
-| `command/` | `Command<S>`, `Goto`, `SendTarget`, `GraphTarget`, `ParentCommand`, `Final<V,S>` for node return routing |
-| `subgraph/` | `StateSubset<Parent>` trait (proc-macro generated), `SubgraphConfig`, `SubgraphNode`, `SubgraphMount`, `SubgraphTransformer` |
-| `runtime/` | `Runtime<C>` (context, store, stream, heartbeat, previous value, execution info) |
-| `stream/` | `StreamEvent`, `StreamMode`, `StreamTransformer`, `EventEmitter`, `ToolsEvent` (with timestamp/success), `MessageBatchConfig`, `StreamConfig`, `StreamResumption`, transformers (`JsonParse`, `FilterFields`, `Batch`) |
-| `checkpoint/` | `CheckpointSaver` trait, `Checkpoint`, `CheckpointMetadata`, `CheckpointNamespace`, `PendingWrite` |
-| `config/` | `RunnableConfig` (with `with_run_id()`), `CacheConfig`, `CachePolicy`, `TaskConfig`, `EntrypointConfig` |
-| `func/` | Functional API: `Runtime<S>`, `compile_entrypoint()`, `compile_entrypoint_with_config()` -- lightweight wrapper around StateGraph for function-based workflow definition |
-| `store/` | `Store` trait, `MemoryStore`, `SqliteStore`, `PostgresStore`, `FilterExpr`, `SearchQuery`, `TTLConfig`, `IndexConfig`, `EmbeddingFunc` (cross-thread KV storage with optional vector search) |
-| `llm/` | `ChatModel` trait, `ToolDefinition`, `CallOptions`, `LlmError` (`Other` variant holds `Box<dyn Error + Send + Sync>`) |
-| `tools/` | `Tool<S>` trait, `ToolRuntime<S>` (with `emit_tool_started`/`emit_tool_finished`), `ToolNode`, `ToolNodeConfig`, `ToolExecutionTrace`, `tools_condition` |
-| `prebuilt/` | `PromptSource`, `ReactAgentConfig` |
-| `observability/` | `MetricsCollector` trait, `GraphLifecycleCallback` trait, `CacheKeyInput`, `LlmCachePolicy`, `ServerInfo` |
-| `error/` | `JunctureError`, `ErrorCode`, `NodeTimeoutError`, `InvalidUpdateError` |
-| `chat/` | `ChatAnthropic`, `ChatOpenAI`, `ChatOllama` (thin re-exports; real impls in facade crate) |
-| `send/` | `Send` for dynamic fan-out |
-| `client/` | `GraphClient`, `JunctureClient`, `StateSnapshot`, `Thread` for remote graph access |
+| `command.rs` | `Command<S>`, `Goto`, `SendTarget`, `GraphTarget`, `ParentCommand`, `Final<V,S>` for node return routing |
+| `subgraph.rs` | `StateSubset<Parent>` trait (proc-macro generated), `SubgraphConfig`, `SubgraphNode`, `SubgraphMount`, `SubgraphTransformer`, `SubgraphPersistence` |
+| `runtime.rs` | `Runtime<C>` (context, store, stream, heartbeat, previous value, execution info), `Heartbeat`, `HeartbeatWatcher`, `RunControl` |
+| `stream.rs` | `StreamEvent`, `StreamMode`, `StreamTransformer`, `EventEmitter`, `ToolsEvent` (with timestamp/success), `MessageBatchConfig`, `StreamConfig`, `StreamResumption`, transformers (`JsonParse`, `FilterFields`, `Batch`), `StreamWriter` |
+| `checkpoint.rs` | `CheckpointSaver` trait, `Checkpoint`, `CheckpointMetadata`, `CheckpointNamespace`, `PendingWrite`, `CHECKPOINT_NS_SEPARATOR` |
+| `config.rs` | `RunnableConfig` (with `with_run_id()`), `CacheConfig`, `CachePolicy`, `TaskConfig`, `EntrypointConfig` |
+| `store.rs` | `Store` trait, `MemoryStore`, `FilterExpr`, `SearchQuery`, `TTLConfig`, `IndexConfig`, `EmbeddingFunc` (cross-thread KV storage with optional vector search) |
+| `llm.rs` | `ChatModel` trait, `ToolDefinition`, `CallOptions`, `LlmError` (`Other` variant holds `Box<dyn Error + Send + Sync>`) |
+| `tools.rs` | `Tool<S>` trait, `ToolRuntime<S>` (with `emit_tool_started`/`emit_tool_finished`), `ToolNode`, `ToolNodeConfig`, `ToolExecutionTrace`, `tools_condition` |
+| `prebuilt.rs` | `PromptSource`, `ReactAgentConfig` |
+| `observability.rs` | `MetricsCollector` trait, `GraphLifecycleCallback` trait, `CacheKeyInput`, `LlmCachePolicy`, `ServerInfo` |
+| `error.rs` | `JunctureError`, `ErrorCode`, `NodeTimeoutError`, `InvalidUpdateError` |
+| `chat.rs` | `ChatAnthropic`, `ChatOpenAI`, `ChatOllama` (thin re-exports; real impls in facade crate) |
+| `send.rs` | `Send` for dynamic fan-out |
+| `client.rs` | `GraphClient`, `JunctureClient`, `StateSnapshot`, `Thread` for remote graph access |
 
 ## Key Design Patterns
 
@@ -52,6 +59,11 @@ Fields use `Reducer<T>` to define merge semantics: `ReplaceReducer` (one writer,
 ### StateGraph compilation
 `StateGraph::compile()` produces `CompiledGraph<S,I,O>` (no checkpointer). Use `compile_with_checkpointer()` or `compile_with_config()` for persistence. `add_node()` takes 7 args: name, node (impl IntoNode), defer, metadata, destinations, retry_policies, timeout_policies.
 
+### Macros
+- `interrupt!(payload)` / `interrupt!("id", payload)` -- HITL interrupt using task-local context
+- `interrupt_with_ctx!(ctx, payload)` -- HITL interrupt with explicit context
+- `parent_command!("target")` -- subgraph-to-parent routing
+
 ## Features
 
 - `otel` -- OpenTelemetry integration
@@ -60,4 +72,4 @@ Fields use `Reducer<T>` to define merge semantics: `ReplaceReducer` (one writer,
 
 ## Tests
 
-Integration tests in `tests/` cover: `derive_state`, `edge_tests`, `interrupt_tests`, `node_tests`, `runtime_tests`.
+Integration tests in `tests/` cover: `derive_state`, `edge_tests`, `interrupt_tests`, `node_tests`, `runtime_tests`, `fanout_perf_test`.

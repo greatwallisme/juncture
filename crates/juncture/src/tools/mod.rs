@@ -51,6 +51,7 @@
 //! let results = tool_node.execute(&messages).await?;
 //! ```
 
+pub mod builtin;
 mod condition;
 mod error;
 mod interceptor;
@@ -61,6 +62,9 @@ mod trait_;
 mod transformer;
 mod validation;
 
+pub use builtin::ThinkTool;
+#[cfg(feature = "reqwest")]
+pub use builtin::WebFetchTool;
 pub use condition::{tools_condition, tools_condition_from_messages};
 pub use error::ToolError;
 pub use interceptor::{CompositeInterceptor, NopToolInterceptor, ToolInterceptor};

@@ -2,6 +2,14 @@
 
 Proc-macro crate providing `#[derive(State)]`. Has no runtime dependencies beyond `syn`, `quote`, `proc-macro2`.
 
+## Structure
+
+```
+src/
+  lib.rs           -- proc-macro entry point
+  state_derive.rs  -- State derive implementation
+```
+
 ## What the macro generates
 
 For a struct `Foo` with fields `a: T1, b: T2, ...`:

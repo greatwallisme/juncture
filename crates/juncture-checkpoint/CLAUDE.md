@@ -2,17 +2,19 @@
 
 Checkpoint persistence for Juncture graph executions. Provides save/restore of complete execution state for time-travel debugging, crash recovery, and HITL workflows.
 
-## Module Map
+## Structure
 
-| Module | Responsibility |
-|--------|---------------|
-| `memory.rs` | `MemorySaver` -- in-memory `CheckpointSaver` using `Arc<RwLock<HashMap>>`. Supports TTL via `with_ttl_config()` and lazy cleanup via `lazy_cleanup()`. For dev/testing. |
-| `types.rs` | `DeltaSnapshot`, `ChannelDelta`, `TtlConfig` (with `is_expired()`), `recover_from_deltas()` ancestor-walk recovery. Re-exports checkpoint types from `juncture-core`. |
-| `serde.rs` | Serialization backends: `JsonSerializer`, `MsgpackSerializer`, `JsonPlusSerializer`. `detect_format()` auto-detects. `EncryptedSerializer` (feature-gated). |
-| `cache.rs` | `BaseCache` and `MemoryCache` for checkpoint caching. |
-| `error.rs` | `CheckpointError` enum. |
-| `sqlite.rs` | `SqliteSaver` (feature `sqlite`) -- persistent SQLite storage. Includes `migrate_checkpoint_schema()` for schema version validation on load. |
-| `postgres.rs` | `PostgresSaver` (feature `postgres`) -- persistent Postgres storage. Same migration logic as sqlite. |
+```
+src/
+  lib.rs       -- crate root, re-exports
+  memory.rs    -- MemorySaver implementation
+  types.rs     -- DeltaSnapshot, ChannelDelta, TtlConfig, recover_from_deltas()
+  serde.rs     -- JsonSerializer, MsgpackSerializer, JsonPlusSerializer, EncryptedSerializer
+  cache.rs     -- BaseCache, MemoryCache for checkpoint caching
+  error.rs     -- CheckpointError enum
+  sqlite.rs    -- SqliteSaver (feature `sqlite`)
+  postgres.rs  -- PostgresSaver (feature `postgres`)
+```
 
 ## Key Types
 
@@ -21,6 +23,9 @@ Checkpoint persistence for Juncture graph executions. Provides save/restore of c
 - Pending writes: `(thread_id, checkpoint_id, checkpoint_ns) -> Vec<PendingWrite>`
 - `TtlConfig` controls checkpoint expiration; `MemorySaver::with_ttl_config()` sets TTL, `lazy_cleanup()` garbage-collects expired entries
 - `recover_from_deltas()` implements ancestor-walk recovery from delta-only checkpoints
+- Serialization backends: `JsonSerializer`, `MsgpackSerializer`, `JsonPlusSerializer`; `detect_format()` auto-detects
+- `EncryptedSerializer` (feature-gated `encryption`) using AES-GCM + PBKDF2
+- `migrate_checkpoint_schema()` for schema version validation on load (sqlite, postgres)
 
 ## Features
 

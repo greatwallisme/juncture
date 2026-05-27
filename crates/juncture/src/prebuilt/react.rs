@@ -65,7 +65,7 @@ type ModelSelector = Arc<dyn Fn(&MessagesState) -> CallOptions + Send + Sync>;
 /// The `tools` module defines [`ToolDefinition`] with `name`, `description`, and
 /// `parameters` fields. The `llm` module defines its own [`LlmToolDefinition`] with
 /// the same fields. This function converts between them.
-fn convert_tool_defs(defs: &[ToolDefinition]) -> Vec<LlmToolDefinition> {
+pub(super) fn convert_tool_defs(defs: &[ToolDefinition]) -> Vec<LlmToolDefinition> {
     defs.iter()
         .map(|d| LlmToolDefinition {
             name: d.name.clone(),
@@ -75,12 +75,48 @@ fn convert_tool_defs(defs: &[ToolDefinition]) -> Vec<LlmToolDefinition> {
         .collect()
 }
 
-/// Create a `ReAct` agent with default configuration.
+/// Create an agent with default configuration.
 ///
 /// Builds a graph that alternates between LLM reasoning and tool execution.
 /// The agent calls the LLM, and if the response contains tool calls, the
 /// tools are executed and the results are fed back. This continues until
 /// the LLM produces a response without tool calls.
+///
+/// This is the base factory. [`create_react_agent`] delegates to this function.
+///
+/// # Arguments
+///
+/// * `model` - The LLM model to use for reasoning.
+/// * `tools` - The tools available to the agent.
+///
+/// # Errors
+///
+/// Returns [`TopologyError`] if the graph cannot be compiled, for example
+/// if node names conflict.
+///
+/// # Example
+///
+/// ```ignore
+/// use juncture::llm::MockChatModel;
+/// use juncture::prebuilt::create_agent;
+/// use juncture::tools::Tool;
+///
+/// let model = MockChatModel::new("gpt-4").with_response("Hello!");
+/// let tools: Vec<Box<dyn Tool>> = vec![];
+///
+/// let graph = create_agent(model, tools)?;
+/// ```
+pub fn create_agent<M: ChatModel>(
+    model: M,
+    tools: Vec<Box<dyn Tool>>,
+) -> Result<CompiledGraph<MessagesState>, TopologyError> {
+    create_agent_with_config(model, tools, ReactAgentConfig::default())
+}
+
+/// Create a `ReAct` agent with default configuration.
+///
+/// Delegates to [`create_agent`]. Retained for backward compatibility and
+/// semantic clarity when building ReAct-pattern agents.
 ///
 /// # Arguments
 ///
@@ -108,12 +144,12 @@ pub fn create_react_agent<M: ChatModel>(
     model: M,
     tools: Vec<Box<dyn Tool>>,
 ) -> Result<CompiledGraph<MessagesState>, TopologyError> {
-    create_react_agent_with_config(model, tools, ReactAgentConfig::default())
+    create_agent(model, tools)
 }
 
 /// Create a `ReAct` agent with custom configuration.
 ///
-/// Like [`create_react_agent`], but accepts a [`ReactAgentConfig`] for
+/// Like [`create_agent`], but accepts a [`ReactAgentConfig`] for
 /// additional options such as system prompts and interrupt settings.
 ///
 /// # Arguments
@@ -130,7 +166,7 @@ pub fn create_react_agent<M: ChatModel>(
 ///
 /// ```ignore
 /// use juncture::llm::MockChatModel;
-/// use juncture::prebuilt::{create_react_agent_with_config, ReactAgentConfig};
+/// use juncture::prebuilt::{create_agent_with_config, ReactAgentConfig};
 /// use juncture::tools::Tool;
 ///
 /// let model = MockChatModel::new("gpt-4").with_response("Hello!");
@@ -140,13 +176,13 @@ pub fn create_react_agent<M: ChatModel>(
 ///     ..Default::default()
 /// };
 ///
-/// let graph = create_react_agent_with_config(model, tools, config)?;
+/// let graph = create_agent_with_config(model, tools, config)?;
 /// ```
 #[allow(
     clippy::needless_pass_by_value,
     reason = "model ownership is transferred into the graph"
 )]
-pub fn create_react_agent_with_config<M: ChatModel>(
+pub fn create_agent_with_config<M: ChatModel>(
     model: M,
     tools: Vec<Box<dyn Tool>>,
     config: ReactAgentConfig,
@@ -183,6 +219,49 @@ pub fn create_react_agent_with_config<M: ChatModel>(
     graph.add_edge("tools", "agent");
 
     graph.compile()
+}
+
+/// Create a `ReAct` agent with custom configuration.
+///
+/// Delegates to [`create_agent_with_config`]. Retained for backward
+/// compatibility and semantic clarity when building ReAct-pattern agents.
+///
+/// # Arguments
+///
+/// * `model` - The LLM model to use for reasoning.
+/// * `tools` - The tools available to the agent.
+/// * `config` - Configuration options for the agent.
+///
+/// # Errors
+///
+/// Returns [`TopologyError`] if the graph cannot be compiled.
+///
+/// # Example
+///
+/// ```ignore
+/// use juncture::llm::MockChatModel;
+/// use juncture::prebuilt::{create_react_agent_with_config, ReactAgentConfig};
+/// use juncture::tools::Tool;
+///
+/// let model = MockChatModel::new("gpt-4").with_response("Hello!");
+/// let tools: Vec<Box<dyn Tool>> = vec![];
+/// let config = ReactAgentConfig {
+///     system_message: Some("You are a helpful assistant.".to_string()),
+///     ..Default::default()
+/// };
+///
+/// let graph = create_react_agent_with_config(model, tools, config)?;
+/// ```
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "model ownership is transferred into the graph"
+)]
+pub fn create_react_agent_with_config<M: ChatModel>(
+    model: M,
+    tools: Vec<Box<dyn Tool>>,
+    config: ReactAgentConfig,
+) -> Result<CompiledGraph<MessagesState>, TopologyError> {
+    create_agent_with_config(model, tools, config)
 }
 
 /// Source for system prompts in agent nodes.
@@ -564,7 +643,7 @@ struct ToolNodeAdapter {
 impl ToolNodeAdapter {
     /// Create a new adapter wrapping the given tool node.
     #[must_use]
-    fn new(tool_node: Arc<ToolNode<MessagesState>>, store: Option<Arc<dyn Store>>) -> Self {
+        fn new(tool_node: Arc<ToolNode<MessagesState>>, store: Option<Arc<dyn Store>>) -> Self {
         Self { tool_node, store }
     }
 }

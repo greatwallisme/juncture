@@ -1,22 +1,80 @@
-//! Multi-agent research orchestrator using `StateGraph`.
+//! Multi-agent research orchestrator using LLM-driven delegation.
+//!
+//! This module builds a `ReAct` agent that uses `SubagentTool` to delegate
+//! research tasks to specialized sub-agents. The orchestrator decides
+//! when to delegate, what to research, and when to stop — replacing the
+//! fixed planner → coordinator → writer pipeline with LLM-driven control flow.
 
 use anyhow::Result;
-use futures::future::{FutureExt, join_all};
-use juncture::RunnableConfig;
-use juncture_checkpoint::MemorySaver;
-use juncture_core::error::JunctureError;
-use juncture_core::graph::StateGraph;
-use juncture_core::node::NodeFnUpdate;
-// Edge routing handled by set_entry_point/set_finish_point
-use std::sync::Arc;
+use juncture::prebuilt::{
+    AgentConfig, AgentMiddlewareChain, AgentRegistry, LoopDetectionMiddleware, MessagesState,
+    ToolErrorHandlingMiddleware, create_agent_with_middleware,
+};
+use juncture::prebuilt::{InMemoryAgentRegistry, SubagentTool};
+use juncture::tools::ThinkTool;
 
-use crate::agents::plan_research_node;
-use crate::agents::research_sub_task;
-use crate::agents::write_report;
 use crate::config::ResearchConfig;
+use crate::llm::build_model_with_middleware;
 use crate::memory::FactStore;
-use crate::permissions::build_permission_guard;
-use crate::state::{ResearchState, ResearchStateUpdate, SubTask, TaskStatus};
+use crate::tools::{Calculator, ReadFile, WebSearch};
+
+/// System prompt for the research orchestrator.
+const ORCHESTRATOR_SYSTEM_PROMPT: &str = "\
+You are a research orchestrator. Your job is to conduct thorough research on the user's query \
+by delegating tasks to specialized research sub-agents and synthesizing their findings.
+
+## Workflow
+
+1. **Analyze the query** — Break it into distinct research aspects
+2. **Delegate research** — Use the `task` tool to send focused research tasks to sub-agents
+3. **Reflect after each delegation** — Use the `think` tool to analyze what you learned and what's still missing
+4. **Iterate** — Delegate additional tasks if gaps remain
+5. **Synthesize** — Once you have sufficient information, write a comprehensive report
+
+## Delegation Guidelines
+
+- Start with 1-2 sub-agents for the main aspects
+- Each sub-agent should receive a focused, specific research task
+- Use `think` after receiving sub-agent results to assess quality and gaps
+- Don't over-delegate — stop when you have enough to answer comprehensively
+- Maximum 3 delegation rounds before synthesizing
+
+## Report Format
+
+When writing the final report:
+- Use clear section headings (## for sections, ### for subsections)
+- Cite sources inline using [1], [2], [3] format
+- End with a ### Sources section listing each numbered source with title and URL
+- Write in paragraph form — be thorough, not just bullet points
+
+## Available Tools
+
+- `task` — Delegate research to a sub-agent (provide clear, focused task description)
+- `think` — Reflect on progress and plan next steps (use after each delegation)
+- `web_search` — Search the web for information directly
+- `calculator` — Perform arithmetic calculations
+- `read_file` — Read files from the current directory
+";
+
+/// System prompt for researcher sub-agents.
+const RESEARCHER_SYSTEM_PROMPT: &str = "\
+You are a research assistant. Your job is to gather information on the given topic \
+using web search and provide comprehensive findings with source citations.
+
+## Instructions
+
+1. Search for relevant information using `web_search`
+2. Use `think` after each search to analyze results and identify gaps
+3. Continue searching until you have sufficient information
+4. Return your findings with inline citations [1], [2], [3]
+5. End with a ### Sources section listing each source
+
+## Limits
+
+- Maximum 5 search calls per task
+- Stop when you have 3+ relevant sources
+- Focus on quality over quantity
+";
 
 /// Run the multi-agent research orchestrator.
 ///
@@ -24,208 +82,116 @@ use crate::state::{ResearchState, ResearchStateUpdate, SubTask, TaskStatus};
 ///
 /// * `config` - Research configuration
 /// * `query` - Research query
-/// * `thread_id` - Optional thread ID for checkpointing (enables session persistence)
+/// * `thread_id` - Optional thread ID for checkpointing
 ///
 /// # Errors
 ///
-/// Returns error if:
-/// - Graph execution fails
-/// - Node execution fails
-/// - Research agent fails
+/// Returns error if graph execution fails.
 pub async fn run_research(
     config: &ResearchConfig,
     query: &str,
-    thread_id: Option<&str>,
+    _thread_id: Option<&str>,
 ) -> Result<String> {
-    // Build the multi-agent graph
-    let mut graph = StateGraph::<ResearchState>::new();
-
-    // Create shared fact store for cross-session memory
-    let fact_store = FactStore::new("research_facts".to_string());
-
-    // Build permission guard and validate tool access
-    let permission_guard = build_permission_guard(config.require_approval);
-    tracing::info!(
-        "Permission guard initialized: web_search={:?}, calculator={:?}",
-        permission_guard.check("web_search").permission,
-        permission_guard.check("calculator").permission,
+    // Build the model with middleware
+    let model = build_model_with_middleware(
+        config.openai_api_key.clone(),
+        config.openai_base_url.clone(),
+        &config.model,
     );
 
-    // Add planner node
-    let planner_node = plan_research_node(config.clone(), fact_store.clone());
-    graph.add_node_simple("planner", planner_node)?;
+    // Create researcher sub-agent graph
+    let researcher_model = build_model_with_middleware(
+        config.openai_api_key.clone(),
+        config.openai_base_url.clone(),
+        &config.model,
+    );
+    let researcher_tools: Vec<Box<dyn juncture::tools::Tool>> = vec![
+        Box::new(WebSearch::new(config.tavily_api_key.clone())),
+        Box::new(ThinkTool::new()),
+    ];
+    let researcher_config = juncture::prebuilt::ReactAgentConfig {
+        system_message: Some(RESEARCHER_SYSTEM_PROMPT.to_string()),
+        max_iterations: Some(8),
+        ..Default::default()
+    };
+    let researcher_graph = juncture::prebuilt::create_react_agent_with_config(
+        researcher_model,
+        researcher_tools,
+        researcher_config,
+    )?;
 
-    // Add research coordinator node (uses parallel execution)
-    let coordinator_config = config.clone();
-    let coordinator_fact_store = fact_store.clone();
-    let coordinator_node = NodeFnUpdate(move |state: &ResearchState| {
-        let config = coordinator_config.clone();
-        let plan = state.plan.clone();
-        let fact_store = coordinator_fact_store.clone();
-        async move {
-            research_coordinator(&config, &plan, &fact_store)
-                .await
-                .map_err(|e| JunctureError::execution(e.to_string()))
-        }
-        .boxed()
-    });
-    graph.add_node_simple("research_coordinator", coordinator_node)?;
+    // Register the researcher sub-agent
+    let mut registry = InMemoryAgentRegistry::new();
+    registry.register(
+        "researcher".to_string(),
+        juncture::prebuilt::AgentEntry::from_graph(researcher_graph),
+    );
 
-    // Add writer node
-    let writer_config = config.clone();
-    let writer_node_fn = NodeFnUpdate(move |state: &ResearchState| {
-        let config = writer_config.clone();
-        let findings = state.findings.clone();
-        let query = state.query.clone();
-        let fact_store = fact_store.clone();
-        async move {
-            writer_node_impl(&config, &query, &findings, &fact_store)
-                .await
-                .map_err(|e| JunctureError::execution(e.to_string()))
-        }
-        .boxed()
-    });
-    graph.add_node_simple("writer", writer_node_fn)?;
+    // Build orchestrator tools
+    let fact_store = FactStore::new("research_facts".to_string());
+    let tools: Vec<Box<dyn juncture::tools::Tool>> = vec![
+        Box::new(SubagentTool::new(registry)),
+        Box::new(ThinkTool::new()),
+        Box::new(WebSearch::new(config.tavily_api_key.clone())),
+        Box::new(Calculator::new()),
+        Box::new(ReadFile::new()),
+    ];
 
-    // Add edges: planner -> research_coordinator -> writer
-    graph.set_entry_point("planner");
-    graph.add_edge("planner", "research_coordinator");
-    graph.add_edge("research_coordinator", "writer");
-    graph.set_finish_point("writer");
+    // Build middleware chain
+    let middleware = AgentMiddlewareChain::new()
+        .with(LoopDetectionMiddleware::new(3))
+        .with(ToolErrorHandlingMiddleware::new());
 
-    // Compile the graph with checkpointing for session persistence
-    let checkpointer = MemorySaver::new();
-    let compiled = graph.compile_with_checkpointer(Some(Arc::new(checkpointer)))?;
+    // Build the orchestrator agent
+    let agent_config = AgentConfig {
+        system_message: Some(ORCHESTRATOR_SYSTEM_PROMPT.to_string()),
+        middleware,
+        ..Default::default()
+    };
+    let graph = create_agent_with_middleware(model, tools, agent_config)?;
 
     // Build initial state
-    let initial_state = ResearchState {
-        messages: Vec::new(),
-        query: query.to_string(),
-        plan: Vec::new(),
-        findings: Vec::new(),
-        report: None,
+    let initial_state = MessagesState {
+        messages: vec![juncture::llm::Message::human(query)],
     };
 
-    // Build runnable config with optional thread_id for checkpointing
-    let mut runnable_config = RunnableConfig::new();
-    if let Some(tid) = thread_id {
-        runnable_config = runnable_config.with_thread_id(tid.to_string());
-    }
-
-    // Execute the graph
-    let output = compiled
-        .invoke_async(initial_state, &runnable_config)
+    // Execute the agent
+    let output = graph
+        .invoke_async(initial_state, &juncture::RunnableConfig::new())
         .await
-        .map_err(|e| anyhow::anyhow!("Graph execution failed: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("Agent execution failed: {e}"))?;
 
-    // Extract the final report
-    output
+    // Extract the final report from the last AI message
+    let report = output
         .value
-        .report
-        .ok_or_else(|| anyhow::anyhow!("No report generated"))
-}
-
-/// Research coordinator node that executes sub-tasks in parallel.
-///
-/// # Arguments
-///
-/// * `config` - Research configuration
-/// * `plan` - Current research plan
-/// * `fact_store` - Fact store for persisting extracted facts
-///
-/// # Errors
-///
-/// Returns error if research execution fails.
-async fn research_coordinator(
-    config: &ResearchConfig,
-    plan: &[SubTask],
-    fact_store: &FactStore,
-) -> Result<ResearchStateUpdate> {
-    // Filter for pending sub-tasks
-    let pending_tasks: Vec<&SubTask> = plan
+        .messages
         .iter()
-        .filter(|t| t.status == TaskStatus::Pending)
-        .collect();
+        .rev()
+        .find(|m| matches!(m.role, juncture_core::state::messages::Role::Ai))
+        .map_or_else(|| "No report generated".to_string(), |m| m.content_text().to_string());
 
-    if pending_tasks.is_empty() {
-        // All tasks completed, return empty update
-        return Ok(ResearchStateUpdate {
-            messages: None,
-            query: None,
-            plan: None,
-            findings: None,
-            report: None,
-        });
+    // Archive facts from the research session
+    if let Err(e) = archive_research_facts(&fact_store, query, &report).await {
+        tracing::warn!("Failed to archive research facts: {e}");
     }
 
-    // Execute researchers in parallel using join_all
-    let tasks: Vec<_> = pending_tasks
-        .iter()
-        .map(|task| research_sub_task(config, task, fact_store))
-        .collect();
-
-    let findings = join_all(tasks)
-        .await
-        .into_iter()
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| anyhow::anyhow!("Research execution failed: {e}"))?;
-
-    // Update plan with completed status
-    let updated_plan: Vec<SubTask> = plan
-        .iter()
-        .map(|task| {
-            if pending_tasks.iter().any(|pt| pt.id == task.id) {
-                SubTask {
-                    status: TaskStatus::Completed,
-                    ..task.clone()
-                }
-            } else {
-                task.clone()
-            }
-        })
-        .collect();
-
-    Ok(ResearchStateUpdate {
-        messages: None,
-        query: None,
-        plan: Some(updated_plan),
-        findings: Some(findings),
-        report: None,
-    })
+    Ok(report)
 }
 
-/// Writer node that synthesizes findings into a final report.
-///
-/// # Arguments
-///
-/// * `config` - Research configuration
-/// * `query` - Original research query
-/// * `findings` - Research findings
-/// * `fact_store` - Fact store for archiving research findings
-///
-/// # Errors
-///
-/// Returns error if report generation fails.
-async fn writer_node_impl(
-    config: &ResearchConfig,
+/// Archive research facts from the completed session.
+async fn archive_research_facts(
+    fact_store: &FactStore,
     query: &str,
-    findings: &[crate::state::Finding],
-    fact_store: &FactStore,
-) -> Result<ResearchStateUpdate> {
-    if findings.is_empty() {
-        return Err(anyhow::anyhow!("No findings to synthesize"));
-    }
-
-    // Generate the report
-    let generated_report: String = write_report(config, query, findings, fact_store).await?;
-
-    Ok(ResearchStateUpdate {
-        messages: None,
-        query: None,
-        plan: None,
-        findings: None,
-        report: Some(Some(generated_report)),
-    })
+    _report: &str,
+) -> Result<()> {
+    let fact = juncture::memory::Fact::new(
+        query.to_string(),
+        format!("Research completed on: {query}"),
+        "deep-research-agent".to_string(),
+        0.9,
+    );
+    fact_store.save_fact(&fact).await?;
+    Ok(())
 }
 
 // Rust guideline compliant 2026-05-27

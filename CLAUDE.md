@@ -8,17 +8,17 @@ Juncture is a Rust implementation of LangGraph. The programming model is semanti
 
 ## Architecture
 
-6-crate workspace + 2 supporting directories:
+6-crate workspace + 2 supporting packages:
 
 ```
-juncture/              # facade crate - prelude, LLM providers, Tool trait, prebuilt agents
+juncture/              # facade crate - prelude, LLM providers, Tool trait, prebuilt agents, middleware
 juncture-core/         # Channel system, StateGraph, Pregel engine, Node/Edge, Command, HITL, Subgraph, Func API
 juncture-derive/       # #[derive(State)] proc-macro generating Update structs, merge(), field_versions
 juncture-checkpoint/   # CheckpointSaver trait, MemorySaver, SqliteSaver, PostgresSaver
 juncture-tracing/      # OpenTelemetry integration, node-level spans, token metrics
-juncture-store/        # Cross-thread persistent key-value storage (Store trait, MemoryStore)
+juncture-store/        # Cross-thread persistent key-value storage (Store trait, MemoryStore) -- re-exports from juncture-core
 benchmarks/            # Juncture vs LangGraph performance comparison (6 scenarios, Rust + Python)
-examples/              # 9 self-contained examples (01-09, from basic state machine to error recovery)
+examples/              # 15 self-contained examples (01-15) + deep-research multi-agent application
 ```
 
 Each crate, `benchmarks/`, and `examples/` has its own `CLAUDE.md` with module-level details.
@@ -60,13 +60,15 @@ Hooks in `.claude/settings.local.json` auto-run verification on `.rs` file write
 
 ## Reference Projects
 
-| Project | Commit ID | Notes |
-|---------|-----------|-------|
-| **langgraph** (Python) | `076e2a3627206f5a1aef573aaca4a01e5af897ca` | Official LangGraph Python source - Channel architecture reference |
-| **langgraph-doc** | N/A (static docs) | LangGraph documentation - design reference |
-| **rust-langgraph** | `7828e62edeafb5b8e5b043fd988e3557b2536c95` | Community Rust port - alternative implementation reference |
-| **oxidizedgraph** | `2eadb5b56c265122d21f28187bd3feb2bca8ada4` | Rust implementation - reference for Rust patterns |
-| **cognis** | `f7a9406db69bbe587d379c95e55c45b6c02d1f9b` | Most complete Rust reference (7+ crates workspace) |
+| Project | Commit ID | Notes | Path |
+|---------|-----------|-------|------|
+| **langgraph** (Python) | `076e2a3627206f5a1aef573aaca4a01e5af897ca` | Official LangGraph Python source - Channel architecture reference | /root/project/reference/langgraph |
+| **langgraph-doc** | N/A (static docs) | LangGraph documentation - design reference | /root/project/reference/langgraph-doc |
+| **rust-langgraph** | `7828e62edeafb5b8e5b043fd988e3557b2536c95` | Community Rust port - alternative implementation reference | /root/project/reference/rust-langgraph |
+| **oxidizedgraph** | `2eadb5b56c265122d21f28187bd3feb2bca8ada4` | Rust implementation - reference for Rust patterns | /root/project/reference/oxidizedgraph |
+| **cognis** | `f7a9406db69bbe587d379c95e55c45b6c02d1f9b` | Most complete Rust reference (7+ crates workspace) | /root/project/reference/cognis |
+| **deer-flow** | `e7967a7fc37547f47d305b5057ec24aae6ef1591` | Agent application based on langchain and langraph | /root/project/reference/deer-flow |
+| **deepagents** | `0bd35b26f4d5a8a2bce8a5375910a8914f0d4790` | Application examples based on langchain and langgraph | /root/project/reference/deepagents |
 
 **Note**: Reference projects are active and may have updates since review date. Use commit IDs above for reproducibility.
 
