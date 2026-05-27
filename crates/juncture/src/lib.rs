@@ -4,6 +4,7 @@
 // convenient prelude, builder patterns, and LLM integration.
 
 pub mod llm;
+pub mod memory;
 pub mod prebuilt;
 pub mod tools;
 

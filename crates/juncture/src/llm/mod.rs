@@ -49,7 +49,9 @@ pub use juncture_core::{
     stream::{MessageChunk, ToolCallChunk},
 };
 
+mod circuit_breaker;
 mod message;
+mod middleware;
 mod mock;
 mod pricing;
 mod retry;
@@ -69,7 +71,9 @@ mod ollama;
 mod structured;
 
 // Public exports
+pub use circuit_breaker::*;
 pub use message::*;
+pub use middleware::*;
 pub use mock::MockChatModel;
 pub use pricing::{ModelPricing, PricingTable};
 pub use retry::RetryingModel;

@@ -40,10 +40,14 @@
 
 mod messages_state;
 mod react;
+mod subagent;
 
 pub use messages_state::MessagesState;
 pub use react::{
     AgentNode, PromptSource, ReactAgentConfig, create_react_agent, create_react_agent_with_config,
+};
+pub use subagent::{
+    AgentEntry, AgentRegistry, InMemoryAgentRegistry, IntoAgentEntry, SubagentError, SubagentTool,
 };
 
 // Rust guideline compliant 2026-05-19
