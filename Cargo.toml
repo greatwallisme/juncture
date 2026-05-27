@@ -8,6 +8,7 @@ members = [
     "crates/juncture-tracing",
     "crates/juncture-store",
     "examples",
+    "examples/deep-research",
     "benchmarks",
 ]
 
