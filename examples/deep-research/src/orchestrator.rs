@@ -7,7 +7,7 @@ use juncture_checkpoint::MemorySaver;
 use juncture_core::error::JunctureError;
 use juncture_core::graph::StateGraph;
 use juncture_core::node::NodeFnUpdate;
-use juncture_core::{END, START};
+// Edge routing handled by set_entry_point/set_finish_point
 use std::sync::Arc;
 
 use crate::agents::plan_research_node;
@@ -32,7 +32,7 @@ use crate::state::{ResearchState, ResearchStateUpdate, SubTask, TaskStatus};
 /// - Graph execution fails
 /// - Node execution fails
 /// - Research agent fails
-pub fn run_research(
+pub async fn run_research(
     config: &ResearchConfig,
     query: &str,
     thread_id: Option<&str>,
@@ -87,11 +87,11 @@ pub fn run_research(
     });
     graph.add_node_simple("writer", writer_node_fn)?;
 
-    // Add edges: START -> planner -> research_coordinator -> writer -> END
-    graph.add_edge(START, "planner");
+    // Add edges: planner -> research_coordinator -> writer
+    graph.set_entry_point("planner");
     graph.add_edge("planner", "research_coordinator");
     graph.add_edge("research_coordinator", "writer");
-    graph.add_edge("writer", END);
+    graph.set_finish_point("writer");
 
     // Compile the graph with checkpointing for session persistence
     let checkpointer = MemorySaver::new();
@@ -107,14 +107,15 @@ pub fn run_research(
     };
 
     // Build runnable config with optional thread_id for checkpointing
-    let mut runnable_config = RunnableConfig::default();
+    let mut runnable_config = RunnableConfig::new();
     if let Some(tid) = thread_id {
         runnable_config = runnable_config.with_thread_id(tid.to_string());
     }
 
     // Execute the graph
     let output = compiled
-        .invoke(initial_state, &runnable_config)
+        .invoke_async(initial_state, &runnable_config)
+        .await
         .map_err(|e| anyhow::anyhow!("Graph execution failed: {e}"))?;
 
     // Extract the final report

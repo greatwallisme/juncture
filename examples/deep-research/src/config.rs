@@ -45,10 +45,17 @@ impl ResearchConfig {
         let openai_base_url = std::env::var("OPENAI_BASE_URL").ok();
         let tavily_api_key = std::env::var("TAVILY_API_KEY").ok();
 
+        // Use CLI model arg unless it's the default and OPENAI_MODEL is set in env
+        let model = if model == "gpt-4o" {
+            std::env::var("OPENAI_MODEL").unwrap_or_else(|_| model.to_string())
+        } else {
+            model.to_string()
+        };
+
         Ok(Self {
             openai_api_key,
             openai_base_url,
-            model: model.to_string(),
+            model,
             max_iterations,
             tavily_api_key,
             require_approval,

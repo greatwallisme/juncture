@@ -93,20 +93,20 @@ async fn main() -> Result<()> {
         .init();
 
     tracing::info!("Starting deep research agent");
+    // Build config from environment and CLI args
+    let config = ResearchConfig::from_env(&args.model, args.max_iterations, args.require_approval)?;
+
     tracing::info!(
         query = %args.query,
-        model = %args.model,
+        model = %config.model,
         max_iterations = args.max_iterations,
         require_approval = args.require_approval,
         thread_id = ?args.thread_id,
         "Configuration"
     );
 
-    // Build config from environment and CLI args
-    let config = ResearchConfig::from_env(&args.model, args.max_iterations, args.require_approval)?;
-
     // Run the research orchestrator
-    let result = orchestrator::run_research(&config, &args.query, args.thread_id.as_deref())?;
+    let result = orchestrator::run_research(&config, &args.query, args.thread_id.as_deref()).await?;
 
     // Display the research result to stdout
     std::io::stdout().write_all(result.as_bytes())?;

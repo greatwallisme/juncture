@@ -70,7 +70,8 @@ pub async fn research_sub_task(
 
     // Execute the agent
     let output = graph
-        .invoke(initial_state, &juncture::RunnableConfig::default())
+        .invoke_async(initial_state, &juncture::RunnableConfig::new())
+        .await
         .map_err(|e| anyhow::anyhow!("Research agent execution failed: {e}"))?;
 
     // Extract the last AI message

@@ -489,7 +489,7 @@ async fn process_edge<S: State>(
 ) -> Result<(), JunctureError> {
     match edge {
         CompiledEdge::Fixed { target } => {
-            if !seen_nodes.contains(target) {
+            if target != crate::edge::END && !seen_nodes.contains(target) {
                 seen_nodes.insert(target.clone());
                 next_tasks.push(PendingTask::pull(
                     uuid::Uuid::new_v4().to_string(),
@@ -505,7 +505,7 @@ async fn process_edge<S: State>(
                 ))
             })?;
 
-            if !seen_nodes.contains(target) {
+            if target != crate::edge::END && !seen_nodes.contains(target) {
                 seen_nodes.insert(target.to_string());
                 next_tasks.push(PendingTask::pull(
                     uuid::Uuid::new_v4().to_string(),
