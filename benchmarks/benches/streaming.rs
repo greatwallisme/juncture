@@ -3,9 +3,7 @@
 //! Measures streaming overhead by creating chains with different numbers
 //! of nodes (100, 1000, 10000) and measuring the time to collect all events.
 
-use criterion::{
-    BenchmarkId, Criterion, async_executor::FuturesExecutor, criterion_group, criterion_main,
-};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use futures::StreamExt;
 use juncture_core::node::NodeFnUpdate;
 use juncture_core::state::messages::{MessagesState, MessagesStateUpdate};
@@ -68,6 +66,7 @@ fn benchmark_streaming(c: &mut Criterion) {
     let mut group = c.benchmark_group("streaming");
 
     let config = bench_config();
+    let runtime = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
 
     for &num_nodes in &[100_usize, 1000, 10000] {
         let graph = create_streaming_graph(num_nodes);
@@ -75,7 +74,7 @@ fn benchmark_streaming(c: &mut Criterion) {
         let input = MessagesState { messages: vec![] };
 
         group.bench_with_input(BenchmarkId::new("stream", num_nodes), &num_nodes, |b, _| {
-            b.to_async(FuturesExecutor).iter(|| async {
+            b.to_async(&runtime).iter(|| async {
                 let handle = compiled
                     .stream(input.clone(), &config, StreamMode::Values)
                     .await
