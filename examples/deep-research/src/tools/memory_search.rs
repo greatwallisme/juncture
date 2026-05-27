@@ -1,10 +1,5 @@
 //! Memory search tool for retrieving past research facts.
 
-#![allow(
-    dead_code,
-    reason = "Public API components may not all be used in current binary"
-)]
-
 use async_trait::async_trait;
 use juncture::tools::{Tool, ToolError};
 use juncture_core::store::{MemoryStore, SearchQuery, Store};

@@ -8,8 +8,9 @@ use std::collections::HashSet;
 
 use crate::config::ResearchConfig;
 use crate::llm::build_model_with_middleware;
+use crate::memory::{FactStore, ResearchFactExtractor};
 use crate::state::{Finding, SubTask};
-use crate::tools::WebSearch;
+use crate::tools::{Calculator, ReadFile, MemorySearch, WebSearch};
 
 /// Execute a single research sub-task using an ephemeral agent.
 ///
@@ -17,6 +18,7 @@ use crate::tools::WebSearch;
 ///
 /// * `config` - Research configuration
 /// * `sub_task` - The sub-task to research
+/// * `fact_store` - Fact store for persisting extracted facts
 ///
 /// # Errors
 ///
@@ -24,7 +26,11 @@ use crate::tools::WebSearch;
 /// - LLM API call fails
 /// - Tool execution fails
 /// - Agent execution fails
-pub async fn research_sub_task(config: &ResearchConfig, sub_task: &SubTask) -> Result<Finding> {
+pub async fn research_sub_task(
+    config: &ResearchConfig,
+    sub_task: &SubTask,
+    fact_store: &FactStore,
+) -> Result<Finding> {
     // Build model with middleware chain (logging + circuit breaker)
     let model = build_model_with_middleware(
         config.openai_api_key.clone(),
@@ -33,8 +39,14 @@ pub async fn research_sub_task(config: &ResearchConfig, sub_task: &SubTask) -> R
     );
 
     // Create tools for the agent
-    let tools: Vec<Box<dyn juncture::tools::Tool>> =
-        vec![Box::new(WebSearch::new(config.tavily_api_key.clone()))];
+    let tools: Vec<Box<dyn juncture::tools::Tool>> = vec![
+        Box::new(WebSearch::new(config.tavily_api_key.clone())),
+        Box::new(Calculator::new()),
+        Box::new(ReadFile::new()),
+        Box::new(MemorySearch::new(Some(std::sync::Arc::clone(
+            fact_store.store(),
+        )))),
+    ];
 
     // Build react agent config
     let agent_config = ReactAgentConfig {
@@ -92,11 +104,27 @@ pub async fn research_sub_task(config: &ResearchConfig, sub_task: &SubTask) -> R
     // Extract sources from messages (look for URLs in web_search tool calls)
     let sources = extract_sources(&output.value.messages);
 
-    Ok(Finding {
+    let finding = Finding {
         sub_task: sub_task.description.clone(),
         content,
         sources,
-    })
+    };
+
+    // Extract facts from finding using ResearchFactExtractor
+    let extractor_model = build_model_with_middleware(
+        config.openai_api_key.clone(),
+        config.openai_base_url.clone(),
+        &config.model,
+    );
+    let extractor = ResearchFactExtractor::new(extractor_model);
+    let facts = extractor.extract_from_finding(&finding).await;
+    for fact in &facts {
+        if let Err(e) = fact_store.save_fact(fact).await {
+            tracing::warn!("Failed to save extracted fact: {e}");
+        }
+    }
+
+    Ok(finding)
 }
 
 /// Extract source URLs from conversation messages.

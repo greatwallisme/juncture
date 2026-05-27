@@ -504,17 +504,11 @@ impl ChatModel for ChatOpenAI {
                                     usage_delta: None,
                                 },
                                 Err(e) => {
-                                    return Some((
-                                        Err(e),
-                                        (StreamState::Done, buffer),
-                                    ));
+                                    return Some((Err(e), (StreamState::Done, buffer)));
                                 }
                             };
 
-                            return Some((
-                                Ok(error),
-                                (StreamState::Done, buffer),
-                            ));
+                            return Some((Ok(error), (StreamState::Done, buffer)));
                         }
 
                         Box::pin(response.bytes_stream())
@@ -550,8 +544,7 @@ impl ChatModel for ChatOpenAI {
                                 return None;
                             }
 
-                            if let Ok(sse_chunk) =
-                                serde_json::from_str::<OpenAISSEChunk>(data_str)
+                            if let Ok(sse_chunk) = serde_json::from_str::<OpenAISSEChunk>(data_str)
                             {
                                 match convert_openai_sse_chunk(sse_chunk) {
                                     Ok(chunk) => {
@@ -566,10 +559,7 @@ impl ChatModel for ChatOpenAI {
                                         }
                                     }
                                     Err(e) => {
-                                        return Some((
-                                            Err(e),
-                                            (StreamState::Done, buffer),
-                                        ));
+                                        return Some((Err(e), (StreamState::Done, buffer)));
                                     }
                                 }
                             }
@@ -702,7 +692,10 @@ struct OpenAIResponse {
 ///
 /// `OpenAI` uses `prompt_tokens` / `completion_tokens` (not `input_tokens` / `output_tokens`).
 #[derive(Debug, Clone, Deserialize)]
-#[expect(clippy::struct_field_names, reason = "field names must match OpenAI API JSON format")]
+#[expect(
+    clippy::struct_field_names,
+    reason = "field names must match OpenAI API JSON format"
+)]
 struct OpenAIUsage {
     #[allow(dead_code, reason = "deserialization target, field read indirectly")]
     prompt_tokens: u64,

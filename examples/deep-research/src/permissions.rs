@@ -19,7 +19,6 @@ use juncture::tools::{PermissionConfig, PermissionGuard};
 /// assert!(matches!(check.permission, Permission::Allow));
 /// ```
 #[must_use]
-#[allow(dead_code, reason = "Public API function reserved for future use")]
 pub fn build_permission_guard(require_approval: bool) -> PermissionGuard {
     let mut config = PermissionConfig::new();
 

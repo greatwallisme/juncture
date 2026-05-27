@@ -1,10 +1,5 @@
 //! Calculator tool for evaluating arithmetic expressions.
 
-#![allow(
-    dead_code,
-    reason = "Public API components may not all be used in current binary"
-)]
-
 use async_trait::async_trait;
 use juncture::tools::{Tool, ToolError};
 use serde_json::json;

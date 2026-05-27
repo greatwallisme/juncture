@@ -3,16 +3,16 @@
 //! Test 1: Simple Send+worker (no subgraph) -- baseline
 //! Test 2: Send+SubgraphNode -- the pattern that causes >5min execution
 
-use std::time::Instant;
 use juncture_core::{
     Command, RunnableConfig, StateGraph,
-    node::NodeFnCommand,
     command::SendTarget,
+    node::NodeFnCommand,
     subgraph::{SubgraphConfig, SubgraphPersistence},
 };
 use juncture_derive::State;
 use serde_json::json;
 use std::sync::Arc;
+use std::time::Instant;
 
 #[derive(State, Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 struct FanoutState {
@@ -54,7 +54,10 @@ async fn run_fanout_test(num_subjects: usize, time_limit_secs: u64) {
                         })
                         .collect();
                     Ok(Command::update_and_send(
-                        FanoutStateUpdate { results: None, subjects: None },
+                        FanoutStateUpdate {
+                            results: None,
+                            subjects: None,
+                        },
                         targets,
                     ))
                 })
@@ -97,8 +100,10 @@ async fn run_fanout_test(num_subjects: usize, time_limit_secs: u64) {
     };
 
     let start = Instant::now();
-    let result: juncture_core::GraphOutput<FanoutState, FanoutState> =
-        compiled.invoke_async(input, &config).await.expect("fanout should succeed");
+    let result: juncture_core::GraphOutput<FanoutState, FanoutState> = compiled
+        .invoke_async(input, &config)
+        .await
+        .expect("fanout should succeed");
     let elapsed = start.elapsed();
 
     assert!(
@@ -170,7 +175,10 @@ async fn run_fanout_subgraph_test(num_subjects: usize, time_limit_secs: u64) {
                         })
                         .collect();
                     Ok(Command::update_and_send(
-                        FanoutStateUpdate { results: None, subjects: None },
+                        FanoutStateUpdate {
+                            results: None,
+                            subjects: None,
+                        },
                         targets,
                     ))
                 })
@@ -187,17 +195,13 @@ async fn run_fanout_subgraph_test(num_subjects: usize, time_limit_secs: u64) {
         .add_subgraph_with_config(
             "subgraph",
             child_graph,
-            |state: &FanoutState| {
-                ChildState {
-                    jokes: vec![],
-                    subject: state.subjects.first().cloned().unwrap_or_default(),
-                }
+            |state: &FanoutState| ChildState {
+                jokes: vec![],
+                subject: state.subjects.first().cloned().unwrap_or_default(),
             },
-            |child: &ChildState| {
-                FanoutStateUpdate {
-                    results: Some(child.jokes.clone()),
-                    subjects: None,
-                }
+            |child: &ChildState| FanoutStateUpdate {
+                results: Some(child.jokes.clone()),
+                subjects: None,
             },
             SubgraphConfig {
                 persistence: SubgraphPersistence::Stateless,
@@ -220,8 +224,10 @@ async fn run_fanout_subgraph_test(num_subjects: usize, time_limit_secs: u64) {
     };
 
     let start = Instant::now();
-    let result: juncture_core::GraphOutput<FanoutState, FanoutState> =
-        compiled.invoke_async(input, &config).await.expect("fanout subgraph should succeed");
+    let result: juncture_core::GraphOutput<FanoutState, FanoutState> = compiled
+        .invoke_async(input, &config)
+        .await
+        .expect("fanout subgraph should succeed");
     let elapsed = start.elapsed();
 
     assert!(

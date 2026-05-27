@@ -3,11 +3,6 @@
 //! Tests cover tool functionality, security validations, error handling,
 //! and state initialization using `MockChatModel` where applicable.
 
-#![allow(
-    clippy::uninlined_format_args,
-    reason = "Test assertions use format strings for clarity in failure messages"
-)]
-
 use juncture::llm::{ChatModel, Message, MockChatModel, ToolCall};
 use juncture::tools::Tool;
 use juncture_core::store::MemoryStore;
@@ -44,8 +39,7 @@ async fn test_calculator_division_by_zero() {
 
     assert!(
         result.is_err(),
-        "Calculator should return error for division by zero: {:?}",
-        result
+        "Calculator should return error for division by zero: {result:?}"
     );
 
     let err = result.unwrap_err();
@@ -65,8 +59,7 @@ async fn test_calculator_complex_expression() {
 
     assert!(
         result.is_ok(),
-        "Calculator should evaluate complex expression: {:?}",
-        result
+        "Calculator should evaluate complex expression: {result:?}"
     );
     // Calculator evaluates left-to-right without operator precedence:
     // ((10 + 2) * 5) - 3 = (12 * 5) - 3 = 60 - 3 = 57
@@ -83,8 +76,7 @@ async fn test_calculator_invalid_expression() {
 
     assert!(
         result.is_err(),
-        "Calculator should return error for invalid expression: {:?}",
-        result
+        "Calculator should return error for invalid expression: {result:?}"
     );
 }
 
@@ -95,8 +87,7 @@ async fn test_calculator_missing_parameter() {
 
     assert!(
         result.is_err(),
-        "Calculator should return error when 'expression' parameter is missing: {:?}",
-        result
+        "Calculator should return error when 'expression' parameter is missing: {result:?}"
     );
 }
 
@@ -113,8 +104,7 @@ async fn test_read_file_rejects_traversal() {
 
     assert!(
         result.is_err(),
-        "ReadFile should reject path traversal attacks: {:?}",
-        result
+        "ReadFile should reject path traversal attacks: {result:?}"
     );
 
     let err = result.unwrap_err();
@@ -134,8 +124,7 @@ async fn test_read_file_rejects_absolute_path() {
 
     assert!(
         result.is_err(),
-        "ReadFile should reject absolute paths: {:?}",
-        result
+        "ReadFile should reject absolute paths: {result:?}"
     );
 
     let err = result.unwrap_err();
@@ -153,8 +142,7 @@ async fn test_read_file_missing_parameter() {
 
     assert!(
         result.is_err(),
-        "ReadFile should return error when 'path' parameter is missing: {:?}",
-        result
+        "ReadFile should return error when 'path' parameter is missing: {result:?}"
     );
 }
 
@@ -169,8 +157,7 @@ async fn test_web_search_without_api_key() {
 
     assert!(
         result.is_err(),
-        "WebSearch should return error when API key is not configured: {:?}",
-        result
+        "WebSearch should return error when API key is not configured: {result:?}"
     );
 
     let err = result.unwrap_err();
@@ -190,8 +177,7 @@ async fn test_web_search_missing_query() {
 
     assert!(
         result.is_err(),
-        "WebSearch should return error when 'query' parameter is missing: {:?}",
-        result
+        "WebSearch should return error when 'query' parameter is missing: {result:?}"
     );
 }
 
@@ -206,8 +192,7 @@ async fn test_memory_search_without_store() {
 
     assert!(
         result.is_err(),
-        "MemorySearch should return error when store is not configured: {:?}",
-        result
+        "MemorySearch should return error when store is not configured: {result:?}"
     );
 
     let err = result.unwrap_err();
@@ -228,8 +213,7 @@ async fn test_memory_search_with_empty_store() {
 
     assert!(
         result.is_ok(),
-        "MemorySearch should succeed even with empty store: {:?}",
-        result
+        "MemorySearch should succeed even with empty store: {result:?}"
     );
 
     let output = result.unwrap();
@@ -282,8 +266,7 @@ async fn test_mock_chat_model_basic() {
 
     assert!(
         result.is_ok(),
-        "MockChatModel should return response successfully: {:?}",
-        result
+        "MockChatModel should return response successfully: {result:?}"
     );
 
     let response = result.unwrap();
@@ -301,8 +284,7 @@ async fn test_mock_chat_model_error() {
 
     assert!(
         result.is_err(),
-        "MockChatModel with with_error() should return error: {:?}",
-        result
+        "MockChatModel with with_error() should return error: {result:?}"
     );
 }
 
@@ -321,8 +303,7 @@ async fn test_mock_chat_model_tool_calls() {
 
     assert!(
         result.is_ok(),
-        "MockChatModel should return tool calls successfully: {:?}",
-        result
+        "MockChatModel should return tool calls successfully: {result:?}"
     );
 
     let response = result.unwrap();

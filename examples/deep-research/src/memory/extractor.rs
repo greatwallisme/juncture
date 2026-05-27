@@ -1,10 +1,5 @@
 //! Fact extraction wrapper for research findings.
 
-#![allow(
-    dead_code,
-    reason = "Public API components may not all be used in current binary"
-)]
-
 use juncture::llm::ChatModel;
 use juncture::memory::{Fact, FactExtractor, LlmFactExtractor};
 

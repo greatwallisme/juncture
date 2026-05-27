@@ -38,7 +38,8 @@ impl ProfileResult {
         if self.times_ms.is_empty() {
             return 0.0;
         }
-        self.times_ms.iter().sum::<f64>() / f64::from(u32::try_from(self.times_ms.len()).unwrap_or(1))
+        self.times_ms.iter().sum::<f64>()
+            / f64::from(u32::try_from(self.times_ms.len()).unwrap_or(1))
     }
 
     /// Minimum wall-clock time in milliseconds across all iterations.
@@ -50,7 +51,10 @@ impl ProfileResult {
     /// Maximum wall-clock time in milliseconds across all iterations.
     #[must_use]
     pub fn max_ms(&self) -> f64 {
-        self.times_ms.iter().copied().fold(f64::NEG_INFINITY, f64::max)
+        self.times_ms
+            .iter()
+            .copied()
+            .fold(f64::NEG_INFINITY, f64::max)
     }
 
     /// Alias for [`mean_ms`] -- kept for backward compatibility with `compare.py`.

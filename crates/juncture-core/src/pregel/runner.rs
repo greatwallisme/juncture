@@ -62,9 +62,9 @@ where
         return Ok(None);
     }
 
-    let node = nodes.get(&task.node_name).ok_or_else(|| {
-        JunctureError::execution(format!("Node '{}' not found", task.node_name))
-    })?;
+    let node = nodes
+        .get(&task.node_name)
+        .ok_or_else(|| JunctureError::execution(format!("Node '{}' not found", task.node_name)))?;
 
     let task_state: Arc<S> = task
         .state_override

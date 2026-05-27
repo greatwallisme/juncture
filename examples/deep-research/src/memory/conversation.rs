@@ -1,22 +1,31 @@
 //! Conversation tracker with auto-summarization.
 
-#![allow(
-    dead_code,
-    reason = "Public API components may not all be used in current binary"
-)]
-
 use anyhow::Result;
 use juncture::memory::{ConversationMemory, LlmSummarizer};
 use juncture_core::state::messages::Message;
 use juncture_core::store::MemoryStore;
 
 /// Conversation tracker with automatic summarization.
+///
+/// Note: This feature is intentionally deferred. Conversation memory with
+/// auto-summarization requires integration with the orchestrator to track
+/// message counts and trigger summarization when context window fills.
+/// Current implementation stores messages in `ResearchState` without
+/// automatic compression.
 #[derive(Debug)]
+#[allow(
+    dead_code,
+    reason = "Intentionally deferred - requires orchestrator integration for message count tracking"
+)]
 pub struct ConversationTracker {
     /// Inner conversation memory.
     inner: ConversationMemory<MemoryStore>,
 }
 
+#[allow(
+    dead_code,
+    reason = "Intentionally deferred - requires orchestrator integration for message count tracking"
+)]
 impl ConversationTracker {
     /// Create a new conversation tracker.
     ///

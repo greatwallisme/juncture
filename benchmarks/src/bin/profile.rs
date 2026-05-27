@@ -129,7 +129,10 @@ fn create_loop_router(n: usize) -> impl Fn(&WideState) -> &str + Send + Sync + '
     }
 }
 
-#[allow(clippy::too_many_lines, reason = "graph construction with 6 nodes and 15+ fields is inherently verbose")]
+#[allow(
+    clippy::too_many_lines,
+    reason = "graph construction with 6 nodes and 15+ fields is inherently verbose"
+)]
 fn create_wide_state_graph(n: usize) -> StateGraph<WideState> {
     let mut graph = StateGraph::new();
 
@@ -250,7 +253,10 @@ fn create_wide_state_graph(n: usize) -> StateGraph<WideState> {
     graph
 }
 
-#[allow(clippy::too_many_lines, reason = "graph construction is inherently verbose with 6 nodes")]
+#[allow(
+    clippy::too_many_lines,
+    reason = "graph construction is inherently verbose with 6 nodes"
+)]
 fn profile_wide_state(results: &mut Vec<ProfileResult>) {
     let config = bench_config();
     for &iterations in &[300_usize, 600, 1200] {
@@ -587,7 +593,10 @@ fn create_joke_subgraph() -> StateGraph<JokeState> {
     graph
 }
 
-#[allow(clippy::too_many_lines, reason = "graph construction with subgraph is inherently verbose")]
+#[allow(
+    clippy::too_many_lines,
+    reason = "graph construction with subgraph is inherently verbose"
+)]
 fn create_fanout_graph() -> StateGraph<OverallState> {
     let subgraph = create_joke_subgraph();
     let compiled_subgraph = Arc::new(subgraph.compile().expect("subgraph compile should succeed"));
@@ -620,9 +629,7 @@ fn create_fanout_graph() -> StateGraph<OverallState> {
                         .map(|s| {
                             juncture_core::send::Send::<JokeInput> {
                                 node: "generate_joke".to_string(),
-                                state: JokeInput {
-                                    subject: s.clone(),
-                                },
+                                state: JokeInput { subject: s.clone() },
                             }
                             .into()
                         })

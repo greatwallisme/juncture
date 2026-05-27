@@ -14,6 +14,8 @@ use crate::agents::plan_research_node;
 use crate::agents::research_sub_task;
 use crate::agents::write_report;
 use crate::config::ResearchConfig;
+use crate::memory::FactStore;
+use crate::permissions::build_permission_guard;
 use crate::state::{ResearchState, ResearchStateUpdate, SubTask, TaskStatus};
 
 /// Run the multi-agent research orchestrator.
@@ -38,17 +40,30 @@ pub fn run_research(
     // Build the multi-agent graph
     let mut graph = StateGraph::<ResearchState>::new();
 
+    // Create shared fact store for cross-session memory
+    let fact_store = FactStore::new("research_facts".to_string());
+
+    // Build permission guard and validate tool access
+    let permission_guard = build_permission_guard(config.require_approval);
+    tracing::info!(
+        "Permission guard initialized: web_search={:?}, calculator={:?}",
+        permission_guard.check("web_search").permission,
+        permission_guard.check("calculator").permission,
+    );
+
     // Add planner node
-    let planner_node = plan_research_node(config.clone());
+    let planner_node = plan_research_node(config.clone(), fact_store.clone());
     graph.add_node_simple("planner", planner_node)?;
 
     // Add research coordinator node (uses parallel execution)
     let coordinator_config = config.clone();
+    let coordinator_fact_store = fact_store.clone();
     let coordinator_node = NodeFnUpdate(move |state: &ResearchState| {
         let config = coordinator_config.clone();
         let plan = state.plan.clone();
+        let fact_store = coordinator_fact_store.clone();
         async move {
-            research_coordinator(&config, &plan)
+            research_coordinator(&config, &plan, &fact_store)
                 .await
                 .map_err(|e| JunctureError::execution(e.to_string()))
         }
@@ -62,8 +77,9 @@ pub fn run_research(
         let config = writer_config.clone();
         let findings = state.findings.clone();
         let query = state.query.clone();
+        let fact_store = fact_store.clone();
         async move {
-            writer_node_impl(&config, &query, &findings)
+            writer_node_impl(&config, &query, &findings, &fact_store)
                 .await
                 .map_err(|e| JunctureError::execution(e.to_string()))
         }
@@ -114,6 +130,7 @@ pub fn run_research(
 ///
 /// * `config` - Research configuration
 /// * `plan` - Current research plan
+/// * `fact_store` - Fact store for persisting extracted facts
 ///
 /// # Errors
 ///
@@ -121,6 +138,7 @@ pub fn run_research(
 async fn research_coordinator(
     config: &ResearchConfig,
     plan: &[SubTask],
+    fact_store: &FactStore,
 ) -> Result<ResearchStateUpdate> {
     // Filter for pending sub-tasks
     let pending_tasks: Vec<&SubTask> = plan
@@ -142,7 +160,7 @@ async fn research_coordinator(
     // Execute researchers in parallel using join_all
     let tasks: Vec<_> = pending_tasks
         .iter()
-        .map(|task| research_sub_task(config, task))
+        .map(|task| research_sub_task(config, task, fact_store))
         .collect();
 
     let findings = join_all(tasks)
@@ -182,6 +200,7 @@ async fn research_coordinator(
 /// * `config` - Research configuration
 /// * `query` - Original research query
 /// * `findings` - Research findings
+/// * `fact_store` - Fact store for archiving research findings
 ///
 /// # Errors
 ///
@@ -190,13 +209,14 @@ async fn writer_node_impl(
     config: &ResearchConfig,
     query: &str,
     findings: &[crate::state::Finding],
+    fact_store: &FactStore,
 ) -> Result<ResearchStateUpdate> {
     if findings.is_empty() {
         return Err(anyhow::anyhow!("No findings to synthesize"));
     }
 
     // Generate the report
-    let generated_report: String = write_report(config, query, findings).await?;
+    let generated_report: String = write_report(config, query, findings, fact_store).await?;
 
     Ok(ResearchStateUpdate {
         messages: None,

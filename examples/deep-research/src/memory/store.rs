@@ -1,10 +1,5 @@
 //! Persistent fact store using `juncture_core` Store trait.
 
-#![allow(
-    dead_code,
-    reason = "Public API components may not all be used in current binary"
-)]
-
 use anyhow::Result;
 use juncture::memory::Fact;
 use juncture_core::store::{MemoryStore, SearchQuery, Store};

@@ -9,6 +9,7 @@ use serde::Deserialize;
 
 use crate::config::ResearchConfig;
 use crate::llm::build_model_with_middleware;
+use crate::memory::FactStore;
 use crate::state::{ResearchState, ResearchStateUpdate, SubTask, TaskStatus};
 
 /// Helper struct for deserializing LLM planning responses.
@@ -30,9 +31,11 @@ struct SubTaskData {
 /// # Arguments
 ///
 /// * `config` - Research configuration containing LLM settings
+/// * `fact_store` - Fact store for retrieving prior research context
 #[must_use]
 pub fn plan_research_node(
     config: ResearchConfig,
+    fact_store: FactStore,
 ) -> NodeFnUpdate<
     impl Fn(&ResearchState) -> BoxFuture<'static, Result<ResearchStateUpdate, JunctureError>>
     + Clone
@@ -43,8 +46,9 @@ pub fn plan_research_node(
     NodeFnUpdate(move |state: &ResearchState| {
         let config = config.clone();
         let query = state.query.clone();
+        let fact_store = fact_store.clone();
         async move {
-            plan_research(&config, &query)
+            plan_research(&config, &query, &fact_store)
                 .await
                 .map_err(|e| JunctureError::execution(e.to_string()))
         }
@@ -58,19 +62,46 @@ pub fn plan_research_node(
 ///
 /// * `config` - Research configuration
 /// * `query` - The research query to decompose
+/// * `fact_store` - Fact store for retrieving prior research context
 ///
 /// # Errors
 ///
 /// Returns error if:
 /// - LLM API call fails
 /// - Response parsing fails
-async fn plan_research(config: &ResearchConfig, query: &str) -> Result<ResearchStateUpdate> {
+async fn plan_research(
+    config: &ResearchConfig,
+    query: &str,
+    fact_store: &FactStore,
+) -> Result<ResearchStateUpdate> {
     // Build model with middleware chain (logging + circuit breaker)
     let model = build_model_with_middleware(
         config.openai_api_key.clone(),
         config.openai_base_url.clone(),
         &config.model,
     );
+
+    // Search for relevant prior facts
+    let prior_facts = fact_store
+        .search_facts(query, 5)
+        .await
+        .unwrap_or_default();
+
+    let prior_context = if prior_facts.is_empty() {
+        String::new()
+    } else {
+        let facts_text = prior_facts
+            .iter()
+            .map(|f| {
+                format!(
+                    "- {} (source: {}, confidence: {:.1})",
+                    f.claim, f.source, f.confidence
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        format!("\n\nPrior research context:\n{facts_text}")
+    };
 
     // Create system prompt for planning
     let system_prompt = Message::system(
@@ -81,8 +112,8 @@ async fn plan_research(config: &ResearchConfig, query: &str) -> Result<ResearchS
          no other text.",
     );
 
-    // Create user message with the query
-    let user_msg = Message::human(query);
+    // Create user message with the query and prior context
+    let user_msg = Message::human(format!("{query}{prior_context}"));
 
     // Configure call options
     let options = CallOptions {

@@ -5,6 +5,7 @@ use juncture::llm::{CallOptions, ChatModel, Message};
 
 use crate::config::ResearchConfig;
 use crate::llm::build_model_with_middleware;
+use crate::memory::FactStore;
 use crate::state::Finding;
 
 /// Synthesize all findings into a comprehensive research report.
@@ -14,6 +15,7 @@ use crate::state::Finding;
 /// * `config` - Research configuration
 /// * `query` - Original research query
 /// * `findings` - Research findings from sub-tasks
+/// * `fact_store` - Fact store for archiving research findings
 ///
 /// # Errors
 ///
@@ -24,6 +26,7 @@ pub async fn write_report(
     config: &ResearchConfig,
     query: &str,
     findings: &[Finding],
+    fact_store: &FactStore,
 ) -> Result<String> {
     // Build model with middleware chain (logging + circuit breaker)
     let model = build_model_with_middleware(
@@ -83,6 +86,19 @@ pub async fn write_report(
     // Validate report is not empty
     if report.trim().is_empty() {
         return Err(anyhow::anyhow!("LLM returned empty report"));
+    }
+
+    // Archive findings as facts for future research
+    for finding in findings {
+        let fact = juncture::memory::Fact::new(
+            query.to_string(),
+            finding.content.clone(),
+            finding.sources.first().cloned().unwrap_or_default(),
+            0.8,
+        );
+        if let Err(e) = fact_store.save_fact(&fact).await {
+            tracing::warn!("Failed to archive finding: {e}");
+        }
     }
 
     Ok(report.to_string())
