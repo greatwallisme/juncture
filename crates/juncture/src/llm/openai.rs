@@ -90,10 +90,19 @@ impl ChatOpenAI {
     #[must_use]
     pub fn new(api_key: impl Into<String>) -> Self {
         Self {
-            client: Client::builder()
-                .timeout(Duration::from_secs(120))
-                .build()
-                .expect("Failed to create HTTP client"),
+            client: {
+                #[cfg(not(target_family = "wasm"))]
+                {
+                    Client::builder()
+                        .timeout(Duration::from_secs(120))
+                        .build()
+                        .expect("Failed to create HTTP client")
+                }
+                #[cfg(target_family = "wasm")]
+                {
+                    Client::new()
+                }
+            },
             api_key: api_key.into(),
             model: "gpt-4o".to_string(),
             base_url: OPENAI_BASE_URL.to_string(),
@@ -222,7 +231,11 @@ impl ChatOpenAI {
 }
 
 /// Boxed byte stream from an `OpenAI` SSE response.
+/// On WASM, reqwest types are `!Send`, so we omit the `Send` bound.
+#[cfg(not(target_family = "wasm"))]
 type ByteStream = Pin<Box<dyn Stream<Item = Result<Bytes, reqwest::Error>> + Send>>;
+#[cfg(target_family = "wasm")]
+type ByteStream = Pin<Box<dyn Stream<Item = Result<Bytes, reqwest::Error>>>>;
 
 /// State machine for the streaming unfold.
 ///
@@ -240,7 +253,8 @@ enum StreamState {
     Done,
 }
 
-#[async_trait]
+#[cfg_attr(target_family = "wasm", async_trait(?Send))]
+#[cfg_attr(not(target_family = "wasm"), async_trait)]
 impl ChatModel for ChatOpenAI {
     #[allow(
         clippy::too_many_lines,
@@ -255,6 +269,7 @@ impl ChatModel for ChatOpenAI {
             .and_then(|o| o.model_override.as_ref())
             .unwrap_or(&self.model);
 
+        #[cfg(not(target_family = "wasm"))]
         let span = tracing::info_span!(
             "juncture.llm.call",
             "juncture.llm.model" = %model,
@@ -264,6 +279,7 @@ impl ChatModel for ChatOpenAI {
             "juncture.llm.has_tool_calls" = false,
             "juncture.llm.stop_reason" = tracing::field::Empty,
         );
+        #[cfg(not(target_family = "wasm"))]
         let _enter = span.enter();
 
         let api_messages: Vec<_> = messages.iter().map(convert_message).collect();
@@ -298,6 +314,7 @@ impl ChatModel for ChatOpenAI {
             stream: false,
         };
 
+        #[cfg(not(target_family = "wasm"))]
         let start = std::time::Instant::now();
 
         let response = self
@@ -360,6 +377,7 @@ impl ChatModel for ChatOpenAI {
             );
         }
 
+        #[cfg(not(target_family = "wasm"))]
         tracing::debug!(
             name: "juncture.llm.duration_ms",
             duration_ms = start.elapsed().as_millis(),
@@ -382,9 +400,12 @@ impl ChatModel for ChatOpenAI {
         }
 
         // Report LLM call and duration metrics
-        let duration_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
+        #[cfg(not(target_family = "wasm"))]
+        {
+            let duration_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
+            let _ = juncture_core::pregel::try_report_llm_duration(duration_ms);
+        }
         let _ = juncture_core::pregel::try_report_llm_call();
-        let _ = juncture_core::pregel::try_report_llm_duration(duration_ms);
 
         Ok(message)
     }
@@ -405,11 +426,13 @@ impl ChatModel for ChatOpenAI {
             .unwrap_or(&self.model);
 
         // Create span for stream setup
+        #[cfg(not(target_family = "wasm"))]
         let span = tracing::info_span!(
             "juncture.llm.call",
             "juncture.llm.model" = %model,
             "juncture.llm.provider" = "openai",
         );
+        #[cfg(not(target_family = "wasm"))]
         let _enter = span.enter();
 
         let api_messages: Vec<_> = messages.iter().map(convert_message).collect();
@@ -457,69 +480,23 @@ impl ChatModel for ChatOpenAI {
             request,
         };
 
-        Box::pin(stream::unfold(
-            (init, Vec::new()),
-            |(state, mut buffer)| async move {
-                let mut byte_stream = match state {
-                    StreamState::Pending {
-                        client,
-                        api_key,
-                        base_url,
-                        request,
-                    } => {
-                        let response = match client
-                            .post(format!("{}/chat/completions", base_url))
-                            .header("authorization", format!("Bearer {}", api_key))
-                            .header("content-type", "application/json")
-                            .json(&request)
-                            .send()
-                            .await
-                        {
-                            Ok(r) => r,
-                            Err(e) => {
-                                return Some((
-                                    Err(LlmError::NetworkError(e)),
-                                    (StreamState::Done, buffer),
-                                ));
-                            }
-                        };
-
-                        let status = response.status();
-
-                        if !status.is_success() {
-                            let response_text = match response.text().await {
-                                Ok(t) => t,
-                                Err(e) => {
-                                    return Some((
-                                        Err(LlmError::NetworkError(e)),
-                                        (StreamState::Done, buffer),
-                                    ));
-                                }
-                            };
-
-                            let error = match parse_openai_error(&response_text, status) {
-                                Ok(_) => crate::llm::MessageChunk {
-                                    content: String::new(),
-                                    tool_call_chunks: Vec::new(),
-                                    usage_delta: None,
-                                },
-                                Err(e) => {
-                                    return Some((Err(e), (StreamState::Done, buffer)));
-                                }
-                            };
-
-                            return Some((Ok(error), (StreamState::Done, buffer)));
-                        }
-
-                        Box::pin(response.bytes_stream())
-                    }
-                    StreamState::Active(s) => s,
-                    StreamState::Done => return None,
-                };
-
-                while let Some(chunk_result) = byte_stream.next().await {
-                    let chunk = match chunk_result {
-                        Ok(c) => c,
+        let stream = stream::unfold((init, Vec::new()), |(state, mut buffer)| async move {
+            let mut byte_stream = match state {
+                StreamState::Pending {
+                    client,
+                    api_key,
+                    base_url,
+                    request,
+                } => {
+                    let response = match client
+                        .post(format!("{}/chat/completions", base_url))
+                        .header("authorization", format!("Bearer {}", api_key))
+                        .header("content-type", "application/json")
+                        .json(&request)
+                        .send()
+                        .await
+                    {
+                        Ok(r) => r,
                         Err(e) => {
                             return Some((
                                 Err(LlmError::NetworkError(e)),
@@ -528,48 +505,97 @@ impl ChatModel for ChatOpenAI {
                         }
                     };
 
-                    buffer.extend_from_slice(&chunk);
+                    let status = response.status();
 
-                    while let Some(newline_pos) = buffer.iter().position(|&b| b == b'\n') {
-                        let line_bytes = buffer.drain(..=newline_pos).collect::<Vec<_>>();
-                        let line = String::from_utf8_lossy(&line_bytes[..line_bytes.len() - 1]);
+                    if !status.is_success() {
+                        let response_text = match response.text().await {
+                            Ok(t) => t,
+                            Err(e) => {
+                                return Some((
+                                    Err(LlmError::NetworkError(e)),
+                                    (StreamState::Done, buffer),
+                                ));
+                            }
+                        };
 
-                        let line = line.trim();
-                        if line.is_empty() || line.starts_with(':') {
-                            continue;
+                        let error = match parse_openai_error(&response_text, status) {
+                            Ok(_) => crate::llm::MessageChunk {
+                                content: String::new(),
+                                tool_call_chunks: Vec::new(),
+                                usage_delta: None,
+                            },
+                            Err(e) => {
+                                return Some((Err(e), (StreamState::Done, buffer)));
+                            }
+                        };
+
+                        return Some((Ok(error), (StreamState::Done, buffer)));
+                    }
+
+                    Box::pin(response.bytes_stream())
+                }
+                StreamState::Active(s) => s,
+                StreamState::Done => return None,
+            };
+
+            while let Some(chunk_result) = byte_stream.next().await {
+                let chunk = match chunk_result {
+                    Ok(c) => c,
+                    Err(e) => {
+                        return Some((Err(LlmError::NetworkError(e)), (StreamState::Done, buffer)));
+                    }
+                };
+
+                buffer.extend_from_slice(&chunk);
+
+                while let Some(newline_pos) = buffer.iter().position(|&b| b == b'\n') {
+                    let line_bytes = buffer.drain(..=newline_pos).collect::<Vec<_>>();
+                    let line = String::from_utf8_lossy(&line_bytes[..line_bytes.len() - 1]);
+
+                    let line = line.trim();
+                    if line.is_empty() || line.starts_with(':') {
+                        continue;
+                    }
+
+                    if let Some(data_str) = line.strip_prefix("data: ") {
+                        if data_str == "[DONE]" {
+                            return None;
                         }
 
-                        if let Some(data_str) = line.strip_prefix("data: ") {
-                            if data_str == "[DONE]" {
-                                return None;
-                            }
-
-                            if let Ok(sse_chunk) = serde_json::from_str::<OpenAISSEChunk>(data_str)
-                            {
-                                match convert_openai_sse_chunk(sse_chunk) {
-                                    Ok(chunk) => {
-                                        if !chunk.content.is_empty()
-                                            || !chunk.tool_call_chunks.is_empty()
-                                            || chunk.usage_delta.is_some()
-                                        {
-                                            return Some((
-                                                Ok(chunk),
-                                                (StreamState::Active(byte_stream), buffer),
-                                            ));
-                                        }
+                        if let Ok(sse_chunk) = serde_json::from_str::<OpenAISSEChunk>(data_str) {
+                            match convert_openai_sse_chunk(sse_chunk) {
+                                Ok(chunk) => {
+                                    if !chunk.content.is_empty()
+                                        || !chunk.tool_call_chunks.is_empty()
+                                        || chunk.usage_delta.is_some()
+                                    {
+                                        return Some((
+                                            Ok(chunk),
+                                            (StreamState::Active(byte_stream), buffer),
+                                        ));
                                     }
-                                    Err(e) => {
-                                        return Some((Err(e), (StreamState::Done, buffer)));
-                                    }
+                                }
+                                Err(e) => {
+                                    return Some((Err(e), (StreamState::Done, buffer)));
                                 }
                             }
                         }
                     }
                 }
+            }
 
-                None
-            },
-        ))
+            None
+        });
+
+        // On WASM, wrap the !Send stream with force_send_stream for ChatModel trait compatibility.
+        #[cfg(target_family = "wasm")]
+        {
+            Box::pin(juncture_core::wasm_send::force_send_stream(stream))
+        }
+        #[cfg(not(target_family = "wasm"))]
+        {
+            Box::pin(stream)
+        }
     }
 
     fn bind_tools(&self, tools: Vec<ToolDefinition>) -> Self {

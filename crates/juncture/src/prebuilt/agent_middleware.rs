@@ -99,11 +99,7 @@ pub trait AgentMiddleware: Send + Sync + fmt::Debug {
     /// Called after a tool returns a result.
     ///
     /// Return a modified message to replace the tool's result.
-    async fn after_tool(
-        &self,
-        _tool_name: &str,
-        result: &Message,
-    ) -> Message {
+    async fn after_tool(&self, _tool_name: &str, result: &Message) -> Message {
         result.clone()
     }
 
@@ -177,13 +173,17 @@ impl AgentMiddleware for LoopDetectionMiddleware {
         let tool_calls: Vec<(&str, &serde_json::Value)> = recent
             .iter()
             .filter_map(|m| {
-                m.tool_calls.first().map(|tc| (tc.name.as_str(), &tc.arguments))
+                m.tool_calls
+                    .first()
+                    .map(|tc| (tc.name.as_str(), &tc.arguments))
             })
             .collect();
 
         if tool_calls.len() >= self.max_repetitions {
             let first = &tool_calls[0];
-            let all_same = tool_calls.iter().all(|tc| tc.0 == first.0 && tc.1 == first.1);
+            let all_same = tool_calls
+                .iter()
+                .all(|tc| tc.0 == first.0 && tc.1 == first.1);
             if all_same {
                 return MiddlewareAction::ShortCircuit(Message::ai(format!(
                     "Loop detected: tool '{}' called {} times with identical arguments. Stopping.",

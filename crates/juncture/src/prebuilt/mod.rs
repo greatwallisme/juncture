@@ -38,17 +38,17 @@
 //! let agent = create_react_agent_with_config(model, tools, config)?;
 //! ```
 
-pub mod agent_middleware;
 mod agent_factory;
+pub mod agent_middleware;
 mod messages_state;
 mod react;
 mod subagent;
 
+pub use agent_factory::{AgentConfig, create_agent_with_middleware};
 pub use agent_middleware::{
     AgentMiddleware, AgentMiddlewareChain, LoopDetectionMiddleware, MiddlewareAction,
     NopMiddleware, ToolErrorHandlingMiddleware,
 };
-pub use agent_factory::{AgentConfig, create_agent_with_middleware};
 pub use messages_state::MessagesState;
 pub use react::{
     AgentNode, PromptSource, ReactAgentConfig, create_agent, create_agent_with_config,

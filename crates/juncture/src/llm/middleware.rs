@@ -96,7 +96,8 @@ thread_local! {
 ///     }
 /// }
 /// ```
-#[async_trait]
+#[cfg_attr(target_family = "wasm", async_trait(?Send))]
+#[cfg_attr(not(target_family = "wasm"), async_trait)]
 pub trait LlmMiddleware: Send + Sync + 'static {
     /// Called before the LLM invocation.
     ///
@@ -277,7 +278,8 @@ impl<M: ChatModel + Default> Default for MiddlewareModel<M> {
     }
 }
 
-#[async_trait]
+#[cfg_attr(target_family = "wasm", async_trait(?Send))]
+#[cfg_attr(not(target_family = "wasm"), async_trait)]
 impl<M: ChatModel> ChatModel for MiddlewareModel<M> {
     async fn invoke(
         &self,
@@ -400,7 +402,8 @@ impl Default for LoggingMiddleware {
     }
 }
 
-#[async_trait]
+#[cfg_attr(target_family = "wasm", async_trait(?Send))]
+#[cfg_attr(not(target_family = "wasm"), async_trait)]
 impl LlmMiddleware for LoggingMiddleware {
     async fn pre_invoke(
         &self,
@@ -570,7 +573,8 @@ impl Default for MetricsMiddleware {
     }
 }
 
-#[async_trait]
+#[cfg_attr(target_family = "wasm", async_trait(?Send))]
+#[cfg_attr(not(target_family = "wasm"), async_trait)]
 impl LlmMiddleware for MetricsMiddleware {
     async fn pre_invoke(
         &self,
@@ -578,6 +582,7 @@ impl LlmMiddleware for MetricsMiddleware {
         _options: &mut CallOptions,
     ) -> Result<(), LlmError> {
         // Store the start time in thread-local storage
+        #[cfg(not(target_family = "wasm"))]
         MIDDLEWARE_START_TIME.set(Some(Instant::now()));
         Ok(())
     }
@@ -679,7 +684,8 @@ mod tests {
     /// Test middleware that aborts in `pre_invoke`
     struct AbortMiddleware;
 
-    #[async_trait]
+    #[cfg_attr(target_family = "wasm", async_trait(?Send))]
+    #[cfg_attr(not(target_family = "wasm"), async_trait)]
     impl LlmMiddleware for AbortMiddleware {
         async fn pre_invoke(
             &self,
@@ -712,7 +718,8 @@ mod tests {
     /// Test middleware that modifies the result in `post_invoke`
     struct ResultModifierMiddleware;
 
-    #[async_trait]
+    #[cfg_attr(target_family = "wasm", async_trait(?Send))]
+    #[cfg_attr(not(target_family = "wasm"), async_trait)]
     impl LlmMiddleware for ResultModifierMiddleware {
         async fn post_invoke(
             &self,
@@ -745,7 +752,8 @@ mod tests {
         name: String,
     }
 
-    #[async_trait]
+    #[cfg_attr(target_family = "wasm", async_trait(?Send))]
+    #[cfg_attr(not(target_family = "wasm"), async_trait)]
     impl LlmMiddleware for OrderRecorder {
         async fn pre_invoke(
             &self,

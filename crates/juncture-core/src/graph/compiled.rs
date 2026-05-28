@@ -5,6 +5,9 @@
 //! for execution by the Pregel engine.
 
 use super::builder::NodeMetadata;
+use crate::info_span;
+#[cfg(target_family = "wasm")]
+use crate::tracing_wasm::WasmInstrument;
 use crate::{
     JunctureError, State,
     checkpoint::{
@@ -21,6 +24,7 @@ use futures::Stream;
 use indexmap::IndexMap;
 use std::{pin::Pin, sync::Arc};
 use tokio::sync::mpsc;
+#[cfg(not(target_family = "wasm"))]
 use tracing::Instrument;
 
 /// Bounded channel capacity for Messages streaming mode.
@@ -293,9 +297,25 @@ impl<S: State, I: IntoState<S>, O: FromState<S>> CompiledGraph<S, I, O> {
     {
         let effective = self.effective_config(config);
 
-        // Use blocking executor to run async Pregel loop
-        let runtime = tokio::runtime::Runtime::new()
-            .map_err(|e| JunctureError::execution(format!("Failed to create runtime: {e}")))?;
+        // Use blocking executor to run async Pregel loop.
+        // On WASM or without multi-thread, use current_thread runtime.
+        let runtime = {
+            #[cfg(feature = "multi-thread")]
+            {
+                tokio::runtime::Runtime::new().map_err(|e| {
+                    JunctureError::execution(format!("Failed to create runtime: {e}"))
+                })?
+            }
+            #[cfg(not(feature = "multi-thread"))]
+            {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(|e| {
+                        JunctureError::execution(format!("Failed to create runtime: {e}"))
+                    })?
+            }
+        };
 
         runtime.block_on(self.invoke_async_inner(input, &effective))
     }
@@ -385,7 +405,7 @@ impl<S: State, I: IntoState<S>, O: FromState<S>> CompiledGraph<S, I, O> {
         let recursion_limit = pregel.runnable_config.recursion_limit;
 
         async move {
-            let graph_start = std::time::Instant::now();
+            let graph_start = crate::time::Instant::now();
 
             // Emit graph invocation counter metric and update active gauge
             if let Some(ref collector) = config.metrics_collector {
@@ -465,7 +485,7 @@ impl<S: State, I: IntoState<S>, O: FromState<S>> CompiledGraph<S, I, O> {
                 },
             })
         }
-        .instrument(tracing::info_span!(
+        .instrument(info_span!(
             "juncture.graph.invoke",
             "juncture.graph.name" = graph_name,
             "juncture.run.id" = %run_id,
@@ -812,7 +832,7 @@ impl<S: State, I: IntoState<S>, O: FromState<S>> CompiledGraph<S, I, O> {
                     }))
                     .await;
             }
-            .instrument(tracing::info_span!(
+            .instrument(info_span!(
                 "juncture.graph.invoke",
                 "juncture.graph.name" = graph_name,
                 "juncture.run.id" = %run_id,
@@ -968,7 +988,7 @@ impl<S: State, I: IntoState<S>, O: FromState<S>> CompiledGraph<S, I, O> {
 
             Ok(final_state)
         }
-        .instrument(tracing::info_span!(
+        .instrument(info_span!(
             "juncture.graph.invoke",
             "juncture.graph.name" = graph_name,
             "juncture.run.id" = %run_id,
@@ -1133,7 +1153,7 @@ impl<S: State, I: IntoState<S>, O: FromState<S>> CompiledGraph<S, I, O> {
                 },
             })
         }
-        .instrument(tracing::info_span!(
+        .instrument(info_span!(
             "juncture.graph.invoke",
             "juncture.graph.name" = graph_name,
             "juncture.run.id" = %run_id,
@@ -1426,7 +1446,7 @@ impl<S: State, I: IntoState<S>, O: FromState<S>> CompiledGraph<S, I, O> {
                     }))
                     .await;
             }
-            .instrument(tracing::info_span!(
+            .instrument(info_span!(
                 "juncture.graph.invoke",
                 "juncture.graph.name" = graph_name,
                 "juncture.run.id" = %run_id,

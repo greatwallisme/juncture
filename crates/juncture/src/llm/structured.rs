@@ -215,7 +215,8 @@ impl<M: ChatModel + Default, T: DeserializeOwned + JsonSchema + Clone + Send + S
     }
 }
 
-#[async_trait]
+#[cfg_attr(target_family = "wasm", async_trait(?Send))]
+#[cfg_attr(not(target_family = "wasm"), async_trait)]
 impl<M: ChatModel, T: DeserializeOwned + JsonSchema + Clone + Send + Sync + 'static> ChatModel
     for StructuredOutputModel<M, T>
 {

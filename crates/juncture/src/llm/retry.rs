@@ -216,7 +216,8 @@ impl<M: ChatModel + Default> Default for RetryingModel<M> {
     }
 }
 
-#[async_trait]
+#[cfg_attr(target_family = "wasm", async_trait(?Send))]
+#[cfg_attr(not(target_family = "wasm"), async_trait)]
 impl<M: ChatModel> ChatModel for RetryingModel<M> {
     async fn invoke(
         &self,

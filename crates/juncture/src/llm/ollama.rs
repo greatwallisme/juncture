@@ -82,10 +82,19 @@ impl ChatOllama {
     #[must_use]
     pub fn new(model: impl Into<String>) -> Self {
         Self {
-            client: Client::builder()
-                .timeout(Duration::from_secs(300))
-                .build()
-                .expect("Failed to create HTTP client"),
+            client: {
+                #[cfg(not(target_family = "wasm"))]
+                {
+                    Client::builder()
+                        .timeout(Duration::from_secs(300))
+                        .build()
+                        .expect("Failed to create HTTP client")
+                }
+                #[cfg(target_family = "wasm")]
+                {
+                    Client::new()
+                }
+            },
             model: model.into(),
             base_url: OLLAMA_BASE_URL.to_string(),
             temperature: None,
@@ -135,7 +144,8 @@ impl ChatOllama {
     }
 }
 
-#[async_trait]
+#[cfg_attr(target_family = "wasm", async_trait(?Send))]
+#[cfg_attr(not(target_family = "wasm"), async_trait)]
 impl ChatModel for ChatOllama {
     async fn invoke(
         &self,
@@ -146,6 +156,7 @@ impl ChatModel for ChatOllama {
             .and_then(|o| o.model_override.as_ref())
             .unwrap_or(&self.model);
 
+        #[cfg(not(target_family = "wasm"))]
         let span = tracing::info_span!(
             "juncture.llm.call",
             "juncture.llm.model" = %model,
@@ -155,6 +166,7 @@ impl ChatModel for ChatOllama {
             "juncture.llm.has_tool_calls" = false,
             "juncture.llm.stop_reason" = tracing::field::Empty,
         );
+        #[cfg(not(target_family = "wasm"))]
         let _enter = span.enter();
 
         let api_messages: Vec<_> = messages
@@ -182,6 +194,7 @@ impl ChatModel for ChatOllama {
             }),
         };
 
+        #[cfg(not(target_family = "wasm"))]
         let start = std::time::Instant::now();
 
         let response = self
@@ -219,6 +232,7 @@ impl ChatModel for ChatOllama {
             model = %model,
         );
 
+        #[cfg(not(target_family = "wasm"))]
         tracing::debug!(
             name: "juncture.llm.duration_ms",
             duration_ms = start.elapsed().as_millis(),
@@ -226,9 +240,12 @@ impl ChatModel for ChatOllama {
         );
 
         // Report LLM call and duration metrics
-        let duration_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
+        #[cfg(not(target_family = "wasm"))]
+        {
+            let duration_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
+            let _ = juncture_core::pregel::try_report_llm_duration(duration_ms);
+        }
         let _ = juncture_core::pregel::try_report_llm_call();
-        let _ = juncture_core::pregel::try_report_llm_duration(duration_ms);
 
         Ok(Message::ai_with_tool_calls(
             api_response.message.content,
@@ -252,11 +269,13 @@ impl ChatModel for ChatOllama {
             .unwrap_or(&self.model);
 
         // Create span for stream setup
+        #[cfg(not(target_family = "wasm"))]
         let span = tracing::info_span!(
             "juncture.llm.call",
             "juncture.llm.model" = %model,
             "juncture.llm.provider" = "ollama",
         );
+        #[cfg(not(target_family = "wasm"))]
         let _enter = span.enter();
 
         let api_messages: Vec<_> = messages

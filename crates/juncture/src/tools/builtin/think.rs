@@ -58,12 +58,18 @@ impl Default for ThinkTool {
 
 #[async_trait]
 impl Tool for ThinkTool {
-    #[allow(clippy::unnecessary_literal_bound, reason = "trait signature requires &self lifetime")]
+    #[allow(
+        clippy::unnecessary_literal_bound,
+        reason = "trait signature requires &self lifetime"
+    )]
     fn name(&self) -> &str {
         "think"
     }
 
-    #[allow(clippy::unnecessary_literal_bound, reason = "trait signature requires &self lifetime")]
+    #[allow(
+        clippy::unnecessary_literal_bound,
+        reason = "trait signature requires &self lifetime"
+    )]
     fn description(&self) -> &str {
         "Tool for strategic reflection on research progress and decision-making. \
          Use this tool after each search to analyze results and plan next steps systematically. \

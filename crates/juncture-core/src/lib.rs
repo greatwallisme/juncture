@@ -1,5 +1,6 @@
 pub mod chat;
 pub mod checkpoint;
+#[cfg(not(target_family = "wasm"))]
 pub mod client;
 pub mod command;
 pub mod config;
@@ -19,7 +20,10 @@ pub mod state;
 pub mod store;
 pub mod stream;
 pub mod subgraph;
+pub mod time;
 pub mod tools;
+pub mod tracing_wasm;
+pub mod wasm_send;
 
 /// Interrupt macro for human-in-the-loop interactions (task-local version)
 ///
@@ -197,11 +201,13 @@ macro_rules! parent_command {
     };
 }
 
+#[cfg(not(target_family = "wasm"))]
 pub use chat::{ChatAnthropic, ChatOllama, ChatOpenAI};
 pub use checkpoint::{
     CHECKPOINT_NS_SEPARATOR, CheckpointNamespace, CheckpointSaver, DeltaCounters, NamespaceSegment,
     generate_checkpoint_id,
 };
+#[cfg(not(target_family = "wasm"))]
 pub use client::{
     AuthConfig, ClientError, GraphClient, InvokeConfig, JunctureClient, StateSnapshot, Thread,
 };
@@ -212,8 +218,8 @@ pub use error::{ErrorCode, InvalidUpdateError, JunctureError, NodeTimeoutError};
 pub use func::{Runtime as FuncRuntime, compile_entrypoint, compile_entrypoint_with_config};
 pub use graph::{
     CompiledGraph, DrawableEdge, DrawableGraph, DrawableNode, ErrorHandlerNode, GraphOutput,
-    GraphOutputMetadata, InterruptInfo, NodeMetadata, RemoteGraph, RetryPolicy, RetryingNode,
-    StateFilter, StateGraph, StateUpdate, StreamHandle, SubgraphInfo, TopologyError,
+    GraphOutputMetadata, InterruptInfo, NodeMetadata, RetryPolicy, RetryingNode, StateFilter,
+    StateGraph, StateUpdate, StreamHandle, SubgraphInfo, TopologyError,
 };
 pub use interrupt::{
     HIDDEN_TAG, InterruptContext, InterruptSignal, ResumeValue, Scratchpad, generate_interrupt_id,

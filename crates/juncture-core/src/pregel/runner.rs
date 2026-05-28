@@ -3,20 +3,25 @@
 //! This module provides parallel task execution using tokio for concurrent
 //! node execution with bounded concurrency and cancellation support.
 
+use crate::time::Instant;
+#[cfg(target_family = "wasm")]
+use crate::tracing_wasm::WasmInstrument;
 use crate::{
     JunctureError, Node, State,
     config::RunnableConfig,
     graph::{RetryPolicy, execute_with_retry},
+    info_span,
     interrupt::{InterruptContext, InterruptSignal, ResumeValue, Scratchpad},
     pregel::context::TimeoutPolicy,
     pregel::types::{PendingTask, SuperstepResult, TaskOutput},
     runtime::Heartbeat,
 };
 use std::collections::HashMap;
-use std::{sync::Arc, time::Instant};
+use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
+#[cfg(not(target_family = "wasm"))]
 use tracing::Instrument;
 
 #[cfg(feature = "otel")]
@@ -357,7 +362,7 @@ where
         let metrics_collector = task_config.metrics_collector.clone();
 
         // Create span before moving values into the async block
-        let span = tracing::info_span!(
+        let span = info_span!(
             "juncture.node.execute",
             node_name = %node_name,
             task_id = %task_id,

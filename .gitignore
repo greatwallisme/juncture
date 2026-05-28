@@ -7,4 +7,5 @@ __pycache__
 *.sqlite3
 *.db
 *.env
-.codegraph   
+.codegraph
+.playwright-mcp

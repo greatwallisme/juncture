@@ -179,20 +179,22 @@ impl<M: ChatModel> FactExtractor for LlmFactExtractor<M> {
         };
 
         // Invoke the model
-        let response = self
-            .model
-            .invoke(&[system_prompt, user_msg], Some(&options))
-            .await
-            .map_err(|e| match e {
-                LlmError::InvalidResponse(msg) => {
-                    MemoryError::ExtractionFailed(format!("invalid response: {msg}"))
-                }
-                #[cfg(any(feature = "anthropic", feature = "openai", feature = "ollama"))]
-                LlmError::NetworkError(e) => {
-                    MemoryError::ExtractionFailed(format!("network error: {e}"))
-                }
-                _ => MemoryError::ExtractionFailed(format!("LLM error: {e}")),
-            })?;
+        // On WASM, ChatModel::invoke() returns !Send future; wrap with force_send.
+        let response = juncture_core::wasm_send::force_send(
+            self.model
+                .invoke(&[system_prompt, user_msg], Some(&options)),
+        )
+        .await
+        .map_err(|e| match e {
+            LlmError::InvalidResponse(msg) => {
+                MemoryError::ExtractionFailed(format!("invalid response: {msg}"))
+            }
+            #[cfg(any(feature = "anthropic", feature = "openai", feature = "ollama"))]
+            LlmError::NetworkError(e) => {
+                MemoryError::ExtractionFailed(format!("network error: {e}"))
+            }
+            _ => MemoryError::ExtractionFailed(format!("LLM error: {e}")),
+        })?;
 
         // Extract and clean JSON response
         let raw_response = response.content_text();

@@ -355,3 +355,4 @@ Juncture 保留此设计：`CheckpointSaver::put_writes()` 在每个节点完成
 | [08-llm-tools.md](08-llm-tools.md) | LLM 集成、Tool 系统、Prebuilt Agent |
 | [09-observability.md](09-observability.md) | 可观测性（Tracing / OpenTelemetry / Callbacks） |
 | [10-store.md](10-store.md) | Store 跨线程长期记忆 |
+| [11-wasm.md](11-wasm.md) | WASM 支持设计（浏览器/边缘运行时） |

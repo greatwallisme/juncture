@@ -7,10 +7,14 @@ use juncture_core::checkpoint::{
     CheckpointSaver, CheckpointTuple, PendingWrite,
 };
 use juncture_core::config::RunnableConfig;
+use juncture_core::info_span;
+#[cfg(target_family = "wasm")]
+use juncture_core::tracing_wasm::WasmInstrument;
 use juncture_tracing::spans::names;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+#[cfg(not(target_family = "wasm"))]
 use tracing::Instrument;
 
 use crate::error::CheckpointError;
@@ -339,7 +343,7 @@ impl CheckpointSaver for MemorySaver {
         metadata: CheckpointMetadata,
     ) -> Result<RunnableConfig, CoreCheckpointError> {
         // Create tracing span for checkpoint put operation
-        let span = tracing::info_span!(
+        let span = info_span!(
             target: "juncture",
             names::CHECKPOINT_PUT,
             "juncture.checkpoint.id" = %checkpoint.id,
@@ -403,7 +407,7 @@ impl CheckpointSaver for MemorySaver {
         let checkpoint_id_for_span = config.checkpoint_id.clone().unwrap_or_default();
 
         // Create tracing span for checkpoint put_writes operation
-        let span = tracing::info_span!(
+        let span = info_span!(
             target: "juncture",
             "juncture.checkpoint.put_writes",
             "juncture.checkpoint.id" = %checkpoint_id_for_span,

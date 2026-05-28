@@ -452,7 +452,8 @@ impl Default for CircuitBreaker {
     }
 }
 
-#[async_trait]
+#[cfg_attr(target_family = "wasm", async_trait(?Send))]
+#[cfg_attr(not(target_family = "wasm"), async_trait)]
 impl LlmMiddleware for CircuitBreaker {
     async fn pre_invoke(
         &self,

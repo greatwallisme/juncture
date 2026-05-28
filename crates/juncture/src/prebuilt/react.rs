@@ -525,11 +525,12 @@ impl<M: ChatModel> Node<MessagesState> for AgentNode<M> {
         let options = self.model_selector.as_ref().map(|sel| sel(&state));
 
         Box::pin(async move {
-            let response = self
-                .model
-                .invoke(&messages, options.as_ref())
-                .await
-                .map_err(|e| JunctureError::execution(e.to_string()))?;
+            // On WASM, ChatModel::invoke() returns !Send future; wrap with force_send.
+            let response = juncture_core::wasm_send::force_send(
+                self.model.invoke(&messages, options.as_ref()),
+            )
+            .await
+            .map_err(|e| JunctureError::execution(e.to_string()))?;
 
             // Apply post_model_hook to transform the response
             let response = match &self.post_model_hook {
@@ -643,7 +644,7 @@ struct ToolNodeAdapter {
 impl ToolNodeAdapter {
     /// Create a new adapter wrapping the given tool node.
     #[must_use]
-        fn new(tool_node: Arc<ToolNode<MessagesState>>, store: Option<Arc<dyn Store>>) -> Self {
+    fn new(tool_node: Arc<ToolNode<MessagesState>>, store: Option<Arc<dyn Store>>) -> Self {
         Self { tool_node, store }
     }
 }

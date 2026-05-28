@@ -111,20 +111,21 @@ impl<M: ChatModel> Summarizer for LlmSummarizer<M> {
         };
 
         // Invoke the model
-        let response = self
-            .model
-            .invoke(&[system_msg, user_msg], Some(&options))
-            .await
-            .map_err(|e| match e {
-                LlmError::InvalidResponse(msg) => {
-                    MemoryError::SummarizationFailed(format!("invalid response: {msg}"))
-                }
-                #[cfg(any(feature = "anthropic", feature = "openai", feature = "ollama"))]
-                LlmError::NetworkError(e) => {
-                    MemoryError::SummarizationFailed(format!("network error: {e}"))
-                }
-                _ => MemoryError::SummarizationFailed(format!("LLM error: {e}")),
-            })?;
+        // On WASM, ChatModel::invoke() returns !Send future; wrap with force_send.
+        let response = juncture_core::wasm_send::force_send(
+            self.model.invoke(&[system_msg, user_msg], Some(&options)),
+        )
+        .await
+        .map_err(|e| match e {
+            LlmError::InvalidResponse(msg) => {
+                MemoryError::SummarizationFailed(format!("invalid response: {msg}"))
+            }
+            #[cfg(any(feature = "anthropic", feature = "openai", feature = "ollama"))]
+            LlmError::NetworkError(e) => {
+                MemoryError::SummarizationFailed(format!("network error: {e}"))
+            }
+            _ => MemoryError::SummarizationFailed(format!("LLM error: {e}")),
+        })?;
 
         // Extract the summary text from the response
         let summary = response.content_text();

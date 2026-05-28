@@ -175,7 +175,8 @@ pub use crate::stream::ToolCallChunk;
 /// # Type Parameters
 ///
 /// * `'a` - Lifetime for borrowed data in streaming
-#[async_trait]
+#[cfg_attr(target_family = "wasm", async_trait(?Send))]
+#[cfg_attr(not(target_family = "wasm"), async_trait)]
 pub trait ChatModel: Send + Sync + Clone + 'static {
     /// Invoke the model with messages
     ///
@@ -285,7 +286,8 @@ where
     }
 }
 
-#[async_trait]
+#[cfg_attr(target_family = "wasm", async_trait(?Send))]
+#[cfg_attr(not(target_family = "wasm"), async_trait)]
 impl<M, T> ChatModel for StructuredOutputModel<M, T>
 where
     M: ChatModel,

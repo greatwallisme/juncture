@@ -183,20 +183,39 @@ impl ChatAnthropic {
             .send()
             .await
             .map_err(|e| {
-                if e.is_connect() || e.is_timeout() {
-                    LlmError::NetworkError(e.to_string())
-                } else if e.is_status() {
-                    match e.status() {
-                        Some(reqwest::StatusCode::UNAUTHORIZED) => {
-                            LlmError::AuthError("Invalid API key".to_string())
+                #[cfg(not(target_family = "wasm"))]
+                {
+                    if e.is_connect() || e.is_timeout() {
+                        LlmError::NetworkError(e.to_string())
+                    } else if e.is_status() {
+                        match e.status() {
+                            Some(reqwest::StatusCode::UNAUTHORIZED) => {
+                                LlmError::AuthError("Invalid API key".to_string())
+                            }
+                            Some(reqwest::StatusCode::TOO_MANY_REQUESTS) => {
+                                LlmError::RateLimited { retry_after: None }
+                            }
+                            _ => LlmError::NetworkError(e.to_string()),
                         }
-                        Some(reqwest::StatusCode::TOO_MANY_REQUESTS) => {
-                            LlmError::RateLimited { retry_after: None }
-                        }
-                        _ => LlmError::NetworkError(e.to_string()),
+                    } else {
+                        LlmError::NetworkError(e.to_string())
                     }
-                } else {
-                    LlmError::NetworkError(e.to_string())
+                }
+                #[cfg(target_family = "wasm")]
+                {
+                    if let Some(status) = e.status() {
+                        match status {
+                            reqwest::StatusCode::UNAUTHORIZED => {
+                                LlmError::AuthError("Invalid API key".to_string())
+                            }
+                            reqwest::StatusCode::TOO_MANY_REQUESTS => {
+                                LlmError::RateLimited { retry_after: None }
+                            }
+                            _ => LlmError::NetworkError(e.to_string()),
+                        }
+                    } else {
+                        LlmError::NetworkError(e.to_string())
+                    }
                 }
             })
     }
@@ -226,7 +245,8 @@ impl ChatAnthropic {
     }
 }
 
-#[async_trait]
+#[cfg_attr(target_family = "wasm", async_trait(?Send))]
+#[cfg_attr(not(target_family = "wasm"), async_trait)]
 impl ChatModel for ChatAnthropic {
     async fn invoke(
         &self,
@@ -328,6 +348,7 @@ impl ChatModel for ChatAnthropic {
         // async_trait boxes the future and self-referential borrows are
         // not possible across that boundary.
         let (tx, rx) = tokio::sync::mpsc::channel::<Result<tokio_util::bytes::Bytes, LlmError>>(8);
+        #[cfg(not(target_family = "wasm"))]
         tokio::spawn(async move {
             let mut reader = response;
             loop {
@@ -345,6 +366,21 @@ impl ChatModel for ChatAnthropic {
                 }
             }
         });
+        #[cfg(target_family = "wasm")]
+        {
+            // On WASM, chunk() is not available. Get full body as bytes.
+            // force_send wraps the !Send future for tokio::spawn compatibility.
+            tokio::spawn(crate::wasm_send::force_send(async move {
+                match response.bytes().await {
+                    Ok(bytes) => {
+                        let _ = tx.send(Ok(bytes)).await;
+                    }
+                    Err(e) => {
+                        let _ = tx.send(Err(LlmError::NetworkError(e.to_string()))).await;
+                    }
+                }
+            }));
+        }
 
         let receiver_stream = tokio_stream::wrappers::ReceiverStream::new(rx);
         let byte_stream: std::pin::Pin<
@@ -612,7 +648,8 @@ impl ChatOpenAI {
     }
 }
 
-#[async_trait]
+#[cfg_attr(target_family = "wasm", async_trait(?Send))]
+#[cfg_attr(not(target_family = "wasm"), async_trait)]
 impl ChatModel for ChatOpenAI {
     async fn invoke(
         &self,
@@ -631,20 +668,39 @@ impl ChatModel for ChatOpenAI {
             .send()
             .await
             .map_err(|e| {
-                if e.is_connect() || e.is_timeout() {
-                    LlmError::NetworkError(e.to_string())
-                } else if e.is_status() {
-                    match e.status() {
-                        Some(reqwest::StatusCode::UNAUTHORIZED) => {
-                            LlmError::AuthError("Invalid API key".to_string())
+                #[cfg(not(target_family = "wasm"))]
+                {
+                    if e.is_connect() || e.is_timeout() {
+                        LlmError::NetworkError(e.to_string())
+                    } else if e.is_status() {
+                        match e.status() {
+                            Some(reqwest::StatusCode::UNAUTHORIZED) => {
+                                LlmError::AuthError("Invalid API key".to_string())
+                            }
+                            Some(reqwest::StatusCode::TOO_MANY_REQUESTS) => {
+                                LlmError::RateLimited { retry_after: None }
+                            }
+                            _ => LlmError::NetworkError(e.to_string()),
                         }
-                        Some(reqwest::StatusCode::TOO_MANY_REQUESTS) => {
-                            LlmError::RateLimited { retry_after: None }
-                        }
-                        _ => LlmError::NetworkError(e.to_string()),
+                    } else {
+                        LlmError::NetworkError(e.to_string())
                     }
-                } else {
-                    LlmError::NetworkError(e.to_string())
+                }
+                #[cfg(target_family = "wasm")]
+                {
+                    if let Some(status) = e.status() {
+                        match status {
+                            reqwest::StatusCode::UNAUTHORIZED => {
+                                LlmError::AuthError("Invalid API key".to_string())
+                            }
+                            reqwest::StatusCode::TOO_MANY_REQUESTS => {
+                                LlmError::RateLimited { retry_after: None }
+                            }
+                            _ => LlmError::NetworkError(e.to_string()),
+                        }
+                    } else {
+                        LlmError::NetworkError(e.to_string())
+                    }
                 }
             })?;
 
@@ -704,20 +760,39 @@ impl ChatModel for ChatOpenAI {
             .send()
             .await
             .map_err(|e| {
-                if e.is_connect() || e.is_timeout() {
-                    LlmError::NetworkError(e.to_string())
-                } else if e.is_status() {
-                    match e.status() {
-                        Some(reqwest::StatusCode::UNAUTHORIZED) => {
-                            LlmError::AuthError("Invalid API key".to_string())
+                #[cfg(not(target_family = "wasm"))]
+                {
+                    if e.is_connect() || e.is_timeout() {
+                        LlmError::NetworkError(e.to_string())
+                    } else if e.is_status() {
+                        match e.status() {
+                            Some(reqwest::StatusCode::UNAUTHORIZED) => {
+                                LlmError::AuthError("Invalid API key".to_string())
+                            }
+                            Some(reqwest::StatusCode::TOO_MANY_REQUESTS) => {
+                                LlmError::RateLimited { retry_after: None }
+                            }
+                            _ => LlmError::NetworkError(e.to_string()),
                         }
-                        Some(reqwest::StatusCode::TOO_MANY_REQUESTS) => {
-                            LlmError::RateLimited { retry_after: None }
-                        }
-                        _ => LlmError::NetworkError(e.to_string()),
+                    } else {
+                        LlmError::NetworkError(e.to_string())
                     }
-                } else {
-                    LlmError::NetworkError(e.to_string())
+                }
+                #[cfg(target_family = "wasm")]
+                {
+                    if let Some(status) = e.status() {
+                        match status {
+                            reqwest::StatusCode::UNAUTHORIZED => {
+                                LlmError::AuthError("Invalid API key".to_string())
+                            }
+                            reqwest::StatusCode::TOO_MANY_REQUESTS => {
+                                LlmError::RateLimited { retry_after: None }
+                            }
+                            _ => LlmError::NetworkError(e.to_string()),
+                        }
+                    } else {
+                        LlmError::NetworkError(e.to_string())
+                    }
                 }
             })?;
 
@@ -755,6 +830,7 @@ impl ChatModel for ChatOpenAI {
         // async_trait boxes the future and self-referential borrows across
         // that boundary are not possible.
         let (tx, rx) = tokio::sync::mpsc::channel::<Result<tokio_util::bytes::Bytes, LlmError>>(8);
+        #[cfg(not(target_family = "wasm"))]
         tokio::spawn(async move {
             let mut reader = response;
             loop {
@@ -772,6 +848,21 @@ impl ChatModel for ChatOpenAI {
                 }
             }
         });
+        #[cfg(target_family = "wasm")]
+        {
+            // On WASM, chunk() is not available. Get full body as bytes.
+            // force_send wraps the !Send future for tokio::spawn compatibility.
+            tokio::spawn(crate::wasm_send::force_send(async move {
+                match response.bytes().await {
+                    Ok(bytes) => {
+                        let _ = tx.send(Ok(bytes)).await;
+                    }
+                    Err(e) => {
+                        let _ = tx.send(Err(LlmError::NetworkError(e.to_string()))).await;
+                    }
+                }
+            }));
+        }
 
         let receiver_stream = tokio_stream::wrappers::ReceiverStream::new(rx);
         let byte_stream: std::pin::Pin<
@@ -967,12 +1058,19 @@ impl ChatOllama {
             .send()
             .await
             .map_err(|e| {
-                if e.is_connect() || e.is_timeout() {
-                    LlmError::NetworkError(format!(
-                        "Failed to connect to Ollama at {}: {}. Is Ollama running?",
-                        self.base_url, e
-                    ))
-                } else {
+                #[cfg(not(target_family = "wasm"))]
+                {
+                    if e.is_connect() || e.is_timeout() {
+                        LlmError::NetworkError(format!(
+                            "Failed to connect to Ollama at {}: {}. Is Ollama running?",
+                            self.base_url, e
+                        ))
+                    } else {
+                        LlmError::NetworkError(e.to_string())
+                    }
+                }
+                #[cfg(target_family = "wasm")]
+                {
                     LlmError::NetworkError(e.to_string())
                 }
             })
@@ -997,7 +1095,8 @@ impl ChatOllama {
     }
 }
 
-#[async_trait]
+#[cfg_attr(target_family = "wasm", async_trait(?Send))]
+#[cfg_attr(not(target_family = "wasm"), async_trait)]
 impl ChatModel for ChatOllama {
     async fn invoke(
         &self,
@@ -1059,6 +1158,7 @@ impl ChatModel for ChatOllama {
         // async_trait boxes the future and self-referential borrows across
         // that boundary are not possible.
         let (tx, rx) = tokio::sync::mpsc::channel::<Result<tokio_util::bytes::Bytes, LlmError>>(8);
+        #[cfg(not(target_family = "wasm"))]
         tokio::spawn(async move {
             let mut reader = response;
             loop {
@@ -1076,6 +1176,21 @@ impl ChatModel for ChatOllama {
                 }
             }
         });
+        #[cfg(target_family = "wasm")]
+        {
+            // On WASM, chunk() is not available. Get full body as bytes.
+            // force_send wraps the !Send future for tokio::spawn compatibility.
+            tokio::spawn(crate::wasm_send::force_send(async move {
+                match response.bytes().await {
+                    Ok(bytes) => {
+                        let _ = tx.send(Ok(bytes)).await;
+                    }
+                    Err(e) => {
+                        let _ = tx.send(Err(LlmError::NetworkError(e.to_string()))).await;
+                    }
+                }
+            }));
+        }
 
         let receiver_stream = tokio_stream::wrappers::ReceiverStream::new(rx);
         let byte_stream: std::pin::Pin<

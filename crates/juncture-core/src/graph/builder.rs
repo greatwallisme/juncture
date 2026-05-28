@@ -2662,7 +2662,7 @@ mod tests {
         };
         let config = crate::RunnableConfig::new();
 
-        let start = std::time::Instant::now();
+        let start = crate::time::Instant::now();
         let attempt_count = Arc::new(std::sync::atomic::AtomicU32::new(0));
         let attempt_clone = Arc::clone(&attempt_count);
 

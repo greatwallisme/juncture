@@ -91,10 +91,19 @@ impl ChatAnthropic {
     #[must_use]
     pub fn new(api_key: impl Into<String>) -> Self {
         Self {
-            client: Client::builder()
-                .timeout(Duration::from_secs(120))
-                .build()
-                .expect("Failed to create HTTP client"),
+            client: {
+                #[cfg(not(target_family = "wasm"))]
+                {
+                    Client::builder()
+                        .timeout(Duration::from_secs(120))
+                        .build()
+                        .expect("Failed to create HTTP client")
+                }
+                #[cfg(target_family = "wasm")]
+                {
+                    Client::new()
+                }
+            },
             api_key: api_key.into(),
             model: "claude-3-5-sonnet-20241022".to_string(),
             base_url: ANTHROPIC_BASE_URL.to_string(),
@@ -222,7 +231,8 @@ impl ChatAnthropic {
     }
 }
 
-#[async_trait]
+#[cfg_attr(target_family = "wasm", async_trait(?Send))]
+#[cfg_attr(not(target_family = "wasm"), async_trait)]
 impl ChatModel for ChatAnthropic {
     #[allow(
         clippy::too_many_lines,
@@ -237,6 +247,7 @@ impl ChatModel for ChatAnthropic {
             .and_then(|o| o.model_override.as_ref())
             .unwrap_or(&self.model);
 
+        #[cfg(not(target_family = "wasm"))]
         let span = tracing::info_span!(
             "juncture.llm.call",
             "juncture.llm.model" = %model,
@@ -247,6 +258,7 @@ impl ChatModel for ChatAnthropic {
             "juncture.llm.stop_reason" = tracing::field::Empty,
             "juncture.cost.usd" = tracing::field::Empty,
         );
+        #[cfg(not(target_family = "wasm"))]
         let _enter = span.enter();
 
         let (system_msg, api_messages): (Vec<_>, Vec<_>) = messages
@@ -306,6 +318,7 @@ impl ChatModel for ChatAnthropic {
             stream: false,
         };
 
+        #[cfg(not(target_family = "wasm"))]
         let start = std::time::Instant::now();
 
         let response = self
@@ -376,6 +389,7 @@ impl ChatModel for ChatAnthropic {
             );
         }
 
+        #[cfg(not(target_family = "wasm"))]
         tracing::debug!(
             name: "juncture.llm.duration_ms",
             duration_ms = start.elapsed().as_millis(),
@@ -398,9 +412,12 @@ impl ChatModel for ChatAnthropic {
         }
 
         // Report LLM call and duration metrics
-        let duration_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
+        #[cfg(not(target_family = "wasm"))]
+        {
+            let duration_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
+            let _ = juncture_core::pregel::try_report_llm_duration(duration_ms);
+        }
         let _ = juncture_core::pregel::try_report_llm_call();
-        let _ = juncture_core::pregel::try_report_llm_duration(duration_ms);
 
         Ok(message)
     }
@@ -421,11 +438,13 @@ impl ChatModel for ChatAnthropic {
             .unwrap_or(&self.model);
 
         // Create span for stream setup
+        #[cfg(not(target_family = "wasm"))]
         let span = tracing::info_span!(
             "juncture.llm.call",
             "juncture.llm.model" = %model,
             "juncture.llm.provider" = "anthropic",
         );
+        #[cfg(not(target_family = "wasm"))]
         let _enter = span.enter();
 
         let (system_msg, api_messages): (Vec<_>, Vec<_>) = messages

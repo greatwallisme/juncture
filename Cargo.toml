@@ -11,6 +11,9 @@ members = [
     "examples/deep-research",
     "benchmarks",
 ]
+exclude = [
+    "examples/wasm-example",
+]
 
 [workspace.package]
 version = "0.1.0"

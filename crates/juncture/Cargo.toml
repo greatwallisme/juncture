@@ -10,7 +10,7 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
-juncture-core = { path = "../juncture-core" }
+juncture-core = { path = "../juncture-core", default-features = false }
 juncture-derive = { path = "../juncture-derive" }
 juncture-store = { path = "../juncture-store", optional = true }
 juncture-tracing = { path = "../juncture-tracing" }
@@ -30,13 +30,15 @@ bytes = { version = "1", optional = true }
 schemars = { version = "0.8", optional = true }
 
 [features]
-default = []
+default = ["multi-thread"]
+multi-thread = ["juncture-core/multi-thread"]
 anthropic = ["dep:reqwest", "dep:bytes"]
 openai = ["dep:reqwest", "dep:bytes"]
 ollama = ["dep:reqwest", "dep:bytes"]
 reqwest = ["dep:reqwest", "dep:bytes"]
 structured-output = ["schemars"]
 store = ["juncture-store"]
+wasm = ["juncture-core/wasm"]
 
 [lints]
 workspace = true

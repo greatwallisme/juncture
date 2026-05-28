@@ -284,7 +284,7 @@ impl Default for Heartbeat {
 /// ```
 pub struct HeartbeatWatcher {
     rx: tokio::sync::mpsc::UnboundedReceiver<()>,
-    last_beat: std::time::Instant,
+    last_beat: crate::time::Instant,
 }
 
 impl std::fmt::Debug for HeartbeatWatcher {
@@ -301,7 +301,7 @@ impl HeartbeatWatcher {
     pub fn new(rx: tokio::sync::mpsc::UnboundedReceiver<()>) -> Self {
         Self {
             rx,
-            last_beat: std::time::Instant::now(),
+            last_beat: crate::time::Instant::now(),
         }
     }
 
@@ -317,7 +317,7 @@ impl HeartbeatWatcher {
     pub fn is_alive(&mut self, idle_timeout: Duration) -> bool {
         // Drain all pending heartbeats and update the last beat timestamp
         while self.rx.try_recv().is_ok() {
-            self.last_beat = std::time::Instant::now();
+            self.last_beat = crate::time::Instant::now();
         }
         self.last_beat.elapsed() < idle_timeout
     }

@@ -665,6 +665,7 @@ impl<S: State> ToolNode<S> {
         );
 
         // Execute the tool - dispatch based on tool type
+        #[cfg(not(target_family = "wasm"))]
         let start = std::time::Instant::now();
         let result = match tool {
             ToolEntry::Stateless(stateless_tool) => {
@@ -692,7 +693,10 @@ impl<S: State> ToolNode<S> {
                 }
             }
         };
+        #[cfg(not(target_family = "wasm"))]
         let duration_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
+        #[cfg(target_family = "wasm")]
+        let duration_ms: u64 = 0;
 
         // Record duration
         tracing::Span::current().record(attrs::TOOL_DURATION_MS, duration_ms);

@@ -10,9 +10,10 @@
 //! parameter passing. Use [`try_report_model_call`] to report usage from
 //! within LLM implementations.
 
+use crate::time::Instant;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 // Task-local budget tracker for LLM usage reporting.
 //

@@ -14,8 +14,8 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 indexmap = "2"
 thiserror = "2"
-tokio = { version = "1", features = ["sync", "rt", "rt-multi-thread", "macros", "time"] }
-tokio-util = "0.7"
+tokio = { version = "1", features = ["sync", "rt", "macros", "time"] }
+tokio-util = { version = "0.7", default-features = false, features = ["rt"] }
 tracing = "0.1"
 uuid = { version = "1", features = ["v4", "v6"] }
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
@@ -29,8 +29,16 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 opentelemetry = { version = "0.27", optional = true }
 sqlx = { version = "0.8", optional = true, default-features = false, features = ["runtime-tokio", "chrono"] }
 
+[target.'cfg(target_family = "wasm")'.dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream"] }
+getrandom = { version = "0.3", features = ["wasm_js"] }
+web-time = "1"
+wasm-bindgen-futures = "0.4"
+
 [features]
 default = []
+multi-thread = ["tokio/rt-multi-thread"]
+wasm = ["uuid/js"]
 otel = ["opentelemetry"]
 sqlite = ["sqlx/sqlite"]
 postgres = ["sqlx/postgres"]

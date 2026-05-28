@@ -77,12 +77,18 @@ impl Default for WebFetchTool {
 
 #[async_trait]
 impl Tool for WebFetchTool {
-    #[allow(clippy::unnecessary_literal_bound, reason = "trait signature requires &self lifetime")]
+    #[allow(
+        clippy::unnecessary_literal_bound,
+        reason = "trait signature requires &self lifetime"
+    )]
     fn name(&self) -> &str {
         "web_fetch"
     }
 
-    #[allow(clippy::unnecessary_literal_bound, reason = "trait signature requires &self lifetime")]
+    #[allow(
+        clippy::unnecessary_literal_bound,
+        reason = "trait signature requires &self lifetime"
+    )]
     fn description(&self) -> &str {
         "Fetch the full text content of a webpage. \
          Use this tool to read the complete content of articles, documentation, \
@@ -116,9 +122,7 @@ impl Tool for WebFetchTool {
             .ok_or_else(|| ToolError::invalid_input("Missing 'url' field".to_string()))?;
 
         if url.trim().is_empty() {
-            return Err(ToolError::invalid_input(
-                "URL cannot be empty".to_string(),
-            ));
+            return Err(ToolError::invalid_input("URL cannot be empty".to_string()));
         }
 
         // Validate URL scheme
@@ -131,7 +135,9 @@ impl Tool for WebFetchTool {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(self.timeout_secs))
             .build()
-            .map_err(|e| ToolError::execution_failed(format!("Failed to create HTTP client: {e}")))?;
+            .map_err(|e| {
+                ToolError::execution_failed(format!("Failed to create HTTP client: {e}"))
+            })?;
 
         let response = client
             .get(url)
@@ -147,10 +153,9 @@ impl Tool for WebFetchTool {
             )));
         }
 
-        let body = response
-            .text()
-            .await
-            .map_err(|e| ToolError::execution_failed(format!("Failed to read response body: {e}")))?;
+        let body = response.text().await.map_err(|e| {
+            ToolError::execution_failed(format!("Failed to read response body: {e}"))
+        })?;
 
         if body.len() > self.max_size {
             return Err(ToolError::execution_failed(format!(

@@ -94,9 +94,18 @@ impl fmt::Debug for AgentConfig {
             .field("middleware", &self.middleware)
             .field("max_iterations", &self.max_iterations)
             .field("interrupt_before_tools", &self.interrupt_before_tools)
-            .field("pre_model_hook", &self.pre_model_hook.as_ref().map(|_| "..."))
-            .field("post_model_hook", &self.post_model_hook.as_ref().map(|_| "..."))
-            .field("model_selector", &self.model_selector.as_ref().map(|_| "..."))
+            .field(
+                "pre_model_hook",
+                &self.pre_model_hook.as_ref().map(|_| "..."),
+            )
+            .field(
+                "post_model_hook",
+                &self.post_model_hook.as_ref().map(|_| "..."),
+            )
+            .field(
+                "model_selector",
+                &self.model_selector.as_ref().map(|_| "..."),
+            )
             .field("store", &self.store.as_ref().map(|_| "..."))
             .finish()
     }
@@ -172,10 +181,11 @@ pub fn create_agent_with_middleware<M: ChatModel>(
             let options = selector.as_ref().map(|sel| sel(&state));
 
             // Invoke the model
-            let response = model
-                .invoke(&messages, options.as_ref())
-                .await
-                .map_err(|e| JunctureError::execution(e.to_string()))?;
+            // On WASM, ChatModel::invoke() returns !Send future; wrap with force_send.
+            let response =
+                juncture_core::wasm_send::force_send(model.invoke(&messages, options.as_ref()))
+                    .await
+                    .map_err(|e| JunctureError::execution(e.to_string()))?;
 
             // Apply post_model_hook
             let response = match post_hook {

@@ -3,6 +3,7 @@
 //! This module provides the `PregelLoop` struct that orchestrates graph execution
 //! using the Pregel algorithm with version tracking and task scheduling.
 
+use crate::time::Instant;
 use crate::{
     JunctureError, Node, State,
     checkpoint::{
@@ -28,7 +29,6 @@ use indexmap::IndexMap;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Instant;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
