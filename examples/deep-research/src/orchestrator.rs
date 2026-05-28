@@ -12,6 +12,7 @@ use juncture::prebuilt::{
 };
 use juncture::prebuilt::{InMemoryAgentRegistry, SubagentTool};
 use juncture::tools::ThinkTool;
+use juncture_core::store::Store;
 
 use crate::config::ResearchConfig;
 use crate::llm::build_model_with_middleware;
@@ -82,7 +83,7 @@ using web search and provide comprehensive findings with source citations.
 ///
 /// * `config` - Research configuration
 /// * `query` - Research query
-/// * `thread_id` - Optional thread ID for checkpointing
+/// * `_thread_id` - Optional thread ID for checkpointing
 ///
 /// # Errors
 ///
@@ -129,6 +130,36 @@ pub async fn run_research(
 
     // Build orchestrator tools
     let fact_store = FactStore::new("research_facts".to_string());
+
+    // Search for existing facts before starting research
+    let existing_facts = fact_store.search_facts(query, 5).await.unwrap_or_default();
+    tracing::info!("[FactStore] search_facts returned {} results for query: '{}'", existing_facts.len(), query);
+    let system_message = if existing_facts.is_empty() {
+        ORCHESTRATOR_SYSTEM_PROMPT.to_string()
+    } else {
+        let facts_context = existing_facts
+            .iter()
+            .enumerate()
+            .map(|(i, fact)| {
+                format!(
+                    "{}. [{}] (confidence: {}) - {}",
+                    i + 1,
+                    fact.topic,
+                    fact.confidence,
+                    fact.claim
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        format!(
+            "{ORCHESTRATOR_SYSTEM_PROMPT}\n\n\
+            ## Previous Research Context\n\n\
+            The following facts were found from previous research sessions on this topic. \
+            Use them to avoid duplicate work and build upon existing findings:\n\n\
+            {facts_context}"
+        )
+    };
+
     let tools: Vec<Box<dyn juncture::tools::Tool>> = vec![
         Box::new(SubagentTool::new(registry)),
         Box::new(ThinkTool::new()),
@@ -144,7 +175,7 @@ pub async fn run_research(
 
     // Build the orchestrator agent
     let agent_config = AgentConfig {
-        system_message: Some(ORCHESTRATOR_SYSTEM_PROMPT.to_string()),
+        system_message: Some(system_message),
         middleware,
         ..Default::default()
     };
@@ -168,7 +199,10 @@ pub async fn run_research(
         .iter()
         .rev()
         .find(|m| matches!(m.role, juncture_core::state::messages::Role::Ai))
-        .map_or_else(|| "No report generated".to_string(), |m| m.content_text().to_string());
+        .map_or_else(
+            || "No report generated".to_string(),
+            |m| m.content_text().to_string(),
+        );
 
     // Archive facts from the research session
     if let Err(e) = archive_research_facts(&fact_store, query, &report).await {
@@ -179,11 +213,8 @@ pub async fn run_research(
 }
 
 /// Archive research facts from the completed session.
-async fn archive_research_facts(
-    fact_store: &FactStore,
-    query: &str,
-    _report: &str,
-) -> Result<()> {
+async fn archive_research_facts(fact_store: &FactStore, query: &str, report: &str) -> Result<()> {
+    // Save the fact
     let fact = juncture::memory::Fact::new(
         query.to_string(),
         format!("Research completed on: {query}"),
@@ -191,6 +222,27 @@ async fn archive_research_facts(
         0.9,
     );
     fact_store.save_fact(&fact).await?;
+    tracing::info!("[FactStore] save_fact completed for query: '{}'", query);
+
+    // Save the full report to the store for later retrieval
+    let report_key = format!("report:{}", fact.timestamp.timestamp());
+    let report_value = serde_json::json!({
+        "query": query,
+        "report": report,
+        "timestamp": fact.timestamp.to_rfc3339(),
+    });
+    fact_store
+        .store()
+        .put(
+            fact_store.namespace(),
+            &report_key,
+            report_value,
+            None,
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to save report: {e}"))?;
+    tracing::info!("[FactStore] store().put() completed, key: '{}'", report_key);
+
     Ok(())
 }
 

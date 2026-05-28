@@ -105,7 +105,8 @@ async fn main() -> Result<()> {
     );
 
     // Run the research orchestrator
-    let result = orchestrator::run_research(&config, &args.query, args.thread_id.as_deref()).await?;
+    let result =
+        orchestrator::run_research(&config, &args.query, args.thread_id.as_deref()).await?;
 
     // Display the research result to stdout
     std::io::stdout().write_all(result.as_bytes())?;

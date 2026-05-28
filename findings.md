@@ -1,72 +1,117 @@
-# Findings
+# Findings: Juncture WASM Compatibility Research
 
-## 2026-05-27: Deep-Research Gap Analysis
+## 1. WASM Target Types
 
-### deer-flow Key Patterns
+### wasm32-unknown-unknown (Primary Target for Browser)
+- The standard target for Rust -> WASM compilation for browsers
+- Used by wasm-pack and wasm-bindgen
+- No OS-level abstractions available
+- Requires `getrandom` crate with `js` feature for random numbers
+- Requires `wasm-bindgen` for JS interop
 
-1. **`create_deerflow_agent` factory** — Single entry point accepting model, tools, system_prompt, middleware, features, extra_middleware, plan_mode, state_schema, checkpointer, name. Returns `CompiledStateGraph`.
+### wasm32-wasip1 / wasm32-wasip2 (Server-side WASM)
+- WASI provides OS-like abstractions (filesystem, networking)
+- Better std library support
+- Suitable for server-side WASM (Wasmtime, WasmEdge, Wasmer)
 
-2. **RuntimeFeatures** — Declarative feature flags: `sandbox`, `memory`, `summarization`, `subagent`, `vision`, `auto_title`, `guardrail`, `loop_detection`. Each can be `True`/`False`/custom `AgentMiddleware` instance.
+### Decision: Target wasm32-unknown-unknown
+- Browser interop is the primary use case
+- wasm-bindgen ecosystem is mature
+- wasm-pack provides excellent tooling
 
-3. **Middleware chain** (14 middlewares):
-   - ThreadData → Uploads → Sandbox (infrastructure)
-   - DanglingToolCall (always)
-   - Guardrail (optional)
-   - ToolErrorHandling (always)
-   - Summarization (optional)
-   - TodoMiddleware (plan_mode)
-   - TitleMiddleware (auto_title)
-   - MemoryMiddleware (memory)
-   - ViewImageMiddleware (vision)
-   - SubagentLimitMiddleware (subagent)
-   - LoopDetectionMiddleware (loop_detection)
-   - ClarificationMiddleware (always last)
+## 2. Tokio WASM Compatibility
 
-4. **`task_tool`** — LLM-driven subagent delegation. Uses `SubagentExecutor` with async background execution, polling (5s intervals), cancellation, timeout, token usage tracking. Supports `general-purpose` and `bash` subagent types.
+### Supported Features on wasm32-unknown-unknown
+- `sync` (mpsc, RwLock, Mutex, Semaphore, Notify, watch, broadcast) -- YES
+- `macros` (#[tokio::main], #[tokio::test]) -- YES
+- `io-util` -- YES
+- `rt` (single-threaded runtime, tokio::spawn) -- YES
+- `time` (sleep, interval, timeout) -- YES (but Instant::now() panics on wasm32-unknown-unknown)
 
-5. **`@Next`/`@Prev` decorators** — Middleware positioning system for inserting custom middlewares into the chain.
+### Blocked Features (compile_error!)
+- `rt-multi-thread` -- BLOCKED
+- `fs` -- BLOCKED
+- `io-std` -- BLOCKED
+- `net` -- BLOCKED
+- `process` -- BLOCKED
+- `signal` -- BLOCKED
 
-### deepagents Key Patterns
+### Key Finding: tokio::spawn works on WASM
+- `tokio::spawn` is in the `rt` feature, which IS supported on WASM
+- Spawned futures must be `Send + 'static` (same as native)
+- On single-threaded WASM, `Send` is trivially satisfied
 
-1. **`create_deep_agent`** — Simple factory: model + tools + system_prompt + subagents (list of dicts).
+### Key Finding: JoinSet works on WASM
+- `JoinSet` is in `tokio::task`, available with `rt` feature
+- Should compile on WASM since `rt` is not blocked
 
-2. **Subagent config dicts**: `{name, description, system_prompt, tools}` — much simpler than deer-flow.
+### Key Finding: Instant::now() panics on wasm32-unknown-unknown
+- `tokio::time::Instant::now()` panics on wasm32-unknown-unknown
+- Need alternative: `web-time` crate or `js-sys::Date::now()`
+- `tokio::time::sleep()` works via JavaScript setTimeout
 
-3. **`think_tool`** — Strategic reflection tool. Agent uses after each search to analyze results and plan next steps. Returns "Reflection recorded: {reflection}".
+## 3. Reqwest WASM Support
 
-4. **Research workflow**: Plan → Save request → Delegate to sub-agents → Synthesize citations → Write report → Verify.
+### Key Finding: reqwest supports WASM natively
+- On wasm32 targets, reqwest uses the browser's Fetch API
+- `reqwest::Client::new()` works on WASM
+- `blocking` module is NOT available on WASM
+- Streaming works via Fetch API's ReadableStream
 
-5. **Web content**: `fetch_webpage_content(url)` fetches full page + converts to markdown via `markdownify`.
+### Differences from Native
+- No connection pooling (browser handles connections)
+- No custom DNS resolution
+- No proxy support
+- Limited TLS configuration (browser handles TLS)
 
-6. **Citation format**: Inline [1], [2], [3] with consolidated ### Sources section at end.
+## 4. UUID / Rand / Getrandom WASM Support
 
-### Juncture Current State
+### getrandom
+- wasm32-unknown-unknown requires `js` feature
+- Uses `Crypto.getRandomValues()` via wasm-bindgen
 
-1. **`create_react_agent`** — Works well for single-agent ReAct pattern. Supports system_message, max_iterations, interrupt_before_tools, pre/post_model_hook, model_selector, store.
+### uuid
+- `v4` and `v6` features require random number generation
+- uuid re-exports getrandom's `js` feature as uuid's own `js` feature
+- Solution: `uuid = { features = ["v4", "v6", "js"] }`
 
-2. **`SubagentTool`** — Exists in `prebuilt/subagent.rs`. Registry-based. Works but not integrated into any example.
+## 5. Async Runtime Alternatives
 
-3. **`AgentRegistry` / `InMemoryAgentRegistry`** — Implemented and tested.
+### wasm-bindgen-futures
+- `spawn_local(future)` -- spawns a `!Send` future on the current thread
+- `JsFuture` -- converts JS Promise to Rust Future
+- `future_to_promise()` -- converts Rust Future to JS Promise
 
-4. **Missing**: No middleware system, no `create_agent` factory, no think_tool, no web content fetcher, no loop detection.
+### Prokio
+- Async runtime compatible with both WASM and native
+- On WASM: uses wasm-bindgen-futures internally
+- On native: uses tokio internally
+- Accepts `?Send` futures
 
-### Juncture LLM Middleware (Already Exists)
+### Decision: Use tokio directly with feature gates
+- tokio already works on WASM with `rt` feature
+- Prokio adds unnecessary abstraction layer
 
-juncture has `LlmMiddleware` trait in `llm/middleware.rs` — wraps `ChatModel::invoke()` with pre/post hooks. Used for logging, metrics, circuit breaker. This is LLM-level middleware only.
+## 6. WASM Threading
 
-**Gap**: deer-flow's agent-level middleware operates at a different layer — intercepting tool calls, transforming state, handling errors across the entire agent loop, not just the LLM call. The two are complementary, not redundant.
+### Current State (2025)
+- WASM threads use Web Workers + SharedArrayBuffer
+- Requires COOP/COEP HTTP headers
+- `wasm-bindgen-rayon` enables Rayon-based parallelism
+- Not all browsers fully support SharedArrayBuffer
 
-### Key Insight
+### Implications for Juncture
+- Pregel engine runs single-threaded on WASM
+- True parallelism requires Web Workers (complex setup)
+- Recommendation: Single-threaded execution on WASM
 
-The deep-research example uses a **fixed pipeline** (planner → coordinator → writer), which is fundamentally different from the reference projects where the **LLM drives the orchestration**. The LLM decides when to delegate, what to research, and when to stop. This is the core architectural gap.
+## 7. Crate-by-Crate WASM Compatibility
 
-The juncture framework already has:
-- `SubagentTool` + `AgentRegistry` (in prebuilt/subagent.rs)
-- `LlmMiddleware` + `MiddlewareModel` (in llm/middleware.rs)
-- `create_react_agent` with hooks (pre/post model, model_selector)
-
-Missing pieces:
-- Agent-level middleware (tool interception, state transformation)
-- `create_agent` factory that composes agent-level middleware
-- `think_tool` for reflection
-- Web content fetcher tool
+| Crate | Status | Issues |
+|-------|--------|--------|
+| juncture-core | Needs changes | Instant::now(), sqlx, otel |
+| juncture-derive | Compatible | proc-macro runs at compile time |
+| juncture | Needs changes | reqwest streaming differences |
+| juncture-checkpoint | Needs changes | sqlx, Instant::now() |
+| juncture-tracing | Needs changes | otel not WASM-compatible |
+| juncture-store | Compatible | Re-exports from juncture-core |
