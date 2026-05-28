@@ -1,3 +1,4 @@
+#[cfg(feature = "chat")]
 pub mod chat;
 pub mod checkpoint;
 #[cfg(not(target_family = "wasm"))]
@@ -201,7 +202,7 @@ macro_rules! parent_command {
     };
 }
 
-#[cfg(not(target_family = "wasm"))]
+#[cfg(all(feature = "chat", not(target_family = "wasm")))]
 pub use chat::{ChatAnthropic, ChatOllama, ChatOpenAI};
 pub use checkpoint::{
     CHECKPOINT_NS_SEPARATOR, CheckpointNamespace, CheckpointSaver, DeltaCounters, NamespaceSegment,

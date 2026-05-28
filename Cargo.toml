@@ -13,6 +13,8 @@ members = [
 ]
 exclude = [
     "examples/wasm-example",
+    "examples/wasm-edge-cli",
+    "examples/wasm-edge-server",
 ]
 
 [workspace.package]

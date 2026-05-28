@@ -1,0 +1,20 @@
+[workspace]
+
+[package]
+name = "wasm-edge-server"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/greatwallisme/juncture"
+description = "WASI HTTP server example using Spin + Juncture"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+juncture-core = { path = "../../crates/juncture-core", default-features = false }
+juncture-derive = { path = "../../crates/juncture-derive" }
+spin-sdk = "3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"

@@ -1,0 +1,20 @@
+spin_manifest_version = 2
+
+[application]
+name = "wasm-edge-server"
+version = "0.1.0"
+description = "Juncture edge HTTP service on Spin"
+
+[[trigger.http]]
+route = "/..."
+component = "wasm-edge-server"
+
+[component.wasm-edge-server]
+source = "target/wasm32-wasip1/release/wasm_edge_server.wasm"
+[component.wasm-edge-server.environment]
+OPENAI_API_KEY = ""
+OPENAI_BASE_URL = "https://api.openai.com/v1"
+OPENAI_MODEL = "gpt-4o"
+[component.wasm-edge-server.build]
+command = "cargo build --target wasm32-wasip1 --release"
+watch = ["src/**/*.rs", "Cargo.toml"]

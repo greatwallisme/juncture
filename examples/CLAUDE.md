@@ -1,6 +1,6 @@
 # CLAUDE.md -- examples
 
-15 self-contained binaries (01-15) plus a standalone multi-agent deep-research application, demonstrating Juncture graph execution patterns from basic state machines to production-grade LLM pipelines.
+15 self-contained binaries (01-15) plus standalone applications (deep-research, wasm-example, wasm-edge-cli, wasm-edge-server), demonstrating Juncture graph execution patterns from basic state machines to production-grade LLM pipelines.
 
 ## Run Commands
 
@@ -79,6 +79,78 @@ OPENAI_MODEL=gpt-4o                 # Optional, defaults to gpt-4o
 ```
 
 Shared env loading is in `src/common.rs` (loaded via `#[path = "common.rs"] mod common;`).
+
+## WASM Examples
+
+Three standalone WASM examples (excluded from main workspace). Browser example reads LLM config from `.env` via `serve.py`. Edge examples use environment variables or Spin config.
+
+### Prerequisites: WASM Runtimes
+
+#### wasmtime (for CLI example)
+
+```bash
+# Install via cargo (v40.x compatible with rustc 1.89)
+cargo install wasmtime-cli --version 40.0.4
+
+# Verify installation
+wasmtime --version  # should show wasmtime 40.0.4
+```
+
+#### Spin (for HTTP server example)
+
+```bash
+# Install spin CLI (v4.0.0+, backward compatible with v3 SDK components)
+curl -fsSL https://developer.fermyon.com/downloads/install.sh | bash
+
+# Verify installation
+spin --version
+```
+
+### wasm-example (Browser)
+
+Runs Juncture graphs in the browser via `wasm-bindgen`. Requires an HTML page and HTTP server.
+
+```bash
+cd examples/wasm-example
+wasm-pack build --target web
+python serve.py  # serves at http://localhost:8080
+```
+
+### wasm-edge-cli (WASI CLI)
+
+Standalone CLI binary running on WASI. Demonstrates Juncture StateGraph execution (text analysis pipeline) without browser. No API key needed.
+
+```bash
+cd examples/wasm-edge-cli
+cargo build --target wasm32-wasip1 --release
+
+# Run with wasmtime
+wasmtime run target/wasm32-wasip1/release/wasm-edge-cli.wasm -- "Hello world. This is a test!"
+```
+
+Outputs JSON with word/char/sentence counts and text summary. Uses `wasi` runtime (not browser).
+
+For real LLM interaction on WASI, use `wasm-edge-server` (Spin HTTP) which has full HTTP support via spin-sdk.
+
+### wasm-edge-server (Spin HTTP)
+
+HTTP edge service using Fermyon Spin. Demonstrates Juncture StateGraph + real LLM interaction via spin-sdk's outbound HTTP.
+
+```bash
+cd examples/wasm-edge-server
+spin build
+
+# Set LLM config in spin.toml [component.wasm-edge-server.environment], then:
+OPENAI_API_KEY=<your-key> spin up  # serves at http://127.0.0.1:3000
+
+# Test
+curl -X POST http://127.0.0.1:3000/ -H "Content-Type: application/json" \
+  -d '{"message": "What is the weather in Tokyo?"}'
+```
+
+LLM config: edit `spin.toml` `[component.wasm-edge-server.environment]` section, or pass `OPENAI_API_KEY` etc. via shell before `spin up`.
+
+**Note**: `spin-sdk` v3 in Cargo.toml is compatible with Spin CLI v3.x and v4.x.
 
 ## Package Name
 

@@ -1453,7 +1453,6 @@ dependencies = [
  "tokio-util",
  "tracing",
  "uuid",
- "wasm-bindgen-futures",
  "web-time",
  "xxhash-rust",
 ]

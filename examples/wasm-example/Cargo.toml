@@ -16,7 +16,7 @@ wasm-opt = false
 
 [dependencies]
 juncture = { path = "../../crates/juncture", default-features = false, features = ["wasm", "openai"] }
-juncture-core = { path = "../../crates/juncture-core", default-features = false, features = ["wasm"] }
+juncture-core = { path = "../../crates/juncture-core", default-features = false, features = ["wasm", "chat"] }
 juncture-derive = { path = "../../crates/juncture-derive" }
 futures = "0.3"
 js-sys = "0.3"

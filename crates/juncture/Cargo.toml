@@ -10,7 +10,7 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
-juncture-core = { path = "../juncture-core", default-features = false }
+juncture-core = { path = "../juncture-core", default-features = false, features = ["chat"] }
 juncture-derive = { path = "../juncture-derive" }
 juncture-store = { path = "../juncture-store", optional = true }
 juncture-tracing = { path = "../juncture-tracing" }
