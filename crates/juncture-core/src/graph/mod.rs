@@ -31,7 +31,7 @@
 
 mod builder;
 mod compiled;
-#[cfg(not(target_family = "wasm"))]
+#[cfg(all(feature = "chat", not(target_family = "wasm")))]
 mod remote;
 mod topology;
 
@@ -43,7 +43,7 @@ pub use compiled::{
     CompiledGraph, DrawableEdge, DrawableGraph, DrawableNode, GraphOutput, GraphOutputMetadata,
     InterruptInfo, StateFilter, StateUpdate, StreamHandle, SubgraphInfo,
 };
-#[cfg(not(target_family = "wasm"))]
+#[cfg(all(feature = "chat", not(target_family = "wasm")))]
 pub use remote::RemoteGraph;
 pub use topology::TopologyError;
 

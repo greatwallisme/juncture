@@ -1,7 +1,7 @@
 #[cfg(feature = "chat")]
 pub mod chat;
 pub mod checkpoint;
-#[cfg(not(target_family = "wasm"))]
+#[cfg(all(feature = "chat", not(target_family = "wasm")))]
 pub mod client;
 pub mod command;
 pub mod config;
@@ -208,7 +208,7 @@ pub use checkpoint::{
     CHECKPOINT_NS_SEPARATOR, CheckpointNamespace, CheckpointSaver, DeltaCounters, NamespaceSegment,
     generate_checkpoint_id,
 };
-#[cfg(not(target_family = "wasm"))]
+#[cfg(all(feature = "chat", not(target_family = "wasm")))]
 pub use client::{
     AuthConfig, ClientError, GraphClient, InvokeConfig, JunctureClient, StateSnapshot, Thread,
 };

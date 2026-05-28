@@ -470,6 +470,9 @@ fn create_streaming_graph(num_nodes: usize) -> StateGraph<MessagesState> {
 
 fn profile_streaming(results: &mut Vec<ProfileResult>) {
     let config = bench_config();
+    // Create runtime once outside the iteration loop to avoid measuring
+    // tokio::spawn runtime creation overhead (~1.5ms) in each iteration.
+    let rt = tokio::runtime::Runtime::new().expect("runtime creation should succeed");
     for &num_nodes in &[100_usize, 1000, 10000] {
         let graph = create_streaming_graph(num_nodes);
         let compiled = graph.compile().expect("compile should succeed");
@@ -479,7 +482,6 @@ fn profile_streaming(results: &mut Vec<ProfileResult>) {
             num_nodes,
             3,
             || {
-                let rt = tokio::runtime::Runtime::new().expect("runtime creation should succeed");
                 rt.block_on(async {
                     let handle = compiled
                         .stream(input.clone(), &config, StreamMode::Values)
