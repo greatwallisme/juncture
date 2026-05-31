@@ -1,117 +1,86 @@
-# Findings: Juncture WASM Compatibility Research
+# Findings: Documentation Task
 
-## 1. WASM Target Types
+## Example Categories
 
-### wasm32-unknown-unknown (Primary Target for Browser)
-- The standard target for Rust -> WASM compilation for browsers
-- Used by wasm-pack and wasm-bindgen
-- No OS-level abstractions available
-- Requires `getrandom` crate with `js` feature for random numbers
-- Requires `wasm-bindgen` for JS interop
+### Core Patterns (01-03) -- No API key needed
+- **01_state_machine**: `#[derive(State)]`, linear graph, `invoke()`, `GraphOutput`
+- **02_counter_reducers**: `#[reducer(append)]`, `#[reducer(last_write_wins)]`, custom merge functions
+- **03_conditional_routing**: `Router` trait, `PathMap`, `add_conditional_edges`
 
-### wasm32-wasip1 / wasm32-wasip2 (Server-side WASM)
-- WASI provides OS-like abstractions (filesystem, networking)
-- Better std library support
-- Suitable for server-side WASM (Wasmtime, WasmEdge, Wasmer)
+### LLM Integration (04-05) -- Mock/Manual
+- **04_chat_basic**: `MessagesState`, `Message`, `Role`, `Content`, single-node chatbot
+- **05_tool_calling**: `Tool` trait, `ToolNode`, manual agent graph with tool execution
 
-### Decision: Target wasm32-unknown-unknown
-- Browser interop is the primary use case
-- wasm-bindgen ecosystem is mature
-- wasm-pack provides excellent tooling
+### Advanced Features (06-09) -- No API key needed
+- **06_streaming**: `stream()`, `StreamMode`, `StreamEvent`, `futures::StreamExt`
+- **07_human_in_the_loop**: `CompileConfig`, `interrupt_before`, `interrupt_after`, `output.interrupts`
+- **08_checkpoint_resume**: `MemorySaver`, `compile_with_checkpointer()`, `thread_id`
+- **09_error_recovery**: `JunctureError::execution()`, Result propagation, retry patterns
 
-## 2. Tokio WASM Compatibility
+### Real LLM Applications (10-15) -- Requires API key
+- **10_basic_chat**: `ChatOpenAI`, single/multi-turn with real LLM
+- **11_streaming_chat**: `ChatModel::stream`, token-by-token display
+- **12_tool_calling**: `bind_tools`, tool execution loop with real LLM
+- **13_react_agent**: Manual agent loop, WeatherTool + MathTool, tool_call iteration
+- **14_multi_turn**: Conversation history accumulation, system prompts
+- **15_structured_output**: `ToolChoice::Required`, JSON entity extraction
 
-### Supported Features on wasm32-unknown-unknown
-- `sync` (mpsc, RwLock, Mutex, Semaphore, Notify, watch, broadcast) -- YES
-- `macros` (#[tokio::main], #[tokio::test]) -- YES
-- `io-util` -- YES
-- `rt` (single-threaded runtime, tokio::spawn) -- YES
-- `time` (sleep, interval, timeout) -- YES (but Instant::now() panics on wasm32-unknown-unknown)
+### Production Examples
+- **deep-research**: Multi-agent orchestrator with SubagentTool, middleware chain, FactStore
+- **telemetry_demo**: Full OTel pipeline (traces + metrics + callbacks), real LLM + tools
 
-### Blocked Features (compile_error!)
-- `rt-multi-thread` -- BLOCKED
-- `fs` -- BLOCKED
-- `io-std` -- BLOCKED
-- `net` -- BLOCKED
-- `process` -- BLOCKED
-- `signal` -- BLOCKED
+## Key API Patterns
 
-### Key Finding: tokio::spawn works on WASM
-- `tokio::spawn` is in the `rt` feature, which IS supported on WASM
-- Spawned futures must be `Send + 'static` (same as native)
-- On single-threaded WASM, `Send` is trivially satisfied
+### State Definition
+```rust
+#[derive(State, Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+struct MyState {
+    field: String,                          // default: replace reducer
+    #[reducer(append)]
+    items: Vec<String>,                     // append reducer
+    #[reducer(last_write_wins)]
+    status: String,                         // last-write-wins
+}
+```
 
-### Key Finding: JoinSet works on WASM
-- `JoinSet` is in `tokio::task`, available with `rt` feature
-- Should compile on WASM since `rt` is not blocked
+### Graph Construction
+```rust
+let mut graph = StateGraph::<MyState>::new();
+graph.add_node_simple("name", NodeFnUpdate(|state| async { Ok(Update) }))?;
+graph.add_edge("a", "b");
+graph.add_conditional_edges("router", router_fn, path_map);
+graph.set_entry_point("start");
+graph.set_finish_point("end");
+let compiled = graph.compile()?;
+```
 
-### Key Finding: Instant::now() panics on wasm32-unknown-unknown
-- `tokio::time::Instant::now()` panics on wasm32-unknown-unknown
-- Need alternative: `web-time` crate or `js-sys::Date::now()`
-- `tokio::time::sleep()` works via JavaScript setTimeout
+### Execution Modes
+- `compiled.invoke(state, &config)` -- blocking single execution
+- `compiled.stream(state, &config, StreamMode::Values)` -- async streaming
+- `compiled.invoke_async(state, &config)` -- async single execution
 
-## 3. Reqwest WASM Support
+### Tool Definition
+```rust
+#[async_trait]
+impl Tool for MyTool {
+    fn name(&self) -> &'static str { "tool_name" }
+    fn description(&self) -> &'static str { "description" }
+    fn schema(&self) -> serde_json::Value { json!({...}) }
+    async fn invoke(&self, input: Value) -> Result<String, ToolError> { ... }
+}
+```
 
-### Key Finding: reqwest supports WASM natively
-- On wasm32 targets, reqwest uses the browser's Fetch API
-- `reqwest::Client::new()` works on WASM
-- `blocking` module is NOT available on WASM
-- Streaming works via Fetch API's ReadableStream
+### LLM Integration
+```rust
+let llm = ChatOpenAI::new(api_key).with_base_url(url).with_model(model);
+let llm_with_tools = llm.bind_tools(vec![tool_def]);
+let response = llm_with_tools.invoke(&messages, None).await?;
+```
 
-### Differences from Native
-- No connection pooling (browser handles connections)
-- No custom DNS resolution
-- No proxy support
-- Limited TLS configuration (browser handles TLS)
-
-## 4. UUID / Rand / Getrandom WASM Support
-
-### getrandom
-- wasm32-unknown-unknown requires `js` feature
-- Uses `Crypto.getRandomValues()` via wasm-bindgen
-
-### uuid
-- `v4` and `v6` features require random number generation
-- uuid re-exports getrandom's `js` feature as uuid's own `js` feature
-- Solution: `uuid = { features = ["v4", "v6", "js"] }`
-
-## 5. Async Runtime Alternatives
-
-### wasm-bindgen-futures
-- `spawn_local(future)` -- spawns a `!Send` future on the current thread
-- `JsFuture` -- converts JS Promise to Rust Future
-- `future_to_promise()` -- converts Rust Future to JS Promise
-
-### Prokio
-- Async runtime compatible with both WASM and native
-- On WASM: uses wasm-bindgen-futures internally
-- On native: uses tokio internally
-- Accepts `?Send` futures
-
-### Decision: Use tokio directly with feature gates
-- tokio already works on WASM with `rt` feature
-- Prokio adds unnecessary abstraction layer
-
-## 6. WASM Threading
-
-### Current State (2025)
-- WASM threads use Web Workers + SharedArrayBuffer
-- Requires COOP/COEP HTTP headers
-- `wasm-bindgen-rayon` enables Rayon-based parallelism
-- Not all browsers fully support SharedArrayBuffer
-
-### Implications for Juncture
-- Pregel engine runs single-threaded on WASM
-- True parallelism requires Web Workers (complex setup)
-- Recommendation: Single-threaded execution on WASM
-
-## 7. Crate-by-Crate WASM Compatibility
-
-| Crate | Status | Issues |
-|-------|--------|--------|
-| juncture-core | Needs changes | Instant::now(), sqlx, otel |
-| juncture-derive | Compatible | proc-macro runs at compile time |
-| juncture | Needs changes | reqwest streaming differences |
-| juncture-checkpoint | Needs changes | sqlx, Instant::now() |
-| juncture-tracing | Needs changes | otel not WASM-compatible |
-| juncture-store | Compatible | Re-exports from juncture-core |
+## Environment Configuration
+```bash
+OPENAI_API_KEY=sk-your-key          # Required for examples 10-15
+OPENAI_BASE_URL=https://...         # Optional, for OpenAI-compatible APIs
+OPENAI_MODEL=gpt-4o                 # Optional, defaults to gpt-4o
+TAVILY_API_KEY=tvily-your-key       # Optional, for web search in deep-research
+```

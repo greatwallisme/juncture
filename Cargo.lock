@@ -1477,9 +1477,12 @@ dependencies = [
  "juncture-checkpoint",
  "juncture-core",
  "juncture-derive",
+ "juncture-tracing",
+ "reqwest",
  "serde",
  "serde_json",
  "tokio",
+ "tracing",
  "uuid",
 ]
 

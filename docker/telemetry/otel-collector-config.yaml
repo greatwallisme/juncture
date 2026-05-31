@@ -1,0 +1,50 @@
+# OpenTelemetry Collector configuration for Juncture telemetry testing.
+#
+# Receives OTLP data from Juncture applications and routes:
+#   - Traces  -> Jaeger (OTLP gRPC)
+#   - Metrics -> Prometheus exporter (:8889/metrics)
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  batch:
+    send_batch_size: 512
+    timeout: 5s
+
+exporters:
+  # Traces -> Jaeger via OTLP gRPC
+  otlp/jaeger:
+    endpoint: juncture-jaeger:4317
+    tls:
+      insecure: true
+
+  # Metrics -> Prometheus scrape endpoint
+  prometheus:
+    endpoint: 0.0.0.0:8889
+    namespace: juncture
+    const_labels:
+      environment: development
+
+  # Debug logging (optional, remove for production)
+  debug:
+    verbosity: basic
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlp/jaeger, debug]
+    metrics:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [prometheus, debug]
+  telemetry:
+    logs:
+      level: info

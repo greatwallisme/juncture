@@ -68,6 +68,28 @@ cargo run -p deep-research -- --thread-id session-1 "Topic"  # checkpoint persis
 
 Requires `.env` with `OPENAI_API_KEY`, `OPENAI_BASE_URL` (for OpenAI-compatible APIs), and optionally `TAVILY_API_KEY` for web search. See `examples/deep-research/CLAUDE.md` for full architecture details.
 
+## Telemetry Demo
+
+End-to-end OpenTelemetry pipeline verification. Runs a graph with full `OTel` instrumentation (traces + metrics) exported to a local `OTel` Collector -> Jaeger + Prometheus stack.
+
+```bash
+# Start the telemetry stack
+docker compose -f docker/telemetry/docker-compose.yml up -d
+
+# Run the demo
+cargo run -p juncture-simple-example --bin telemetry_demo
+
+# Or run the full verification script (starts infra, runs demo, queries APIs)
+./scripts/verify-telemetry.sh
+
+# Verify manually:
+#   Jaeger UI:    http://localhost:16686  (service: juncture-telemetry-demo)
+#   Prometheus:   http://localhost:9090   (query: juncture_graph_invocations_total)
+
+# Stop the stack
+docker compose -f docker/telemetry/docker-compose.yml down
+```
+
 ## Environment Configuration (Examples 10-15)
 
 Real LLM examples load configuration from `.env` via `dotenvy`:

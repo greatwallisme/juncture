@@ -14,6 +14,9 @@ juncture = { path = "../crates/juncture", features = ["openai"] }
 juncture-core = { path = "../crates/juncture-core" }
 juncture-derive = { path = "../crates/juncture-derive" }
 juncture-checkpoint = { path = "../crates/juncture-checkpoint" }
+juncture-tracing = { path = "../crates/juncture-tracing", features = ["otel"] }
+tracing = "0.1"
+reqwest = { version = "0.12", features = ["json"] }
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -81,6 +84,10 @@ path = "src/14_multi_turn.rs"
 [[bin]]
 name = "15_structured_output"
 path = "src/15_structured_output.rs"
+
+[[bin]]
+name = "telemetry_demo"
+path = "src/telemetry_demo.rs"
 
 [lints]
 workspace = true

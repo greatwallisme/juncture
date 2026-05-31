@@ -1,0 +1,11 @@
+# Prometheus configuration for scraping Juncture metrics via OTel Collector.
+
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+scrape_configs:
+  - job_name: "otel-collector"
+    static_configs:
+      - targets: ["juncture-otel-collector:8889"]
+    scrape_interval: 2s
