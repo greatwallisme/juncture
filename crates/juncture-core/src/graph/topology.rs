@@ -346,36 +346,36 @@ impl TopologyValidator {
     /// Check for potential infinite loops using SCC analysis
     ///
     /// Cycles are allowed if at least one node in the SCC has a conditional
-    /// edge that can route to END, since such cycles represent intentional
-    /// agent loops that terminate via conditional routing.
+    /// edge that can exit the cycle -- either by routing to END or to a node
+    /// outside the SCC.  This covers intentional agent loops (e.g. `ReAct`
+    /// agent -> tools -> agent) where the agent conditionally routes to a
+    /// summary/finish node outside the loop.
     fn check_infinite_loops<S: State>(
         nodes: &IndexMap<String, Arc<dyn crate::Node<S>>>,
         edges: &[Edge<S>],
     ) -> Result<(), TopologyError> {
         let sccs = TarjanSCC::find_sccs(nodes, edges);
 
-        // Collect nodes that have a conditional edge to END
-        let mut nodes_with_conditional_end: HashSet<String> = HashSet::new();
-        for edge in edges {
-            if let Edge::Conditional { from, path_map, .. } = edge
-                && path_map
-                    .iter()
-                    .any(|(_, target)| target == crate::edge::END)
-            {
-                nodes_with_conditional_end.insert(from.clone());
-            }
-        }
-
-        // Check for SCCs with more than one node that lack an exit to END
         for scc in sccs {
-            if scc.len() > 1 {
-                // Allow the cycle if any node in the SCC has a conditional edge to END
-                let has_conditional_exit = scc
-                    .iter()
-                    .any(|node| nodes_with_conditional_end.contains(node));
-                if !has_conditional_exit {
-                    return Err(TopologyError::PotentialInfiniteLoop { cycle: scc });
-                }
+            if scc.len() <= 1 {
+                continue;
+            }
+
+            let scc_set: HashSet<&str> = scc.iter().map(String::as_str).collect();
+
+            // A cycle is safe if any node in the SCC has a conditional edge
+            // whose path_map contains a target outside the SCC (including END).
+            let has_exit = scc.iter().any(|node| {
+                edges.iter().any(|edge| {
+                    matches!(edge, Edge::Conditional { from, path_map, .. }
+                        if from == node && path_map.iter().any(|(_, target)| {
+                            target == crate::edge::END || !scc_set.contains(target.as_str())
+                        }))
+                })
+            });
+
+            if !has_exit {
+                return Err(TopologyError::PotentialInfiniteLoop { cycle: scc });
             }
         }
 

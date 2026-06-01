@@ -1478,6 +1478,7 @@ dependencies = [
  "juncture-core",
  "juncture-derive",
  "juncture-tracing",
+ "opentelemetry",
  "reqwest",
  "serde",
  "serde_json",
@@ -1803,6 +1804,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "opentelemetry-http"
+version = "0.27.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "10a8a7f5f6ba7c1b286c2fbca0454eaba116f63bbe69ed250b642d36fbb04d80"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "http",
+ "opentelemetry",
+ "reqwest",
+]
+
+[[package]]
 name = "opentelemetry-otlp"
 version = "0.27.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1812,9 +1826,11 @@ dependencies = [
  "futures-core",
  "http",
  "opentelemetry",
+ "opentelemetry-http",
  "opentelemetry-proto",
  "opentelemetry_sdk",
  "prost",
+ "reqwest",
  "thiserror 1.0.69",
  "tokio",
  "tonic",
@@ -2278,6 +2294,7 @@ dependencies = [
  "base64",
  "bytes",
  "encoding_rs",
+ "futures-channel",
  "futures-core",
  "futures-util",
  "h2",

@@ -464,9 +464,9 @@ impl TracingConfig {
 
         let resource = Resource::new(resource_attributes);
 
-        // Configure OTLP trace exporter using tonic
+        // Configure OTLP trace exporter using HTTP (avoids gRPC/HTTP2 handshake issues)
         let exporter = opentelemetry_otlp::SpanExporter::builder()
-            .with_tonic()
+            .with_http()
             .with_endpoint(otlp_endpoint)
             .build()
             .map_err(|e| {
@@ -496,14 +496,16 @@ impl TracingConfig {
         // Set up OTel metrics export if enabled
         if self.metrics_enabled {
             let metric_exporter = MetricExporter::builder()
-                .with_tonic()
+                .with_http()
                 .with_endpoint(otlp_endpoint)
                 .build()
                 .map_err(|e| {
                     TracingError::InstallFailed(format!("OTLP metric exporter build failed: {e}"))
                 })?;
 
-            let reader = PeriodicReader::builder(metric_exporter, Tokio).build();
+            let reader = PeriodicReader::builder(metric_exporter, Tokio)
+                .with_interval(std::time::Duration::from_secs(5))
+                .build();
 
             let meter_provider = SdkMeterProvider::builder()
                 .with_resource(resource)

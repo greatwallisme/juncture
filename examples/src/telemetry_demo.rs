@@ -391,7 +391,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 1. Load config from .env
     let otlp_endpoint = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT")
-        .unwrap_or_else(|_| "http://localhost:4317".to_string());
+        .unwrap_or_else(|_| "http://127.0.0.1:4318".to_string());
     let service_name = std::env::var("OTEL_SERVICE_NAME")
         .unwrap_or_else(|_| "juncture-telemetry-demo".to_string());
 
@@ -412,7 +412,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let callback_handler: Arc<dyn GraphLifecycleCallback> =
         Arc::new(CallbackHandlerAdapter::new(Arc::new(TelemetryCallback)));
 
-    let config = RunnableConfig::default()
+    let config = RunnableConfig::new()
         .with_metrics_collector(metrics_collector)
         .with_callback_handler(callback_handler);
 
@@ -458,12 +458,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let compiled = build_agent_graph(&llm_with_tools)?;
 
     // 6. Run the main agent graph
-    run_agent_graph(&compiled, &config, &mut stdout)?;
+    run_agent_graph(&compiled, &config, &mut stdout).await?;
 
     // 7. Run error path graph
-    run_error_graph(&config, &mut stdout)?;
+    run_error_graph(&config, &mut stdout).await?;
 
-    // 8. Print verification instructions
+    // 8. Flush metrics before exit (PeriodicReader exports every 5s)
+    writeln!(stdout, "[demo] Waiting for metrics export...")?;
+    tokio::time::sleep(std::time::Duration::from_secs(8)).await;
+
+    // 9. Print verification instructions
     print_verification_summary(&mut stdout, &service_name)?;
 
     Ok(())
@@ -560,7 +564,7 @@ fn build_agent_graph(
 }
 
 /// Run the agent graph with a real LLM query
-fn run_agent_graph(
+async fn run_agent_graph(
     compiled: &juncture_core::graph::CompiledGraph<MessagesState, MessagesState, MessagesState>,
     config: &RunnableConfig,
     stdout: &mut impl Write,
@@ -581,7 +585,7 @@ fn run_agent_graph(
         ],
     };
 
-    let output = compiled.invoke(initial_state, config)?;
+    let output = compiled.invoke_async(initial_state, config).await?;
 
     writeln!(stdout, "\n[demo] Conversation:")?;
     for msg in &output.value.messages {
@@ -615,7 +619,7 @@ fn run_agent_graph(
 }
 
 /// Run a graph with a deliberately failing node to exercise error metrics
-fn run_error_graph(
+async fn run_error_graph(
     config: &RunnableConfig,
     stdout: &mut impl Write,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -639,7 +643,7 @@ fn run_error_graph(
     let error_state = MessagesState {
         messages: vec![Message::human("trigger error")],
     };
-    match error_compiled.invoke(error_state, config) {
+    match error_compiled.invoke_async(error_state, config).await {
         Ok(_) => writeln!(stdout, "[demo] Error graph unexpectedly succeeded")?,
         Err(e) => writeln!(stdout, "[demo] Error graph failed as expected: {e}")?,
     }

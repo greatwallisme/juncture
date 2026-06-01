@@ -442,7 +442,7 @@ use juncture_tracing::init;
 
 let metrics_registry = init()
     .with_service_name("my-service")
-    .with_otlp_endpoint("http://localhost:4317")
+    .with_otlp_endpoint("http://127.0.0.1:4318")
     .with_metrics(true)
     .install()?
     .expect("metrics enabled");
@@ -457,7 +457,7 @@ use juncture_tracing::RegistryMetricsCollector;
 let collector: Arc<dyn MetricsCollector> =
     Arc::new(RegistryMetricsCollector::new(metrics_registry));
 
-let config = RunnableConfig::default()
+let config = RunnableConfig::new()
     .with_metrics_collector(collector);
 ```
 
