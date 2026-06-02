@@ -6,7 +6,7 @@
 //! # Available Tools
 //!
 //! - [`ThinkTool`] — Strategic reflection for research agents
-//! - [`WebFetchTool`] — Full webpage content fetching (requires `reqwest` feature)
+//! - `WebFetchTool` — Full webpage content fetching (requires `reqwest` feature)
 
 mod think;
 

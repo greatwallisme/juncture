@@ -196,10 +196,6 @@ pub fn extract_namespace(interrupt_id: &str) -> Option<&str> {
     clippy::implicit_hasher,
     reason = "accepting standard HashMap is fine for this use case"
 )]
-#[expect(
-    clippy::collapsible_if,
-    reason = "nested if is more readable for checking conditions in sequence"
-)]
 pub fn validate_resume_coverage(
     pending: &[InterruptSignal],
     resume_values: &HashMap<String, serde_json::Value>,

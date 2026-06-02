@@ -33,15 +33,15 @@
 //!
 //! # Module Structure
 //!
-//! - [`trait_`]: Core `ChatModel` trait and error types
-//! - [`message`]: Message type definitions and re-exports
-//! - [`anthropic`]: Anthropic Claude provider implementation
-//! - [`openai`]: `OpenAI` GPT provider implementation
-//! - [`ollama`]: Ollama local model provider implementation
-//! - [`mock`]: Mock implementation for testing
-//! - [`pricing`]: Model pricing information
-//! - [`retry`]: Retry wrapper for resilient LLM calls
-//! - [`structured`]: Structured output extraction
+//! - `trait_`: Core `ChatModel` trait and error types
+//! - `message`: Message type definitions and re-exports
+//! - `anthropic`: Anthropic Claude provider implementation
+//! - `openai`: `OpenAI` GPT provider implementation
+//! - `ollama`: Ollama local model provider implementation
+//! - `mock`: Mock implementation for testing
+//! - `pricing`: Model pricing information
+//! - `retry`: Retry wrapper for resilient LLM calls
+//! - `structured`: Structured output extraction
 
 // Re-export core types from juncture-core
 pub use juncture_core::{

@@ -32,7 +32,7 @@ use serde::{Deserialize, Serialize};
 /// # Generated Types
 ///
 /// The `#[derive(State)]` macro generates:
-/// - [`MessagesStateUpdate`]: update struct with `messages: Option<Vec<Message>>`
+/// - `MessagesStateUpdate`: update struct with `messages: Option<Vec<Message>>`
 ///
 /// # Example
 ///

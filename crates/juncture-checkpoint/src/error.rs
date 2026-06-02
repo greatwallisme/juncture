@@ -47,7 +47,7 @@ pub enum CheckpointError {
 
     /// Serialization error (alias for Serialize)
     ///
-    /// This variant is an alias for [`Serialize`] and exists for compatibility
+    /// This variant is an alias for `Serialize` and exists for compatibility
     /// with external code that expects this name.
     #[error("Serialization error: {0}")]
     Serialization(#[source] Box<dyn std::error::Error + Send + Sync>),

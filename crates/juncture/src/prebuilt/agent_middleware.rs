@@ -1,7 +1,7 @@
 //! Agent-level middleware system for prebuilt agents.
 //!
 //! This module provides [`AgentMiddleware`] for intercepting agent execution
-//! at the tool-call level, distinct from [`LlmMiddleware`](crate::llm::middleware::LlmMiddleware)
+//! at the tool-call level, distinct from [`LlmMiddleware`](crate::llm::LlmMiddleware)
 //! which wraps `ChatModel::invoke()`. Agent middleware can:
 //!
 //! - Transform state before/after model invocation
@@ -44,7 +44,7 @@ pub enum MiddlewareAction {
 
 /// Agent-level middleware for intercepting agent execution.
 ///
-/// Unlike [`LlmMiddleware`](crate::llm::middleware::LlmMiddleware) which wraps
+/// Unlike [`LlmMiddleware`](crate::llm::LlmMiddleware) which wraps
 /// individual `ChatModel::invoke()` calls, `AgentMiddleware` operates at the
 /// agent loop level — intercepting tool calls, transforming state, and handling
 /// errors across the entire execution cycle.

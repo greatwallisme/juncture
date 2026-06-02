@@ -313,6 +313,7 @@ mod tests {
     use crate::sqlite_store::SqliteStore;
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines, reason = "comprehensive lifecycle test")]
     async fn collector_trace_lifecycle() {
         let store = Arc::new(SqliteStore::new_memory().await.unwrap());
         let dyn_store: Arc<dyn TraceStore> = store.clone();
@@ -448,6 +449,7 @@ mod tests {
     /// Verify multi-agent tracing: coordinator + researcher + writer agents
     /// with nested LLM calls and tool calls, forming a proper observation tree.
     #[tokio::test]
+    #[allow(clippy::too_many_lines, reason = "comprehensive multi-agent test")]
     async fn collector_multi_agent_tracing() {
         let store = Arc::new(SqliteStore::new_memory().await.unwrap());
         let dyn_store: Arc<dyn TraceStore> = store.clone();
@@ -616,12 +618,12 @@ mod tests {
         );
 
         // Verify tree structure via parent_observation_id
-        let agent_spans: Vec<_> = loaded
+        let agent_spans_count = loaded
             .observations
             .iter()
             .filter(|o| o.parent_observation_id.is_none())
-            .collect();
-        assert_eq!(agent_spans.len(), 3, "expected 3 top-level agent spans");
+            .count();
+        assert_eq!(agent_spans_count, 3, "expected 3 top-level agent spans");
 
         let coordinator_obs = loaded
             .observations
@@ -656,29 +658,28 @@ mod tests {
             .collect();
         assert_eq!(res_children.len(), 3, "researcher should have 3 children");
 
-        let res_generations: Vec<_> = res_children
+        let res_generations_count = res_children
             .iter()
             .filter(|o| o.observation_type == crate::models::ObservationType::Generation)
-            .collect();
+            .count();
         let res_tools: Vec<_> = res_children
             .iter()
             .filter(|o| o.observation_type == crate::models::ObservationType::ToolCall)
             .collect();
         assert_eq!(
-            res_generations.len(),
-            2,
+            res_generations_count, 2,
             "researcher should have 2 LLM calls"
         );
         assert_eq!(res_tools.len(), 1, "researcher should have 1 tool call");
         assert_eq!(res_tools[0].name, "web_search");
 
         // Writer has 1 LLM call
-        let writer_children: Vec<_> = loaded
+        let writer_children_count = loaded
             .observations
             .iter()
             .filter(|o| o.parent_observation_id == Some(writer_obs.id))
-            .collect();
-        assert_eq!(writer_children.len(), 1, "writer should have 1 child");
+            .count();
+        assert_eq!(writer_children_count, 1, "writer should have 1 child");
 
         // Verify token usage and cost are recorded
         let total_input: u64 = loaded
