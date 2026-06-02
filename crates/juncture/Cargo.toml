@@ -11,10 +11,10 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
-juncture-core = { path = "../juncture-core", default-features = false, features = ["chat"] }
-juncture-derive = { path = "../juncture-derive" }
-juncture-store = { path = "../juncture-store", optional = true }
-juncture-tracing = { path = "../juncture-tracing" }
+juncture-core = { version = "0.1.0", path = "../juncture-core", default-features = false, features = ["chat"] }
+juncture-derive = { version = "0.1.0", path = "../juncture-derive" }
+juncture-store = { version = "0.1.0", path = "../juncture-store", optional = true }
+juncture-tracing = { version = "0.1.0", path = "../juncture-tracing" }
 async-trait = "0.1"
 futures = "0.3"
 serde = { version = "1", features = ["derive"] }

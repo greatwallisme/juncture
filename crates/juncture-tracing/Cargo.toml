@@ -20,7 +20,7 @@ otel = [
 ]
 
 [dependencies]
-juncture-core = { path = "../juncture-core", default-features = false }
+juncture-core = { version = "0.1.0", path = "../juncture-core", default-features = false }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 serde = { version = "1", features = ["derive"] }

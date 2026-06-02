@@ -49,7 +49,7 @@ chat = ["reqwest"]
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }
-juncture-derive = { path = "../juncture-derive" }
+juncture-derive = { version = "0.1.0", path = "../juncture-derive" }
 
 [lints]
 workspace = true
