@@ -52,13 +52,13 @@ use async_trait::async_trait;
 use common::load_llm;
 use juncture::llm::{ChatModel, Content, Message, Role, ToolDefinition};
 use juncture::tools::{Tool, ToolError, tools_condition_from_messages};
-use juncture_core::edge::{PathMap, RouteResult, Router, END};
+use juncture_core::edge::{END, PathMap, RouteResult, Router};
 use juncture_core::node::NodeFnUpdate;
 use juncture_core::observability::{GraphLifecycleCallback, MetricsCollector};
 use juncture_core::state::messages::{MessagesState, MessagesStateUpdate};
 use juncture_core::{JunctureError, RunnableConfig, StateGraph};
 use juncture_tracing::callback::{CallbackHandlerAdapter, GraphCallbackHandler};
-use juncture_tracing::{init, RegistryMetricsCollector};
+use juncture_tracing::{RegistryMetricsCollector, init};
 use serde::Deserialize;
 use serde_json::json;
 
@@ -418,11 +418,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 3. Load real LLM from .env
     let llm = load_llm().map_err(std::io::Error::other)?;
-    writeln!(
-        stdout,
-        "[demo] LLM loaded: model={}",
-        llm.model_name()
-    )?;
+    writeln!(stdout, "[demo] LLM loaded: model={}", llm.model_name())?;
 
     // 4. Set up tools and bind to LLM
     let tavily_key = std::env::var("TAVILY_API_KEY").ok();
@@ -432,7 +428,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if tavily_key.is_some() {
         writeln!(stdout, "[demo] Tavily search enabled")?;
     } else {
-        writeln!(stdout, "[demo] TAVILY_API_KEY not set, search tool will error on use")?;
+        writeln!(
+            stdout,
+            "[demo] TAVILY_API_KEY not set, search tool will error on use"
+        )?;
     }
 
     let tool_defs = vec![
@@ -610,11 +609,7 @@ async fn run_agent_graph(
         }
     }
 
-    writeln!(
-        stdout,
-        "\n[demo] Steps executed: {}",
-        output.metadata.steps
-    )?;
+    writeln!(stdout, "\n[demo] Steps executed: {}", output.metadata.steps)?;
     Ok(())
 }
 
@@ -628,12 +623,10 @@ async fn run_error_graph(
     let mut error_graph = StateGraph::<MessagesState>::new();
     error_graph.add_node_simple(
         "error_node",
-        NodeFnUpdate(|_state: &MessagesState| {
-            async move {
-                Err(JunctureError::execution(
-                    "Deliberate test error for telemetry verification",
-                ))
-            }
+        NodeFnUpdate(|_state: &MessagesState| async move {
+            Err(JunctureError::execution(
+                "Deliberate test error for telemetry verification",
+            ))
         }),
     )?;
     error_graph.set_entry_point("error_node");
@@ -667,16 +660,34 @@ fn print_verification_summary(
     )?;
     writeln!(stdout)?;
     writeln!(stdout, "Expected metrics in Prometheus:")?;
-    writeln!(stdout, "  juncture_graph_invocations_total  (agent + error graphs)")?;
+    writeln!(
+        stdout,
+        "  juncture_graph_invocations_total  (agent + error graphs)"
+    )?;
     writeln!(stdout, "  juncture_graph_errors_total       (error graph)")?;
-    writeln!(stdout, "  juncture_node_duration_ms         (per-node histogram)")?;
-    writeln!(stdout, "  juncture_graph_duration_ms        (per-graph histogram)")?;
+    writeln!(
+        stdout,
+        "  juncture_node_duration_ms         (per-node histogram)"
+    )?;
+    writeln!(
+        stdout,
+        "  juncture_graph_duration_ms        (per-graph histogram)"
+    )?;
     writeln!(stdout)?;
     writeln!(stdout, "Expected traces in Jaeger:")?;
     writeln!(stdout, "  juncture.graph.invoke             (graph span)")?;
-    writeln!(stdout, "  juncture.node.execute             (per-node spans)")?;
-    writeln!(stdout, "  juncture.llm.call                 (LLM provider span)")?;
-    writeln!(stdout, "  juncture.tool.call                (tool execution span)")?;
+    writeln!(
+        stdout,
+        "  juncture.node.execute             (per-node spans)"
+    )?;
+    writeln!(
+        stdout,
+        "  juncture.llm.call                 (LLM provider span)"
+    )?;
+    writeln!(
+        stdout,
+        "  juncture.tool.call                (tool execution span)"
+    )?;
     Ok(())
 }
 

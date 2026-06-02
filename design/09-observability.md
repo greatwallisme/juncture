@@ -585,3 +585,125 @@ juncture::tracing::init()
 
 ---
 
+## 11. juncture-telemetry: 内嵌可观测性引擎
+
+### 11.1 概述
+
+`juncture-telemetry` 是一个独立 crate，提供 Langfuse 兼容的内嵌可观测性引擎。它消除了部署 otel-collector、Jaeger、Prometheus 三个外部服务的需求，同时提供比传统 OTel 栈更丰富的 LLM 原生遥测数据。
+
+### 11.2 架构
+
+```text
+TelemetryCollector
+  └── BatchWriter (async, non-blocking, FK-ordered flush)
+        └── TraceStore (SQLite / PostgreSQL)
+              ├── Web Viewer (Langfuse-compatible API + Dashboard)
+              └── OTLP Ingest (POST /v1/traces)
+```
+
+### 11.3 数据模型
+
+Langfuse-compatible 三层嵌套：
+
+| 概念 | Juncture 对应 | 说明 |
+|------|--------------|------|
+| Trace | graph.invoke | 顶层容器，包含 session_id, user_id, tags |
+| Observation: Generation | llm.call | LLM 调用，含 model, prompt, completion, token usage |
+| Observation: ToolCall | tool.call | 工具调用，含 input, output |
+| Observation: Span | node.execute / superstep | 通用计时操作 |
+| Session | thread_id | 多轮对话聚合 |
+
+### 11.4 使用方式
+
+推荐使用 `init()` builder（一行式初始化）：
+
+```rust
+use juncture_telemetry::init;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let telemetry = init()
+        .with_store("telemetry.db")
+        .with_langfuse_from_env()  // 自动读取 LANGFUSE_* 环境变量
+        .with_dashboard(8123)
+        .install()
+        .await?;
+
+    let collector = telemetry.collector();
+    let trace = collector.begin_trace("my_graph", Some("thread-1".to_string())).await?;
+    let obs = collector.begin_llm_call(trace.id, None, "claude-sonnet-4-20250514", None);
+    // ... execute LLM call ...
+    collector.end_llm_call(obs, Some(response), Some(usage), Some(cost)).await?;
+    collector.end_trace(trace, Some(output), Some(total_cost), Some(total_tokens)).await?;
+
+    telemetry.shutdown().await?;  // flush + stop dashboard
+    Ok(())
+}
+```
+
+也可以使用底层 API：
+
+```rust
+use juncture_telemetry::{TelemetryCollector, SqliteStore, web::WebServer};
+use std::sync::Arc;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let store = Arc::new(SqliteStore::new("telemetry.db").await?);
+    let collector = TelemetryCollector::new(store.clone());
+
+    // Start web server (dashboard + API + OTLP ingest)
+    let server = WebServer::new(store, 8123).start().await?;
+    println!("Dashboard: {}", server.base_url());
+
+    // Use collector in graph execution
+    let trace = collector.begin_trace("my_graph", Some("thread-1".to_string())).await?;
+    let obs = collector.begin_llm_call(trace.id, None, "claude-sonnet-4-20250514", None);
+    // ... execute LLM call ...
+    collector.end_llm_call(obs, Some("response"), None, None).await?;
+    collector.end_trace(trace, None, None, None).await?;
+    collector.flush().await?;
+
+    server.stop().await;
+    Ok(())
+}
+```
+
+### 11.5 API 端点
+
+| Method | Path | 说明 |
+|--------|------|------|
+| `GET` | `/` | Dashboard UI (SPA) |
+| `POST` | `/api/public/ingestion` | Langfuse SDK 批量 ingest |
+| `GET` | `/api/public/traces` | 查询 traces (分页/过滤，name 支持 LIKE) |
+| `GET` | `/api/public/traces/:id` | 获取 trace + observations |
+| `GET` | `/api/public/sessions` | 查询 sessions |
+| `GET` | `/api/public/sessions/:id` | 获取 session |
+| `GET` | `/api/public/sessions/enriched` | 带聚合统计的 sessions |
+| `GET` | `/api/public/stats/daily` | 每日统计 |
+| `GET` | `/api/public/stats/models` | 按模型聚合统计 |
+| `GET` | `/api/public/stats/summary` | 总体摘要 + 延迟百分位 |
+| `POST` | `/v1/traces` | OTLP JSON ingest |
+
+### 11.6 Langfuse SDK 集成
+
+可直接对接 Langfuse SDK，通过 `.env` 配置：
+
+```env
+LANGFUSE_SECRET_KEY=sk-lf-...
+LANGFUSE_PUBLIC_KEY=pk-lf-...
+LANGFUSE_HOST=http://127.0.0.1:8123
+```
+
+服务端支持 Basic Auth 认证（`with_auth`），兼容 Langfuse SDK 的认证方式。
+
+### 11.6 Feature Gates
+
+| Feature | 能力 | 额外依赖 |
+|---------|------|----------|
+| `sqlite` (默认) | SQLite 存储 | sqlx |
+| `postgres` | PostgreSQL 存储 | sqlx |
+| `web` | Web server + Dashboard + OTLP ingest | axum, tower-http |
+
+---
+

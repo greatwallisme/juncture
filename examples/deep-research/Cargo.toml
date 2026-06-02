@@ -14,6 +14,7 @@ juncture = { path = "../../crates/juncture", features = ["openai"] }
 juncture-core = { path = "../../crates/juncture-core" }
 juncture-derive = { path = "../../crates/juncture-derive" }
 juncture-checkpoint = { path = "../../crates/juncture-checkpoint" }
+juncture-telemetry = { path = "../../crates/juncture-telemetry", features = ["web"] }
 clap = { version = "4", features = ["derive"] }
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }

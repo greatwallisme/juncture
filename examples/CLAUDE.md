@@ -1,6 +1,6 @@
 # CLAUDE.md -- examples
 
-15 self-contained binaries (01-15) plus standalone applications (deep-research, wasm-example, wasm-edge-cli, wasm-edge-server), demonstrating Juncture graph execution patterns from basic state machines to production-grade LLM pipelines.
+16 self-contained binaries (01-16) plus standalone applications (deep-research, wasm-example, wasm-edge-cli, wasm-edge-server), demonstrating Juncture graph execution patterns from basic state machines to production-grade LLM pipelines.
 
 ## Run Commands
 
@@ -13,6 +13,11 @@ cargo run -p juncture-simple-example --bin 07_human_in_the_loop
 cp .env.example .env  # then fill in your API key
 cargo run -p juncture-simple-example --bin 10_basic_chat
 cargo run -p juncture-simple-example --bin 13_react_agent
+
+# Run telemetry demo (requires .env with OPENAI_API_KEY)
+cargo run -p juncture-simple-example --bin 16_juncture_telemetry
+# Then open http://127.0.0.1:8123 for the Langfuse-style dashboard
+# Public access: BIND_PUBLIC=1 cargo run -p juncture-simple-example --bin 16_juncture_telemetry
 
 # Run deep-research (separate package, requires .env with OPENAI_* and optionally TAVILY_API_KEY)
 cargo run -p deep-research -- "What is the current state of quantum computing?"
@@ -39,6 +44,7 @@ cargo run -p deep-research -- --verbose "Research topic here"
 | 13 | `13_react_agent` | `create_react_agent`, weather + math tools |
 | 14 | `14_multi_turn` | Conversation history accumulation, system prompts |
 | 15 | `15_structured_output` | `ToolChoice::Required`, JSON entity extraction |
+| 16 | `16_juncture_telemetry` | `init()` builder, `TelemetryCollector`, Langfuse cloud export, embedded dashboard |
 
 ## Progression
 
@@ -46,6 +52,7 @@ cargo run -p deep-research -- --verbose "Research topic here"
 04-05: LLM integration patterns (chat model, tool calling)
 06-09: Advanced features (streaming, HITL, checkpointing, errors)
 10-15: Real LLM applications (requires `.env` with API key)
+16: Telemetry observability (real LLM + SQLite-backed traces + web dashboard)
 deep-research: Multi-agent research assistant (separate package, see below)
 
 ## Deep-Research Example
@@ -68,7 +75,27 @@ cargo run -p deep-research -- --thread-id session-1 "Topic"  # checkpoint persis
 
 Requires `.env` with `OPENAI_API_KEY`, `OPENAI_BASE_URL` (for OpenAI-compatible APIs), and optionally `TAVILY_API_KEY` for web search. See `examples/deep-research/CLAUDE.md` for full architecture details.
 
-## Telemetry Demo
+## Telemetry Demo (Example 16)
+
+Real LLM agent with tool calling, instrumented with `juncture-telemetry`. Uses the `init()` one-liner builder with auto Langfuse cloud export.
+
+```bash
+# Run the demo (requires .env with OPENAI_API_KEY)
+cargo run -p juncture-simple-example --bin 16_juncture_telemetry
+
+# With Langfuse cloud export (add to .env):
+# LANGFUSE_PUBLIC_KEY=pk-lf-...
+# LANGFUSE_SECRET_KEY=sk-lf-...
+# LANGFUSE_BASE_URL=https://cloud.langfuse.com
+
+# Public dashboard access:
+BIND_PUBLIC=1 cargo run -p juncture-simple-example --bin 16_juncture_telemetry
+
+# Open http://127.0.0.1:8123 for the dashboard
+# Features: trace tree, observation detail, cost/token tracking, session timeline
+```
+
+## OpenTelemetry Demo (Docker-based)
 
 End-to-end OpenTelemetry pipeline verification. Runs a graph with full `OTel` instrumentation (traces + metrics) exported to a local `OTel` Collector -> Jaeger + Prometheus stack.
 

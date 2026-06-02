@@ -133,7 +133,11 @@ pub async fn run_research(
 
     // Search for existing facts before starting research
     let existing_facts = fact_store.search_facts(query, 5).await.unwrap_or_default();
-    tracing::info!("[FactStore] search_facts returned {} results for query: '{}'", existing_facts.len(), query);
+    tracing::info!(
+        "[FactStore] search_facts returned {} results for query: '{}'",
+        existing_facts.len(),
+        query
+    );
     let system_message = if existing_facts.is_empty() {
         ORCHESTRATOR_SYSTEM_PROMPT.to_string()
     } else {
@@ -233,12 +237,7 @@ async fn archive_research_facts(fact_store: &FactStore, query: &str, report: &st
     });
     fact_store
         .store()
-        .put(
-            fact_store.namespace(),
-            &report_key,
-            report_value,
-            None,
-        )
+        .put(fact_store.namespace(), &report_key, report_value, None)
         .await
         .map_err(|e| anyhow::anyhow!("Failed to save report: {e}"))?;
     tracing::info!("[FactStore] store().put() completed, key: '{}'", report_key);

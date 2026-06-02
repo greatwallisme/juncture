@@ -27,7 +27,6 @@ use clap::Parser;
 use std::io::Write;
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
-mod agents;
 mod config;
 mod llm;
 mod memory;
@@ -36,6 +35,7 @@ mod state;
 mod tools;
 
 use config::ResearchConfig;
+use juncture_telemetry::init as telemetry_init;
 
 /// Multi-agent research assistant powered by Juncture
 #[derive(Parser, Debug)]
@@ -67,6 +67,14 @@ struct Args {
     /// Thread ID for session persistence (checkpointing)
     #[arg(long)]
     thread_id: Option<String>,
+
+    /// Enable embedded telemetry dashboard (<http://127.0.0.1:8123>)
+    #[arg(long)]
+    telemetry: bool,
+
+    /// Telemetry dashboard port (default: 8123)
+    #[arg(long, default_value = "8123")]
+    telemetry_port: u16,
 }
 
 #[tokio::main]
@@ -92,6 +100,24 @@ async fn main() -> Result<()> {
         .init();
 
     tracing::info!("Starting deep research agent");
+
+    // Initialize telemetry if requested
+    let telemetry_handle = if args.telemetry {
+        let handle = telemetry_init()
+            .with_store("deep-research-telemetry.db")
+            .with_langfuse_from_env()
+            .with_dashboard(args.telemetry_port)
+            .install()
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to initialize telemetry: {e}"))?;
+        if let Some(url) = handle.dashboard_url() {
+            tracing::info!(url = %url, "Telemetry dashboard started");
+        }
+        Some(handle)
+    } else {
+        None
+    };
+
     // Build config from environment and CLI args
     let config = ResearchConfig::from_env(&args.model, args.max_iterations, args.require_approval)?;
 
@@ -111,6 +137,11 @@ async fn main() -> Result<()> {
     // Display the research result to stdout
     std::io::stdout().write_all(result.as_bytes())?;
     std::io::stdout().write_all(b"\n")?;
+
+    // Flush telemetry before exit
+    if let Some(handle) = telemetry_handle {
+        let _ = handle.shutdown().await;
+    }
 
     Ok(())
 }

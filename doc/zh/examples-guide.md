@@ -488,6 +488,57 @@ cargo run -p juncture-simple-example --bin telemetry_demo
 
 ---
 
+### 示例 16：Juncture 遥测（Langfuse 兼容仪表盘）
+
+**文件：** `examples/src/16_juncture_telemetry.rs`
+
+真实 LLM 代理与工具调用，使用 `init()` 一行式初始化 + Langfuse 云端自动导出。
+
+```bash
+# 需要 .env 中配置 OPENAI_API_KEY
+cargo run -p juncture-simple-example --bin 16_juncture_telemetry
+
+# 打开仪表盘
+open http://127.0.0.1:8123
+
+# Langfuse 云端导出（添加到 .env）：
+# LANGFUSE_PUBLIC_KEY=pk-lf-...
+# LANGFUSE_SECRET_KEY=sk-lf-...
+# LANGFUSE_BASE_URL=https://cloud.langfuse.com
+
+# 公网访问
+BIND_PUBLIC=1 cargo run -p juncture-simple-example --bin 16_juncture_telemetry
+```
+
+**演示内容：**
+- `init()` builder 一行式遥测初始化
+- `with_langfuse_from_env()` 自动读取 `LANGFUSE_*` 环境变量
+- `with_dashboard(8123)` 启动内嵌 Web 服务器
+- `TelemetryHandle` RAII 自动 flush
+- 真实 agent 循环：`bind_tools` + 工具执行
+- 多 agent 追踪：嵌套观测树（`parent_observation_id`）
+- 每个观测的 token 用量和成本追踪
+- 跨 trace 的 session 追踪
+
+**Agent 流程：**
+```
+trace (react_agent)
+  ├── span: iteration_1
+  │   ├── generation: llm_call (决定使用工具)
+  │   ├── tool_call: get_weather({"city":"Tokyo"})
+  │   └── tool_call: calculator({"expression":"42 * 17"})
+  └── span: iteration_2
+      └── generation: llm_call (综合最终答案)
+```
+
+**仪表盘功能：**
+- 概览：统计卡片、trace 时间图、模型成本条、延迟百分位
+- Traces：名称/用户/日期筛选，token 流量表示（`input -> output (total)`）
+- Trace 详情：双面板树+详情，类型筛选（All/Gen/Tool/Span），观测搜索
+- Sessions：带聚合统计的富卡片
+
+---
+
 ## 下一步
 
 - [高级功能](advanced-features.md) -- 深入了解流式、HITL、检查点、工具和遥测

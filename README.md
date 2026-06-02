@@ -71,12 +71,22 @@ That said, the benchmarks do show meaningful differences. Here is a summary (ful
 - Structured output extraction via `schemars`
 - `CircuitBreaker` for provider health tracking
 
-### Observability (juncture-tracing)
+### Observability
 
-- OpenTelemetry integration with node-level spans
-- Token usage metrics
+**juncture-tracing** -- OpenTelemetry integration:
+- Node-level spans with token usage metrics
 - `GraphCallbackHandler` lifecycle callbacks
 - Cross-service trace context propagation
+
+**juncture-telemetry** -- Langfuse-compatible embedded observability:
+- One-line setup: `init().with_store("db").with_langfuse_from_env().with_dashboard(8123).install().await?`
+- SQLite-backed trace/observation/session storage
+- Embedded web dashboard with trace tree, observation detail, cost/token charts
+- Langfuse cloud export (auto-reads `LANGFUSE_*` env vars)
+- Langfuse-compatible REST API (traces, sessions, stats, ingestion)
+- OTLP HTTP ingest
+- Multi-agent tracing via nested observation trees
+- RAII auto-flush on drop + signal handler for graceful shutdown
 
 ### WASM Support
 

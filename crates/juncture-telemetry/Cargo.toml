@@ -1,0 +1,52 @@
+[package]
+name = "juncture-telemetry"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+rust-version.workspace = true
+description = "Langfuse-compatible observability engine for Juncture AI agents"
+
+[features]
+default = ["sqlite"]
+sqlite = ["dep:sqlx"]
+postgres = ["dep:sqlx"]
+otlp-grpc = ["dep:tonic", "dep:prost"]
+web = ["dep:axum", "dep:tower-http", "dep:base64"]
+
+[dependencies]
+# Core
+juncture-core = { path = "../juncture-core" }
+async-trait = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+thiserror = "2"
+tracing = "0.1"
+
+# Async
+tokio = { version = "1", features = ["sync", "time", "macros", "rt-multi-thread", "signal"] }
+reqwest = { version = "0.12", features = ["json"] }
+
+# Storage (sqlx with SQLite runtime - shared with juncture-core)
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "chrono", "derive"], optional = true }
+
+# Web
+axum = { version = "0.8", features = ["json", "query"], optional = true }
+tower-http = { version = "0.6", features = ["cors", "trace"], optional = true }
+base64 = { version = "0.22", optional = true }
+
+# OTLP gRPC
+tonic = { version = "0.12", optional = true }
+prost = { version = "0.13", optional = true }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["test-util"] }
+reqwest = { version = "0.12", features = ["json"] }
+
+[lints]
+workspace = true

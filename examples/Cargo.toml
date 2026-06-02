@@ -15,6 +15,7 @@ juncture-core = { path = "../crates/juncture-core" }
 juncture-derive = { path = "../crates/juncture-derive" }
 juncture-checkpoint = { path = "../crates/juncture-checkpoint" }
 juncture-tracing = { path = "../crates/juncture-tracing", features = ["otel"] }
+juncture-telemetry = { path = "../crates/juncture-telemetry", features = ["web"] }
 opentelemetry = "0.27"
 tracing = "0.1"
 reqwest = { version = "0.12", features = ["json"] }
@@ -25,6 +26,7 @@ futures = "0.3"
 async-trait = "0.1"
 uuid = { version = "1", features = ["v4"] }
 dotenvy = "0.15"
+chrono = "0.4"
 
 [[bin]]
 name = "01_state_machine"
@@ -89,6 +91,10 @@ path = "src/15_structured_output.rs"
 [[bin]]
 name = "telemetry_demo"
 path = "src/telemetry_demo.rs"
+
+[[bin]]
+name = "16_juncture_telemetry"
+path = "src/16_juncture_telemetry.rs"
 
 [lints]
 workspace = true

@@ -2,7 +2,6 @@
 //!
 //! Multi-agent research assistant built with Juncture framework.
 
-pub mod agents;
 pub mod config;
 pub mod llm;
 pub mod memory;

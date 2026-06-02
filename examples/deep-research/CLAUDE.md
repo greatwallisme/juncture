@@ -21,14 +21,12 @@ Middleware:
 
 ```
 src/
-  main.rs         -- CLI entry point with clap derive
+  main.rs         -- CLI entry point with clap derive + telemetry integration
   lib.rs          -- library root, module declarations
   config.rs       -- ResearchConfig from env vars and CLI args
   state.rs        -- ResearchState using #[derive(State)]
   llm.rs          -- LLM model builder with middleware chain (logging + circuit breaker)
   orchestrator.rs -- LLM-driven orchestrator using create_agent_with_middleware
-  agents/
-    mod.rs        -- (empty, orchestrator handles all agent logic)
   memory/
     mod.rs        -- Memory module re-exports
     store.rs      -- FactStore for persistent cross-session facts
@@ -56,6 +54,12 @@ cargo run -p deep-research -- --verbose "Research topic here"
 
 # Run with session persistence (checkpointing)
 cargo run -p deep-research -- --thread-id my-research-session "Research topic here"
+
+# Run with telemetry dashboard (opens http://127.0.0.1:8123)
+cargo run -p deep-research -- --telemetry "Research topic here"
+
+# Run with telemetry on custom port
+cargo run -p deep-research -- --telemetry --telemetry-port 9090 "Research topic here"
 ```
 
 ## Environment Configuration
@@ -101,6 +105,23 @@ The orchestrator uses agent-level middleware:
 | `web_search` | `{"query": "search string"}` | Tavily Search API |
 | `calculator` | `{"expression": "2 + 3 * 4"}` | Supports `+`, `-`, `*`, `/` |
 | `read_file` | `{"path": "relative/path"}` | Rejects paths outside CWD |
+
+## Telemetry
+
+When `--telemetry` is passed, the application uses `juncture_telemetry::init()` to start an embedded observability dashboard:
+
+- **Dashboard**: `http://127.0.0.1:8123` (dark theme SPA with trace tree, session timeline)
+- **API**: Langfuse-compatible REST endpoints at `/api/public/*`
+- **Langfuse Cloud**: Auto-export when `LANGFUSE_*` env vars are set
+- **Storage**: SQLite file `deep-research-telemetry.db`
+
+No external services (otel-collector, Jaeger, Prometheus) required.
+
+```bash
+# With Langfuse cloud export:
+LANGFUSE_PUBLIC_KEY=pk-lf-... LANGFUSE_SECRET_KEY=sk-lf-... \
+  cargo run -p deep-research -- --telemetry "Research topic"
+```
 
 ## Testing
 

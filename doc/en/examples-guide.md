@@ -488,6 +488,57 @@ cargo run -p juncture-simple-example --bin telemetry_demo
 
 ---
 
+### Example 16: Juncture Telemetry (Langfuse-compatible Dashboard)
+
+**File:** `examples/src/16_juncture_telemetry.rs`
+
+Real LLM agent with tool calling, instrumented with `juncture-telemetry` using the `init()` one-liner builder.
+
+```bash
+# Requires .env with OPENAI_API_KEY
+cargo run -p juncture-simple-example --bin 16_juncture_telemetry
+
+# Open dashboard
+open http://127.0.0.1:8123
+
+# With Langfuse cloud export (add to .env):
+# LANGFUSE_PUBLIC_KEY=pk-lf-...
+# LANGFUSE_SECRET_KEY=sk-lf-...
+# LANGFUSE_BASE_URL=https://cloud.langfuse.com
+
+# Public access
+BIND_PUBLIC=1 cargo run -p juncture-simple-example --bin 16_juncture_telemetry
+```
+
+**What it demonstrates:**
+- `init()` builder for one-line telemetry setup
+- `with_langfuse_from_env()` auto-reads `LANGFUSE_*` env vars
+- `with_dashboard(8123)` starts embedded web server
+- `TelemetryHandle` with RAII auto-flush on drop
+- Real agent loop with `bind_tools` and tool execution
+- Multi-agent tracing via nested observation trees (`parent_observation_id`)
+- Token usage and cost tracking per observation
+- Session tracking across multiple traces
+
+**Agent flow:**
+```
+trace (react_agent)
+  ├── span: iteration_1
+  │   ├── generation: llm_call (decides to use tools)
+  │   ├── tool_call: get_weather({"city":"Tokyo"})
+  │   └── tool_call: calculator({"expression":"42 * 17"})
+  └── span: iteration_2
+      └── generation: llm_call (synthesizes final answer)
+```
+
+**Dashboard features:**
+- Overview: stat cards, traces-over-time chart, model cost bars, latency percentiles
+- Traces: name/user/date filters, token flow notation (`input -> output (total)`)
+- Trace detail: two-panel tree + detail, type filters (All/Gen/Tool/Span), observation search
+- Sessions: enriched cards with aggregated stats
+
+---
+
 ## Next Steps
 
 - [Advanced Features](advanced-features.md) -- deep dive into streaming, HITL, checkpointing, tools, and telemetry
