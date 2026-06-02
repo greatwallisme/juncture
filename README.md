@@ -175,6 +175,7 @@ See the [`examples/`](examples/) directory for 15 progressive examples, from bas
 | 13 | ReAct Agent | `create_react_agent`, weather + math tools |
 | 14 | Multi-turn | Conversation history accumulation, system prompts |
 | 15 | Structured Output | `ToolChoice::Required`, JSON entity extraction |
+| 16 | Telemetry | `init()` builder, Langfuse dashboard, cloud export, real LLM + tools |
 | -- | Deep Research | Multi-agent research assistant (separate package) |
 | -- | WASM Example | Browser-based graph execution via wasm-bindgen |
 | -- | WASM Edge CLI | WASI standalone binary |
@@ -198,9 +199,10 @@ juncture/
     juncture-derive/     # #[derive(State)] proc-macro
     juncture-checkpoint/ # MemorySaver, SqliteSaver, PostgresSaver
     juncture-tracing/    # OpenTelemetry integration
+    juncture-telemetry/  # Langfuse-compatible embedded observability
     juncture-store/      # Cross-thread persistent key-value storage
   benchmarks/            # Juncture vs LangGraph performance comparison
-  examples/              # 15 examples + deep-research + WASM demos
+  examples/              # 16 examples + deep-research + WASM demos
   design/                # Architecture design documents (11 modules)
 ```
 
@@ -234,6 +236,7 @@ Juncture takes a specific position among Rust LangGraph implementations:
 | **Channel model** | Static, compile-time verified | Dynamic or simplified |
 | **Execution** | Full Pregel with field-version scheduling | Simplified sequential or basic parallel |
 | **Feature coverage** | HITL, subgraphs, Send, streaming, checkpoints, Store | Partial coverage |
+| **Observability** | Langfuse-compatible embedded dashboard + cloud export + OTLP | Not typically supported |
 | **WASM** | Browser + WASI + Spin edge | Not typically supported |
 | **Maturity** | Early stage, design-driven | Varies |
 
@@ -258,4 +261,4 @@ Contributions are welcome. Please ensure:
 
 ## License
 
-Licensed under either of [Apache License, Version 2.0](http://www.apache.org/licenses/LICENSE-2.0) or [MIT License](http://opensource.org/licenses/MIT), at your option.
+Licensed under either of [Apache License, Version 2.0](http://www.apache.org/licenses/LICENSE-2.0)

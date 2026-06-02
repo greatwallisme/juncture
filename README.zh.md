@@ -175,6 +175,7 @@ let result = agent.invoke(input, &config).await?;
 | 13 | ReAct 智能体 | `create_react_agent`、天气 + 数学工具 |
 | 14 | 多轮对话 | 对话历史累积、系统提示词 |
 | 15 | 结构化输出 | `ToolChoice::Required`、JSON 实体提取 |
+| 16 | 遥测 | `init()` builder、Langfuse 仪表盘、云端导出、真实 LLM + 工具 |
 | -- | 深度研究 | 多智能体研究助手（独立包） |
 | -- | WASM 浏览器示例 | 通过 wasm-bindgen 在浏览器中执行图 |
 | -- | WASM 边缘 CLI | WASI 独立二进制 |
@@ -198,9 +199,10 @@ juncture/
     juncture-derive/     # #[derive(State)] 过程宏
     juncture-checkpoint/ # MemorySaver、SqliteSaver、PostgresSaver
     juncture-tracing/    # OpenTelemetry 集成
+    juncture-telemetry/  # Langfuse 兼容内嵌可观测性引擎
     juncture-store/      # 跨线程持久化键值存储
   benchmarks/            # Juncture vs LangGraph 性能对比
-  examples/              # 15 个示例 + 深度研究 + WASM 演示
+  examples/              # 16 个示例 + 深度研究 + WASM 演示
   design/                # 架构设计文档（11 个模块）
 ```
 
@@ -234,6 +236,7 @@ Juncture 在 Rust 版 LangGraph 实现中有着明确的定位：
 | **Channel 模型** | 静态，编译期验证 | 动态或简化版 |
 | **执行引擎** | 完整 Pregel + 字段版本调度 | 简化顺序执行或基础并行 |
 | **功能覆盖** | HITL、子图、Send、流式、检查点、Store | 部分覆盖 |
+| **可观测性** | Langfuse 兼容内嵌仪表盘 + 云端导出 + OTLP | 通常不支持 |
 | **WASM** | 浏览器 + WASI + Spin 边缘 | 通常不支持 |
 | **成熟度** | 早期阶段，设计驱动 | 各不相同 |
 
@@ -258,4 +261,4 @@ Juncture 在 Rust 版 LangGraph 实现中有着明确的定位：
 
 ## 许可证
 
-根据 [Apache License, Version 2.0](http://www.apache.org/licenses/LICENSE-2.0) 或 [MIT License](http://opensource.org/licenses/MIT) 双许可，可任选其一。
+根据 [Apache License, Version 2.0](http://www.apache.org/licenses/LICENSE-2.0)
