@@ -167,10 +167,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 2. Setup telemetry -- one-liner with auto-detection
     writeln!(stdout, "[2] Setting up telemetry...")?;
+    let bind_ip = if std::env::var("BIND_PUBLIC").is_ok() {
+        [0, 0, 0, 0]
+    } else {
+        [127, 0, 0, 1]
+    };
     let telemetry = init()
         .with_store("telemetry-demo.db")
         .with_langfuse_from_env()
         .with_dashboard(8123)
+        .with_bind_addr(bind_ip)
         .install()
         .await?;
     if let Some(url) = telemetry.dashboard_url() {
@@ -186,37 +192,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 4. Verify local data
     writeln!(stdout, "[4] Verifying local data...")?;
-    let client = reqwest::Client::new();
+    if let Some(base_url) = telemetry.dashboard_url() {
+        let client = reqwest::Client::new();
 
-    let resp = client
-        .get(format!(
-            "{}/api/public/traces",
-            telemetry.dashboard_url().unwrap_or_default()
-        ))
-        .send()
-        .await?;
-    let traces: serde_json::Value = resp.json().await?;
-    let count = traces["totalCount"].as_u64().unwrap_or(0);
-    writeln!(stdout, "    Local traces: {count}")?;
+        let resp = client
+            .get(format!("{base_url}/api/public/traces"))
+            .send()
+            .await?;
+        let traces: serde_json::Value = resp.json().await?;
+        let count = traces["totalCount"].as_u64().unwrap_or(0);
+        writeln!(stdout, "    Local traces: {count}")?;
 
-    let resp = client
-        .get(format!(
-            "{}/api/public/stats/summary",
-            telemetry.dashboard_url().unwrap_or_default()
-        ))
-        .send()
-        .await?;
-    let summary: serde_json::Value = resp.json().await?;
-    writeln!(
-        stdout,
-        "    Observations: {}",
-        summary["totalObservations"].as_u64().unwrap_or(0)
-    )?;
-    writeln!(
-        stdout,
-        "    Total tokens: {}",
-        summary["totalTokens"].as_u64().unwrap_or(0)
-    )?;
+        let resp = client
+            .get(format!("{base_url}/api/public/stats/summary"))
+            .send()
+            .await?;
+        let summary: serde_json::Value = resp.json().await?;
+        writeln!(
+            stdout,
+            "    Observations: {}",
+            summary["totalObservations"].as_u64().unwrap_or(0)
+        )?;
+        writeln!(
+            stdout,
+            "    Total tokens: {}",
+            summary["totalTokens"].as_u64().unwrap_or(0)
+        )?;
+    } else {
+        writeln!(stdout, "    Dashboard not available")?;
+    }
 
     writeln!(stdout)?;
     writeln!(stdout, "Press Ctrl+C to stop the server.")?;
