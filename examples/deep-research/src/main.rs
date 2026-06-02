@@ -103,10 +103,16 @@ async fn main() -> Result<()> {
 
     // Initialize telemetry if requested
     let telemetry_handle = if args.telemetry {
+        let bind_ip = if std::env::var("BIND_PUBLIC").is_ok() {
+            [0, 0, 0, 0]
+        } else {
+            [127, 0, 0, 1]
+        };
         let handle = telemetry_init()
             .with_store("deep-research-telemetry.db")
             .with_langfuse_from_env()
             .with_dashboard(args.telemetry_port)
+            .with_bind_addr(bind_ip)
             .install()
             .await
             .map_err(|e| anyhow::anyhow!("Failed to initialize telemetry: {e}"))?;
