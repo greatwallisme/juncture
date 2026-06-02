@@ -88,6 +88,11 @@ That said, the benchmarks do show meaningful differences. Here is a summary (ful
 - Multi-agent tracing via nested observation trees
 - RAII auto-flush on drop + signal handler for graceful shutdown
 
+| Local Dashboard | Langfuse Cloud Sync |
+|:---:|:---:|
+| ![Local Dashboard](asset/local-dashboard-1.png) | ![Langfuse Cloud](asset/langfuse.png) |
+| ![Trace Detail](asset/local-dashboard-2.png) | |
+
 ### WASM Support
 
 - Browser (`wasm32-unknown-unknown`) via `wasm-bindgen`
