@@ -2,6 +2,7 @@
 name = "juncture-tracing"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 description = "OpenTelemetry integration and tracing for Juncture applications"
 license.workspace = true
 repository.workspace = true

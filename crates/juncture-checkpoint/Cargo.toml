@@ -2,6 +2,7 @@
 name = "juncture-checkpoint"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 description = "Checkpoint persistence for Juncture state machine executions"
 license.workspace = true
 repository.workspace = true

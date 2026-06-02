@@ -2,6 +2,7 @@
 name = "juncture-store"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 description = "Cross-thread persistent key-value storage for Juncture (re-exports juncture-core::store)"
 license.workspace = true
 repository.workspace = true
