@@ -368,9 +368,9 @@ impl TopologyValidator {
             let has_exit = scc.iter().any(|node| {
                 edges.iter().any(|edge| {
                     matches!(edge, Edge::Conditional { from, path_map, .. }
-                        if from == node && path_map.iter().any(|(_, target)| {
-                            target == crate::edge::END || !scc_set.contains(target.as_str())
-                        }))
+                    if from == node && path_map.iter().any(|(_, target)| {
+                        target == crate::edge::END || !scc_set.contains(target.as_str())
+                    }))
                 })
             });
 
