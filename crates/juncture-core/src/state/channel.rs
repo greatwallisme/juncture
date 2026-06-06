@@ -843,6 +843,126 @@ where
     Snapshot(T),
 }
 
+/// Ring buffer channel for append-heavy fields with bounded size
+///
+/// Wraps a `Vec<T>` with a maximum capacity. When new values are appended
+/// and the capacity is exceeded, the oldest elements are removed. This
+/// prevents unbounded memory growth for append-heavy fields like messages,
+/// events, and logs.
+///
+/// # Examples
+///
+/// ```ignore
+/// use juncture_core::state::channel::RingBufferChannel;
+///
+/// let mut ch = RingBufferChannel::new(Vec::new(), 100);
+/// ch.update(vec!["msg1".to_string(), "msg2".to_string()]);
+/// assert_eq!(ch.get().len(), 2);
+/// ```
+#[derive(Clone, Debug)]
+pub struct RingBufferChannel<T> {
+    /// Current values in the ring buffer
+    values: Vec<T>,
+    /// Maximum capacity of the ring buffer
+    capacity: usize,
+}
+
+impl<T> RingBufferChannel<T> {
+    /// Create a new ring buffer channel with the given initial values and capacity
+    ///
+    /// The capacity is clamped to a minimum of 1. If `values` exceeds the
+    /// capacity, the oldest elements are trimmed.
+    #[must_use]
+    pub fn new(values: Vec<T>, capacity: usize) -> Self {
+        let mut channel = Self {
+            values,
+            capacity: capacity.max(1),
+        };
+        channel.trim_to_capacity();
+        channel
+    }
+
+    /// Get the current capacity
+    #[must_use]
+    pub const fn capacity(&self) -> usize {
+        self.capacity
+    }
+
+    /// Get the current number of elements
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.values.len()
+    }
+
+    /// Check if the ring buffer is empty
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.values.is_empty()
+    }
+
+    /// Trim the values to the configured capacity
+    ///
+    /// Removes the oldest elements (from the front) if the buffer exceeds capacity.
+    fn trim_to_capacity(&mut self) {
+        if self.values.len() > self.capacity {
+            let excess = self.values.len() - self.capacity;
+            self.values.drain(..excess);
+        }
+    }
+}
+
+impl<T: Send + Sync + serde::Serialize + serde::de::DeserializeOwned + 'static> Channel<Vec<T>>
+    for RingBufferChannel<T>
+{
+    fn update(&mut self, values: Vec<Vec<T>>) -> bool {
+        let had_non_empty = values.iter().any(|v| !v.is_empty());
+        for v in values {
+            self.values.extend(v);
+        }
+        self.trim_to_capacity();
+        had_non_empty
+    }
+
+    fn get(&self) -> &Vec<T> {
+        &self.values
+    }
+
+    fn consume(&mut self) -> bool {
+        false
+    }
+
+    fn checkpoint(&self) -> Option<serde_json::Value> {
+        serde_json::to_value(serde_json::json!({
+            "values": &self.values,
+            "capacity": self.capacity,
+        }))
+        .ok()
+    }
+
+    fn from_checkpoint(value: serde_json::Value) -> Result<Self, String> {
+        // Support both legacy format (plain array) and new format (object with capacity)
+        if let Some(obj) = value.as_object() {
+            let values: Vec<T> =
+                serde_json::from_value(obj.get("values").cloned().unwrap_or_default())
+                    .map_err(|e| format!("checkpoint deserialization failed: {e}"))?;
+            let capacity = obj
+                .get("capacity")
+                .and_then(serde_json::Value::as_u64)
+                .map_or(1000, |c| usize::try_from(c).unwrap_or(1000))
+                .max(1); // Enforce minimum capacity of 1 (same as new())
+            Ok(Self { values, capacity })
+        } else {
+            // Legacy format: plain array without capacity
+            let values: Vec<T> = serde_json::from_value(value)
+                .map_err(|e| format!("checkpoint deserialization failed: {e}"))?;
+            Ok(Self {
+                values,
+                capacity: 1000,
+            })
+        }
+    }
+}
+
 /// Remove-message identifier for message deletion
 ///
 /// Used to identify which message should be removed from the message list
@@ -1448,6 +1568,88 @@ mod tests {
         ch.finish();
         // After finish, should_snapshot should return true
         assert!(ch.should_snapshot());
+    }
+
+    // --- RingBufferChannel tests ---
+
+    #[test]
+    fn ring_buffer_channel_new_enforces_capacity() {
+        let ch: RingBufferChannel<i32> = RingBufferChannel::new(vec![1, 2, 3, 4, 5], 3);
+        assert_eq!(ch.capacity(), 3);
+        assert_eq!(ch.len(), 3);
+        assert_eq!(ch.get(), &vec![3, 4, 5]);
+    }
+
+    #[test]
+    fn ring_buffer_channel_new_clamps_min_capacity() {
+        let ch: RingBufferChannel<i32> = RingBufferChannel::new(vec![1, 2], 0);
+        assert_eq!(ch.capacity(), 1);
+    }
+
+    #[test]
+    fn ring_buffer_channel_update_appends_and_trims() {
+        let mut ch: RingBufferChannel<i32> = RingBufferChannel::new(vec![], 3);
+        assert!(ch.update(vec![vec![1, 2]]));
+        assert_eq!(ch.get(), &vec![1, 2]);
+
+        assert!(ch.update(vec![vec![3, 4]]));
+        assert_eq!(ch.get(), &vec![2, 3, 4]);
+        assert_eq!(ch.len(), 3);
+    }
+
+    #[test]
+    fn ring_buffer_channel_update_returns_false_for_empty() {
+        let mut ch: RingBufferChannel<i32> = RingBufferChannel::new(vec![1, 2], 5);
+        assert!(!ch.update(vec![vec![]]));
+        assert_eq!(ch.get(), &vec![1, 2]);
+    }
+
+    #[test]
+    fn ring_buffer_channel_update_returns_false_for_empty_outer() {
+        let mut ch: RingBufferChannel<i32> = RingBufferChannel::new(vec![1, 2], 5);
+        assert!(!ch.update(vec![]));
+        assert_eq!(ch.get(), &vec![1, 2]);
+    }
+
+    #[test]
+    fn ring_buffer_channel_consume_always_false() {
+        let mut ch: RingBufferChannel<i32> = RingBufferChannel::new(vec![1], 5);
+        assert!(!ch.consume());
+    }
+
+    #[test]
+    fn ring_buffer_channel_checkpoint_roundtrip() {
+        let ch: RingBufferChannel<i32> = RingBufferChannel::new(vec![1, 2, 3], 10);
+        let checkpoint = ch.checkpoint().unwrap();
+        let restored = RingBufferChannel::<i32>::from_checkpoint(checkpoint).unwrap();
+        assert_eq!(restored.get(), &vec![1, 2, 3]);
+        assert_eq!(restored.capacity(), 10);
+    }
+
+    #[test]
+    fn ring_buffer_channel_from_checkpoint_legacy_format() {
+        // Legacy format: plain array without capacity
+        let legacy = serde_json::json!([1, 2, 3]);
+        let ch = RingBufferChannel::<i32>::from_checkpoint(legacy).unwrap();
+        assert_eq!(ch.get(), &vec![1, 2, 3]);
+        assert_eq!(ch.capacity(), 1000); // default capacity
+    }
+
+    #[test]
+    fn ring_buffer_channel_from_checkpoint_clamps_capacity() {
+        // Checkpoint with capacity 0 should be clamped to 1
+        let checkpoint = serde_json::json!({"values": [1, 2], "capacity": 0});
+        let ch = RingBufferChannel::<i32>::from_checkpoint(checkpoint).unwrap();
+        assert_eq!(ch.capacity(), 1);
+    }
+
+    #[test]
+    fn ring_buffer_channel_is_empty() {
+        let ch: RingBufferChannel<i32> = RingBufferChannel::new(vec![], 5);
+        assert!(ch.is_empty());
+
+        let ch2: RingBufferChannel<i32> = RingBufferChannel::new(vec![1], 5);
+        assert!(!ch2.is_empty());
     }
 }
 

@@ -249,10 +249,10 @@ The trade-off is clear: Juncture prioritizes completeness and compatibility over
 
 ## Roadmap
 
-- [ ] Production hardening (error recovery, resource limits)
-- [ ] Performance optimization for wide-state scenarios
+- [x] Production hardening (error recovery, resource limits)
+- [x] Performance optimization for wide-state scenarios
 - [ ] Additional LLM providers
-- [ ] Graph visualization tooling
+- [x] Graph visualization tooling
 - [ ] LangGraph Platform API compatibility
 
 ## Contributing

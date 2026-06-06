@@ -11,8 +11,8 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
-juncture-core = { version = "0.1.0", path = "../juncture-core" }
-juncture-tracing = { version = "0.1.0", path = "../juncture-tracing" }
+juncture-core = { version = "0.2.0", path = "../juncture-core" }
+juncture-tracing = { version = "0.2.0", path = "../juncture-tracing" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"

@@ -44,6 +44,10 @@ fn merge_scores(
     result
 }
 
+const fn counter_router(state: &CounterState) -> &str {
+    if state.value >= 3 { "collect" } else { "increment" }
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut graph = StateGraph::<CounterState>::new();
 
@@ -80,10 +84,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         NodeFnUpdate(|_state: &CounterState| async move { Ok(CounterStateUpdate::default()) }),
     )?;
 
-    // Create a linear flow
+    // Create a flow: increment -> set_status -> increment (loop) -> collect
+    // Use conditional edges to exit the loop after 3 iterations
     graph.add_edge("increment", "set_status");
-    graph.add_edge("set_status", "increment");
-    graph.add_edge("increment", "collect");
+
+    graph.add_conditional_edges(
+        "set_status",
+        std::sync::Arc::new(counter_router) as std::sync::Arc<dyn juncture_core::edge::Router<CounterState>>,
+        juncture_core::edge::PathMap::from(&[("collect", "collect"), ("increment", "increment")]),
+    );
 
     graph.set_entry_point("increment");
     graph.set_finish_point("collect");
@@ -96,7 +105,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         status: "initialized".to_string(),
     };
 
-    let output = compiled.invoke(initial_state, &RunnableConfig::default())?;
+    let output = compiled.invoke(initial_state, &RunnableConfig::new())?;
 
     // Display results
     let mut stdout = std::io::stdout();

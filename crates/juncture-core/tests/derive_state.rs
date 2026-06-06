@@ -503,6 +503,7 @@ fn check_replace_conflicts_detects_multiple_writers() {
         }),
         duration: std::time::Duration::from_millis(1),
         error: None,
+        circuit_blocked: false,
     };
     let task_b = TaskOutput {
         triggered_fields: vec![],
@@ -515,6 +516,7 @@ fn check_replace_conflicts_detects_multiple_writers() {
         }),
         duration: std::time::Duration::from_millis(1),
         error: None,
+        circuit_blocked: false,
     };
 
     let result = SuperstepResult {
@@ -546,6 +548,7 @@ fn check_replace_conflicts_allows_single_writer() {
         }),
         duration: std::time::Duration::from_millis(1),
         error: None,
+        circuit_blocked: false,
     };
 
     let result = SuperstepResult {
@@ -569,6 +572,7 @@ fn check_replace_conflicts_allows_different_fields() {
         }),
         duration: std::time::Duration::from_millis(1),
         error: None,
+        circuit_blocked: false,
     };
     let task_b = TaskOutput {
         triggered_fields: vec![],
@@ -581,6 +585,7 @@ fn check_replace_conflicts_allows_different_fields() {
         }),
         duration: std::time::Duration::from_millis(1),
         error: None,
+        circuit_blocked: false,
     };
 
     let result = SuperstepResult {
@@ -612,6 +617,7 @@ fn apply_writes_rejects_multiple_writers_on_replace_field() {
         }),
         duration: std::time::Duration::from_millis(1),
         error: None,
+        circuit_blocked: false,
     };
     let task_b = TaskOutput {
         triggered_fields: vec![],
@@ -624,6 +630,7 @@ fn apply_writes_rejects_multiple_writers_on_replace_field() {
         }),
         duration: std::time::Duration::from_millis(1),
         error: None,
+        circuit_blocked: false,
     };
 
     let result = apply_writes(&mut state, &[task_a, task_b], &mut tracker);
@@ -657,6 +664,7 @@ fn apply_writes_allows_single_writer_on_replace_field() {
         }),
         duration: std::time::Duration::from_millis(1),
         error: None,
+        circuit_blocked: false,
     };
 
     let changed =
@@ -695,6 +703,7 @@ fn apply_writes_allows_append_field_multiple_writers() {
         }),
         duration: std::time::Duration::from_millis(1),
         error: None,
+        circuit_blocked: false,
     };
     let task_b = TaskOutput {
         triggered_fields: vec![],
@@ -711,6 +720,7 @@ fn apply_writes_allows_append_field_multiple_writers() {
         }),
         duration: std::time::Duration::from_millis(1),
         error: None,
+        circuit_blocked: false,
     };
 
     let changed = apply_writes(&mut state, &[task_a, task_b], &mut tracker)

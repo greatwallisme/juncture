@@ -235,6 +235,44 @@ impl<S: State, I: IntoState<S>, O: FromState<S>> CompiledGraph<S, I, O> {
             .collect()
     }
 
+    /// Builds a `HashMap<String, CircuitBreakerConfig>` mapping node names to their
+    /// circuit breaker configuration by scanning builder metadata.
+    ///
+    /// Nodes with entries in this map will have their execution guarded by a
+    /// circuit breaker that tracks consecutive failures and opens the circuit
+    /// when the threshold is reached.
+    fn build_circuit_breaker_map(
+        &self,
+    ) -> std::collections::HashMap<String, super::builder::CircuitBreakerConfig> {
+        self.inner
+            .builder_metadata
+            .iter()
+            .filter_map(|(node_name, meta)| {
+                meta.circuit_breaker
+                    .as_ref()
+                    .map(|config| (node_name.clone(), config.clone()))
+            })
+            .collect()
+    }
+
+    /// Builds a `HashMap<String, String>` mapping node names to their
+    /// fallback node names by scanning builder metadata.
+    ///
+    /// When a task fails and its node has a fallback, the engine creates
+    /// a recovery task targeting the fallback node instead of propagating
+    /// the error or using the error handler.
+    fn build_fallback_map(&self) -> std::collections::HashMap<String, String> {
+        self.inner
+            .builder_metadata
+            .iter()
+            .filter_map(|(node_name, meta)| {
+                meta.fallback_node
+                    .as_ref()
+                    .map(|fallback| (node_name.clone(), fallback.clone()))
+            })
+            .collect()
+    }
+
     /// Merge compile-time interrupt defaults with runtime config.
     ///
     /// Runtime values (from `RunnableConfig`) take precedence when present.
@@ -349,6 +387,10 @@ impl<S: State, I: IntoState<S>, O: FromState<S>> CompiledGraph<S, I, O> {
     }
 
     /// Core async invocation used by both `invoke` (blocking) and `invoke_async`.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "invoke_async_inner orchestrates the full execution lifecycle: metadata extraction, PregelLoop creation, budget wiring, span creation, the tick/execute/after_tick loop, error handling, and metric emission. Splitting would scatter the linear flow across helper methods without improving readability."
+    )]
     async fn invoke_async_inner(
         &self,
         input: I,
@@ -371,6 +413,12 @@ impl<S: State, I: IntoState<S>, O: FromState<S>> CompiledGraph<S, I, O> {
         // Extract per-node timeout policies from builder metadata
         let timeout_policy_map = self.build_timeout_policy_map();
 
+        // Extract per-node circuit breaker configs from builder metadata
+        let circuit_breaker_map = self.build_circuit_breaker_map();
+
+        // Extract fallback node mappings from builder metadata
+        let fallback_map = self.build_fallback_map();
+
         // Convert input type I into state type S
         let state_input = input.into_state();
 
@@ -386,6 +434,8 @@ impl<S: State, I: IntoState<S>, O: FromState<S>> CompiledGraph<S, I, O> {
 
         pregel.set_retry_policies(retry_policy_map);
         pregel.set_timeout_policies(timeout_policy_map);
+        pregel.set_circuit_breaker_policies(circuit_breaker_map);
+        pregel.set_fallback_map(fallback_map);
 
         // Wire up budget tracking when budget limits are configured
         if let Some(budget_config) = &pregel.runnable_config.budget {
@@ -1848,6 +1898,111 @@ impl<S: State, I: IntoState<S>, O: FromState<S>> CompiledGraph<S, I, O> {
         })
     }
 
+    /// Export graph as a self-contained HTML file with Mermaid.js
+    ///
+    /// Generates an HTML string that renders the graph as an interactive
+    /// Mermaid diagram. The HTML includes Mermaid.js via CDN and supports
+    /// zoom/pan in the browser.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// let html = compiled.to_html();
+    /// std::fs::write("graph.html", html)?;
+    /// ```
+    #[must_use]
+    pub fn to_html(&self) -> String {
+        let mermaid = self.to_mermaid();
+        let json = self.to_json();
+        let json_pretty = serde_json::to_string_pretty(&json).unwrap_or_default();
+
+        // Escape HTML special characters in content embedded within <pre> tags
+        let mermaid_escaped = escape_html(&mermaid);
+        let json_escaped = escape_html(&json_pretty);
+
+        format!(
+            r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Juncture Graph Visualization</title>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+    <style>
+        body {{
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background: #f5f5f5;
+        }}
+        .container {{
+            max-width: 1200px;
+            margin: 0 auto;
+        }}
+        h1 {{
+            color: #333;
+            margin-bottom: 20px;
+        }}
+        .graph-container {{
+            background: white;
+            border-radius: 8px;
+            padding: 20px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            margin-bottom: 20px;
+            overflow-x: auto;
+        }}
+        .json-container {{
+            background: #1e1e1e;
+            color: #d4d4d4;
+            border-radius: 8px;
+            padding: 20px;
+            overflow-x: auto;
+            font-family: 'Monaco', 'Menlo', monospace;
+            font-size: 13px;
+            line-height: 1.5;
+        }}
+        .toggle-btn {{
+            background: #007bff;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 4px;
+            cursor: pointer;
+            margin-bottom: 10px;
+        }}
+        .toggle-btn:hover {{
+            background: #0056b3;
+        }}
+        #json-view {{
+            display: none;
+        }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Juncture Graph Visualization</h1>
+        <button class="toggle-btn" onclick="toggleJson()">Toggle JSON View</button>
+        <div class="graph-container">
+            <pre class="mermaid">
+{mermaid_escaped}
+            </pre>
+        </div>
+        <div id="json-view" class="json-container">
+            <pre>{json_escaped}</pre>
+        </div>
+    </div>
+    <script>
+        mermaid.initialize({{ startOnLoad: true, theme: 'default' }});
+        function toggleJson() {{
+            const jsonView = document.getElementById('json-view');
+            jsonView.style.display = jsonView.style.display === 'none' ? 'block' : 'none';
+        }}
+    </script>
+</body>
+</html>"#
+        )
+    }
+
     /// Convert to drawable graph representation
     fn to_drawable(&self) -> DrawableGraph {
         let mut nodes = Vec::new();
@@ -1897,6 +2052,97 @@ impl<S: State, I: IntoState<S>, O: FromState<S>> CompiledGraph<S, I, O> {
         DrawableGraph { nodes, edges }
     }
 
+    /// Display the graph as a formatted string for terminal output
+    ///
+    /// Returns a human-readable string representation of the graph structure
+    /// with Unicode box-drawing characters for edges and clear node labels.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// println!("{}", compiled.display());
+    /// ```
+    #[must_use]
+    pub fn display(&self) -> String {
+        let mut lines = Vec::new();
+
+        // Header
+        lines.push("Juncture Graph".to_string());
+        lines.push("=".repeat(40));
+        lines.push(String::new());
+
+        // Entry point
+        if let Some(entry) = self.find_entry_point() {
+            lines.push(format!("Entry: {entry}"));
+            lines.push(String::new());
+        }
+
+        // Nodes
+        lines.push("Nodes:".to_string());
+        for node_name in self.inner.nodes.keys() {
+            let has_retry = self
+                .inner
+                .builder_metadata
+                .get(node_name)
+                .is_some_and(|m| !m.retry_policies.is_empty());
+            let has_timeout = self
+                .inner
+                .builder_metadata
+                .get(node_name)
+                .is_some_and(|m| !m.timeout_policies.is_empty());
+            let has_circuit_breaker = self
+                .inner
+                .builder_metadata
+                .get(node_name)
+                .is_some_and(|m| m.circuit_breaker.is_some());
+            let has_fallback = self
+                .inner
+                .builder_metadata
+                .get(node_name)
+                .is_some_and(|m| m.fallback_node.is_some());
+
+            let mut annotations = Vec::new();
+            if has_retry {
+                annotations.push("retry");
+            }
+            if has_timeout {
+                annotations.push("timeout");
+            }
+            if has_circuit_breaker {
+                annotations.push("circuit-breaker");
+            }
+            if has_fallback {
+                annotations.push("fallback");
+            }
+
+            if annotations.is_empty() {
+                lines.push(format!("  - {node_name}"));
+            } else {
+                lines.push(format!("  - {node_name} [{}]", annotations.join(", ")));
+            }
+        }
+        lines.push(String::new());
+
+        // Edges
+        lines.push("Edges:".to_string());
+        for (from, edges) in &self.inner.trigger_table.outgoing {
+            for edge in edges {
+                match edge {
+                    crate::edge::CompiledEdge::Fixed { target } => {
+                        lines.push(format!("  {from} --> {target}"));
+                    }
+                    crate::edge::CompiledEdge::Conditional { path_map, .. } => {
+                        for (branch, target) in path_map.iter() {
+                            lines.push(format!("  {from} -->|{branch}| {target}"));
+                        }
+                    }
+                }
+            }
+        }
+
+        lines.join("\n")
+    }
+
     /// Find the entry point node from the trigger table
     fn find_entry_point(&self) -> Option<String> {
         for (target, sources) in &self.inner.trigger_table.incoming {
@@ -1908,6 +2154,15 @@ impl<S: State, I: IntoState<S>, O: FromState<S>> CompiledGraph<S, I, O> {
         }
         None
     }
+}
+
+/// Escape HTML special characters for safe embedding in HTML content
+fn escape_html(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#x27;")
 }
 
 /// Inner data of compiled graph

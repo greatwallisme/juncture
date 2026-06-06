@@ -126,7 +126,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             grade: String::new(),
         };
 
-        let output = compiled.invoke(initial_state, &RunnableConfig::default())?;
+        let output = compiled.invoke(initial_state, &RunnableConfig::new())?;
 
         writeln!(stdout, "Score {}: Grade = {}", score, output.value.grade)?;
     }

@@ -68,7 +68,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut stdout = std::io::stdout();
 
     // First execution - run for a few steps
-    let config = RunnableConfig::default().with_run_id("example-run-1");
+    let config = RunnableConfig::new().with_run_id("example-run-1");
 
     let initial_state = CheckpointState {
         count: 0,
@@ -91,7 +91,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Second execution - resume with same thread_id
     // In a real scenario, this would be a separate process/session
-    let resume_config = RunnableConfig::default().with_run_id("example-run-1");
+    let resume_config = RunnableConfig::new().with_run_id("example-run-1");
 
     // Start with a fresh state - the checkpointer will restore the actual state
     let fresh_state = CheckpointState {

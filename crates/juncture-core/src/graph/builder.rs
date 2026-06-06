@@ -79,6 +79,26 @@ pub struct NodeMetadata {
     /// superstep execution. The timeout wraps the entire execution (including
     /// retry attempts when a retry policy is also configured).
     pub timeout_policies: Vec<crate::TimeoutPolicy>,
+
+    /// Optional circuit breaker configuration for this node.
+    ///
+    /// When configured, the Pregel engine tracks consecutive failures and
+    /// opens the circuit after the threshold is reached, preventing further
+    /// execution attempts until the cooldown period expires.
+    pub circuit_breaker: Option<CircuitBreakerConfig>,
+
+    /// Optional fallback node name for graceful degradation.
+    ///
+    /// When a task executing this node fails (after retries), the Pregel
+    /// engine creates a recovery task targeting the fallback node instead
+    /// of propagating the error. The fallback node receives the same state
+    /// as the failed node and its output is applied normally.
+    ///
+    /// Priority order for failure handling:
+    /// 1. `fallback_node` (if set)
+    /// 2. `error_handler` (if set)
+    /// 3. Cancel remaining tasks
+    pub fallback_node: Option<String>,
 }
 
 /// Retry policy for node execution
@@ -133,6 +153,226 @@ impl Default for RetryPolicy {
             jitter: true,
             retry_on: None,
         }
+    }
+}
+
+/// Circuit breaker configuration for node execution
+///
+/// Controls when a node's circuit breaker trips (opens) after repeated
+/// failures, and how long it stays open before allowing a retry attempt.
+///
+/// # State Machine
+///
+/// ```text
+/// Closed --[failures >= threshold]--> Open
+/// Open --[cooldown elapsed]--> HalfOpen
+/// HalfOpen --[success]--> Closed
+/// HalfOpen --[failure]--> Open
+/// ```
+///
+/// # Examples
+///
+/// ```ignore
+/// use juncture_core::graph::CircuitBreakerConfig;
+/// use std::time::Duration;
+///
+/// let config = CircuitBreakerConfig::new(5, Duration::from_secs(30));
+/// assert_eq!(config.failure_threshold, 5);
+/// ```
+#[derive(Clone)]
+pub struct CircuitBreakerConfig {
+    /// Number of consecutive failures before the circuit opens
+    pub failure_threshold: usize,
+
+    /// Duration the circuit stays open before transitioning to half-open
+    pub cooldown_duration: std::time::Duration,
+
+    /// Maximum attempts allowed in half-open state before re-opening
+    pub half_open_max_attempts: usize,
+}
+
+impl std::fmt::Debug for CircuitBreakerConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CircuitBreakerConfig")
+            .field("failure_threshold", &self.failure_threshold)
+            .field("cooldown_duration", &self.cooldown_duration)
+            .field("half_open_max_attempts", &self.half_open_max_attempts)
+            .finish()
+    }
+}
+
+impl CircuitBreakerConfig {
+    /// Create a new circuit breaker configuration
+    ///
+    /// # Arguments
+    ///
+    /// * `failure_threshold` - Consecutive failures before opening
+    /// * `cooldown_duration` - How long the circuit stays open
+    #[must_use]
+    pub const fn new(failure_threshold: usize, cooldown_duration: std::time::Duration) -> Self {
+        Self {
+            failure_threshold,
+            cooldown_duration,
+            half_open_max_attempts: 1,
+        }
+    }
+
+    /// Set the maximum attempts allowed in half-open state
+    ///
+    /// The value is clamped to a minimum of 1 to prevent the circuit
+    /// from being permanently stuck in `HalfOpen` state.
+    #[must_use]
+    pub const fn with_half_open_max_attempts(mut self, max_attempts: usize) -> Self {
+        self.half_open_max_attempts = if max_attempts < 1 { 1 } else { max_attempts };
+        self
+    }
+}
+
+/// Runtime state of a circuit breaker
+///
+/// Tracks the current state (Closed/Open/HalfOpen) and failure count
+/// for a single node's circuit breaker.
+#[derive(Clone, Debug)]
+pub struct CircuitBreakerState {
+    /// Current state of the circuit
+    state: CircuitState,
+
+    /// Consecutive failure count (reset on success)
+    consecutive_failures: usize,
+
+    /// Timestamp when the circuit was last opened
+    opened_at: Option<crate::time::Instant>,
+
+    /// Number of attempts made in half-open state
+    half_open_attempts: usize,
+}
+
+/// Circuit breaker states
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CircuitState {
+    /// Normal operation -- requests pass through
+    Closed,
+    /// Circuit is open -- requests are rejected
+    Open,
+    /// Testing if the circuit can close -- limited requests allowed
+    HalfOpen,
+}
+
+impl CircuitBreakerState {
+    /// Create a new circuit breaker in closed state
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            state: CircuitState::Closed,
+            consecutive_failures: 0,
+            opened_at: None,
+            half_open_attempts: 0,
+        }
+    }
+
+    /// Check if the circuit allows execution
+    ///
+    /// Returns `true` if the node should be allowed to execute.
+    /// Returns `false` if the circuit is open and the cooldown has not elapsed.
+    ///
+    /// This method does NOT consume half-open probe budget. Call
+    /// [`mark_half_open_attempt`](Self::mark_half_open_attempt) after the
+    /// task actually executes to consume the probe budget.
+    pub fn should_allow(&mut self, config: &CircuitBreakerConfig) -> bool {
+        match self.state {
+            CircuitState::Closed => true,
+            CircuitState::Open => {
+                // Check if cooldown has elapsed
+                if let Some(opened) = self.opened_at {
+                    if opened.elapsed() >= config.cooldown_duration {
+                        self.state = CircuitState::HalfOpen;
+                        // Consume one probe attempt immediately on transition
+                        // to prevent multiple concurrent tasks from all passing
+                        // the HalfOpen budget check in the same superstep
+                        self.half_open_attempts = 1;
+                        true
+                    } else {
+                        false
+                    }
+                } else {
+                    // No opened_at timestamp -- treat as closed
+                    self.state = CircuitState::Closed;
+                    true
+                }
+            }
+            CircuitState::HalfOpen => {
+                // Check budget without consuming it -- consumption happens
+                // in mark_half_open_attempt() after actual execution
+                self.half_open_attempts < config.half_open_max_attempts
+            }
+        }
+    }
+
+    /// Consume a half-open probe attempt after actual execution
+    ///
+    /// Call this after a task actually executes (success or failure) in
+    /// `HalfOpen` state to consume the probe budget. This ensures the budget
+    /// is consumed by executions, not eligibility checks.
+    pub fn mark_half_open_attempt(&mut self) {
+        if self.state == CircuitState::HalfOpen {
+            self.half_open_attempts += 1;
+        }
+    }
+
+    /// Record a successful execution
+    ///
+    /// Resets the circuit to Closed state. If the circuit is currently Open,
+    /// this is a no-op (success cannot be recorded for an Open circuit
+    /// because no execution is allowed).
+    pub fn record_success(&mut self) {
+        if self.state == CircuitState::Open {
+            return;
+        }
+        self.consecutive_failures = 0;
+        self.half_open_attempts = 0;
+        self.state = CircuitState::Closed;
+        self.opened_at = None;
+    }
+
+    /// Record a failed execution
+    pub fn record_failure(&mut self, config: &CircuitBreakerConfig) {
+        self.consecutive_failures += 1;
+
+        match self.state {
+            CircuitState::Closed => {
+                if self.consecutive_failures >= config.failure_threshold {
+                    self.state = CircuitState::Open;
+                    self.opened_at = Some(crate::time::Instant::now());
+                }
+            }
+            CircuitState::HalfOpen => {
+                // Any failure in half-open re-opens the circuit
+                self.state = CircuitState::Open;
+                self.opened_at = Some(crate::time::Instant::now());
+                self.half_open_attempts = 0;
+            }
+            CircuitState::Open => {
+                // Already open, nothing to do
+            }
+        }
+    }
+
+    /// Get the current circuit state
+    #[must_use]
+    pub const fn state(&self) -> &CircuitState {
+        &self.state
+    }
+
+    /// Get the number of consecutive failures
+    #[must_use]
+    pub const fn consecutive_failures(&self) -> usize {
+        self.consecutive_failures
+    }
+}
+
+impl Default for CircuitBreakerState {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -738,6 +978,8 @@ impl<S: State, I: IntoState<S>, O: FromState<S>> StateGraph<S, I, O> {
                 retry_policies,
                 error_handler: None,
                 timeout_policies,
+                circuit_breaker: None,
+                fallback_node: None,
             },
         );
 
@@ -849,6 +1091,138 @@ impl<S: State, I: IntoState<S>, O: FromState<S>> StateGraph<S, I, O> {
         self.nodes.insert(name_str.clone(), wrapped);
         self.builder_metadata
             .insert(name_str, NodeMetadata::default());
+
+        Ok(self)
+    }
+
+    /// Add a node with circuit breaker protection
+    ///
+    /// When the circuit breaker's failure threshold is reached, the node
+    /// is skipped until the cooldown period expires. This prevents
+    /// cascading failures from overwhelming downstream services.
+    ///
+    /// Returns `&mut Self` on success for fluent builder chaining.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - Node name
+    /// * `node` - The node to protect
+    /// * `config` - Circuit breaker configuration
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a node with the same name already exists.
+    pub fn add_node_with_circuit_breaker(
+        &mut self,
+        name: impl Into<String>,
+        node: impl IntoNode<S>,
+        config: CircuitBreakerConfig,
+    ) -> Result<&mut Self, TopologyError> {
+        let name_str = name.into();
+        let node_arc = node.into_node(&name_str);
+
+        if self.nodes.contains_key(&name_str) {
+            return Err(TopologyError::DuplicateNode { name: name_str });
+        }
+
+        self.nodes.insert(name_str.clone(), node_arc);
+        self.builder_metadata.insert(
+            name_str,
+            NodeMetadata {
+                circuit_breaker: Some(config),
+                ..NodeMetadata::default()
+            },
+        );
+
+        Ok(self)
+    }
+
+    /// Add a node with both retry and circuit breaker protection
+    ///
+    /// The retry policy handles transient failures with exponential backoff,
+    /// while the circuit breaker prevents repeated execution when the node
+    /// is consistently failing.
+    ///
+    /// Returns `&mut Self` on success for fluent builder chaining.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - Node name
+    /// * `node` - The node to protect
+    /// * `retry_policy` - Retry policy for transient failures
+    /// * `circuit_breaker_config` - Circuit breaker configuration
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a node with the same name already exists.
+    pub fn add_node_with_retry_and_circuit_breaker(
+        &mut self,
+        name: impl Into<String>,
+        node: impl IntoNode<S>,
+        retry_policy: RetryPolicy,
+        circuit_breaker_config: CircuitBreakerConfig,
+    ) -> Result<&mut Self, TopologyError>
+    where
+        S: Clone,
+    {
+        let name_str = name.into();
+        let inner = node.into_node(&name_str);
+        let wrapped: Arc<dyn crate::Node<S>> = Arc::new(RetryingNode::new(inner, retry_policy));
+
+        if self.nodes.contains_key(&name_str) {
+            return Err(TopologyError::DuplicateNode { name: name_str });
+        }
+
+        self.nodes.insert(name_str.clone(), wrapped);
+        self.builder_metadata.insert(
+            name_str,
+            NodeMetadata {
+                circuit_breaker: Some(circuit_breaker_config),
+                ..NodeMetadata::default()
+            },
+        );
+
+        Ok(self)
+    }
+
+    /// Add a node with a fallback node for graceful degradation
+    ///
+    /// When the primary node fails (after retries), the engine creates a
+    /// recovery task targeting the fallback node instead of propagating the
+    /// error. The fallback node receives the same state as the failed node.
+    ///
+    /// Returns `&mut Self` on success for fluent builder chaining.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - Node name
+    /// * `node` - The node to protect
+    /// * `fallback` - Name of the fallback node
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a node with the same name already exists.
+    pub fn add_node_with_fallback(
+        &mut self,
+        name: impl Into<String>,
+        node: impl IntoNode<S>,
+        fallback: impl Into<String>,
+    ) -> Result<&mut Self, TopologyError> {
+        let name_str = name.into();
+        let node_arc = node.into_node(&name_str);
+
+        if self.nodes.contains_key(&name_str) {
+            return Err(TopologyError::DuplicateNode { name: name_str });
+        }
+
+        self.nodes.insert(name_str.clone(), node_arc);
+        self.builder_metadata.insert(
+            name_str,
+            NodeMetadata {
+                fallback_node: Some(fallback.into()),
+                ..NodeMetadata::default()
+            },
+        );
 
         Ok(self)
     }
@@ -1364,7 +1738,12 @@ impl<S: State, I: IntoState<S>, O: FromState<S>> StateGraph<S, I, O> {
         checkpointer: Option<Arc<dyn crate::checkpoint::CheckpointSaver>>,
     ) -> Result<CompiledGraph<S, I, O>, TopologyError> {
         // Validate topology and field indices
-        TopologyValidator::validate(&self.nodes, &self.edges, self.entry_point.as_deref())?;
+        TopologyValidator::validate(
+            &self.nodes,
+            &self.edges,
+            self.entry_point.as_deref(),
+            &self.builder_metadata,
+        )?;
         self.validate_keys()?;
 
         // Build trigger table
@@ -2829,6 +3208,171 @@ mod tests {
         let err = result.unwrap_err();
         assert!(err.is_execution());
         assert!(!err.is_node_timeout());
+    }
+
+    // --- CircuitBreakerConfig tests ---
+
+    #[test]
+    fn circuit_breaker_config_new() {
+        let config = CircuitBreakerConfig::new(5, std::time::Duration::from_secs(30));
+        assert_eq!(config.failure_threshold, 5);
+        assert_eq!(config.cooldown_duration, std::time::Duration::from_secs(30));
+        assert_eq!(config.half_open_max_attempts, 1);
+    }
+
+    #[test]
+    fn circuit_breaker_config_with_half_open_max_attempts() {
+        let config = CircuitBreakerConfig::new(3, std::time::Duration::from_secs(10))
+            .with_half_open_max_attempts(3);
+        assert_eq!(config.half_open_max_attempts, 3);
+    }
+
+    #[test]
+    fn circuit_breaker_config_debug() {
+        let config = CircuitBreakerConfig::new(5, std::time::Duration::from_secs(30));
+        let debug = format!("{config:?}");
+        assert!(debug.contains("CircuitBreakerConfig"));
+        assert!(debug.contains('5'));
+    }
+
+    // --- CircuitBreakerState tests ---
+
+    #[test]
+    fn circuit_breaker_state_new_is_closed() {
+        let state = CircuitBreakerState::new();
+        assert_eq!(*state.state(), CircuitState::Closed);
+        assert_eq!(state.consecutive_failures(), 0);
+    }
+
+    #[test]
+    fn circuit_breaker_state_default_is_closed() {
+        let state = CircuitBreakerState::default();
+        assert_eq!(*state.state(), CircuitState::Closed);
+    }
+
+    #[test]
+    fn circuit_breaker_closed_allows_execution() {
+        let config = CircuitBreakerConfig::new(3, std::time::Duration::from_secs(10));
+        let mut state = CircuitBreakerState::new();
+        assert!(state.should_allow(&config));
+    }
+
+    #[test]
+    fn circuit_breaker_opens_after_threshold() {
+        let config = CircuitBreakerConfig::new(3, std::time::Duration::from_secs(10));
+        let mut state = CircuitBreakerState::new();
+
+        state.record_failure(&config);
+        assert_eq!(*state.state(), CircuitState::Closed);
+        assert!(state.should_allow(&config));
+
+        state.record_failure(&config);
+        assert_eq!(*state.state(), CircuitState::Closed);
+        assert!(state.should_allow(&config));
+
+        state.record_failure(&config);
+        assert_eq!(*state.state(), CircuitState::Open);
+        assert!(!state.should_allow(&config));
+    }
+
+    #[test]
+    fn circuit_breaker_resets_on_success() {
+        let config = CircuitBreakerConfig::new(3, std::time::Duration::from_secs(10));
+        let mut state = CircuitBreakerState::new();
+
+        state.record_failure(&config);
+        state.record_failure(&config);
+        assert_eq!(state.consecutive_failures(), 2);
+
+        state.record_success();
+        assert_eq!(*state.state(), CircuitState::Closed);
+        assert_eq!(state.consecutive_failures(), 0);
+    }
+
+    #[test]
+    fn circuit_breaker_half_open_after_cooldown() {
+        let config = CircuitBreakerConfig::new(1, std::time::Duration::from_millis(0));
+        let mut state = CircuitBreakerState::new();
+
+        state.record_failure(&config);
+        assert_eq!(*state.state(), CircuitState::Open);
+
+        // Cooldown is 0ms, so should_allow should transition to HalfOpen
+        assert!(state.should_allow(&config));
+        assert_eq!(*state.state(), CircuitState::HalfOpen);
+    }
+
+    #[test]
+    fn circuit_breaker_half_open_success_closes() {
+        let config = CircuitBreakerConfig::new(1, std::time::Duration::from_millis(0));
+        let mut state = CircuitBreakerState::new();
+
+        state.record_failure(&config);
+        state.should_allow(&config); // -> HalfOpen
+        state.record_success();
+        assert_eq!(*state.state(), CircuitState::Closed);
+    }
+
+    #[test]
+    fn circuit_breaker_half_open_failure_reopens() {
+        let config = CircuitBreakerConfig::new(1, std::time::Duration::from_millis(0));
+        let mut state = CircuitBreakerState::new();
+
+        state.record_failure(&config);
+        state.should_allow(&config); // -> HalfOpen
+        state.record_failure(&config);
+        assert_eq!(*state.state(), CircuitState::Open);
+    }
+
+    #[test]
+    fn circuit_breaker_half_open_limits_attempts() {
+        let config = CircuitBreakerConfig::new(1, std::time::Duration::from_millis(0))
+            .with_half_open_max_attempts(2);
+        let mut state = CircuitBreakerState::new();
+
+        state.record_failure(&config);
+
+        // Transition to HalfOpen consumes one probe attempt immediately
+        assert!(state.should_allow(&config));
+        assert_eq!(*state.state(), CircuitState::HalfOpen);
+
+        // First attempt in half-open -- allowed, then consume budget
+        assert!(state.should_allow(&config));
+        state.mark_half_open_attempt();
+
+        // Second attempt should be blocked (budget exhausted: 1 transition + 1 mark = 2)
+        assert!(!state.should_allow(&config));
+    }
+
+    #[test]
+    fn circuit_breaker_open_blocks_until_cooldown() {
+        let config = CircuitBreakerConfig::new(1, std::time::Duration::from_secs(60));
+        let mut state = CircuitBreakerState::new();
+
+        state.record_failure(&config);
+        assert_eq!(*state.state(), CircuitState::Open);
+        assert!(!state.should_allow(&config));
+    }
+
+    // --- NodeMetadata with circuit_breaker ---
+
+    #[test]
+    fn node_metadata_default_has_no_circuit_breaker() {
+        let meta = NodeMetadata::default();
+        assert!(meta.circuit_breaker.is_none());
+    }
+
+    #[test]
+    fn node_metadata_with_circuit_breaker() {
+        let meta = NodeMetadata {
+            circuit_breaker: Some(CircuitBreakerConfig::new(
+                5,
+                std::time::Duration::from_secs(30),
+            )),
+            ..NodeMetadata::default()
+        };
+        assert!(meta.circuit_breaker.is_some());
+        assert_eq!(meta.circuit_breaker.as_ref().unwrap().failure_threshold, 5);
     }
 }
 

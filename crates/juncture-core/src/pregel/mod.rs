@@ -56,11 +56,12 @@ pub use protocol::PregelProtocol;
 pub use runner::execute_superstep;
 pub use scheduler::{
     FieldVersionTracker, TriggerToNodes, VersionsSeen, apply_writes, check_replace_conflicts,
-    compute_next_tasks, consume_triggered_channels, schedule_error_handlers,
+    compute_next_tasks, consume_triggered_channels, schedule_error_handlers_filtered,
+    schedule_fallback_tasks,
 };
 pub use types::{
-    BubbleUp, GraphDrained, GraphInterrupt, LoopStatus, PendingTask, SuperstepResult,
-    SyncAsyncFuture, TaskOutput, TaskTrigger,
+    BubbleUp, GraphDrained, GraphInterrupt, HealthStatus, LoopStatus, NodeHealth, NodeHealthState,
+    PendingTask, SuperstepResult, SyncAsyncFuture, TaskOutput, TaskTrigger,
 };
 
 // Rust guideline compliant 2026-05-20

@@ -50,6 +50,7 @@ async fn try_execute_single_task_inline<S: State>(
     error_handler_map: &HashMap<String, String>,
     retry_policies: &HashMap<String, RetryPolicy>,
     timeout_policies: &HashMap<String, TimeoutPolicy>,
+    fallback_map: &HashMap<String, String>,
 ) -> Result<Option<SuperstepResult<S>>, JunctureError>
 where
     S::Update: serde::Serialize,
@@ -62,8 +63,9 @@ where
     let has_error_handler = error_handler_map.contains_key(&task.node_name);
     let has_retry = retry_policies.contains_key(&task.node_name);
     let has_timeout = timeout_policies.contains_key(&task.node_name);
+    let has_fallback = fallback_map.contains_key(&task.node_name);
 
-    if has_error_handler || has_retry || has_timeout {
+    if has_error_handler || has_retry || has_timeout || has_fallback {
         return Ok(None);
     }
 
@@ -145,6 +147,7 @@ where
         trigger: task_trigger,
         triggered_fields: Vec::new(),
         error: None,
+        circuit_blocked: false,
     };
 
     // Persist writes for the single completed task
@@ -233,6 +236,7 @@ where
 ///     &std::collections::HashMap::new(),
 ///     &retry_policies,
 ///     &timeout_policies,
+///     &std::collections::HashMap::new(), // fallback_map
 ///     0, // step
 /// ).await?;
 /// ```
@@ -263,6 +267,7 @@ pub async fn execute_superstep<S: State>(
     error_handler_map: &HashMap<String, String>,
     retry_policies: &HashMap<String, RetryPolicy>,
     timeout_policies: &HashMap<String, TimeoutPolicy>,
+    fallback_map: &HashMap<String, String>,
     step: usize,
 ) -> Result<
     (
@@ -305,6 +310,7 @@ where
         error_handler_map,
         retry_policies,
         timeout_policies,
+        fallback_map,
     )
     .await?
     {
@@ -623,6 +629,7 @@ where
                         trigger: task_trigger,
                         triggered_fields: Vec::new(), // Will be populated by scheduler
                         error: None,
+                        circuit_blocked: false,
                     })
                     .map_err(|e| (node_name, e))
             }
@@ -653,16 +660,24 @@ where
                 task_outputs.push(output);
             }
             Ok(Err((failed_node_name, error))) => {
-                // Task failed. Check if the node has a registered error handler.
-                // If so, record the error in the output and continue executing
-                // remaining tasks. If not, cancel all remaining tasks.
-                if let Some(handler_name) = error_handler_map.get(&failed_node_name) {
+                // Task failed. Check if the node has a registered error handler
+                // or fallback node. If so, record the error in the output and
+                // continue executing remaining tasks. If not, cancel all remaining tasks.
+                let has_error_handler = error_handler_map.contains_key(&failed_node_name);
+                let has_fallback = fallback_map.contains_key(&failed_node_name);
+
+                if has_error_handler || has_fallback {
+                    let recovery_type = if has_fallback {
+                        "fallback"
+                    } else {
+                        "error_handler"
+                    };
                     tracing::warn!(
-                        name: "juncture.node.error.handler_scheduled",
+                        name: "juncture.node.error.recovery_scheduled",
                         node_name = %failed_node_name,
-                        handler = %handler_name,
+                        recovery_type = %recovery_type,
                         error = %error,
-                        "Node failed with error handler registered, scheduling recovery"
+                        "Node failed with recovery registered, scheduling recovery"
                     );
 
                     task_outputs.push(TaskOutput {
@@ -671,11 +686,12 @@ where
                         command: crate::Command::default(),
                         duration: std::time::Duration::ZERO,
                         trigger: crate::pregel::types::TaskTrigger::Pull,
-                        triggered_fields: Vec::new(), // Error handlers have no specific triggered fields
+                        triggered_fields: Vec::new(),
                         error: Some(error),
+                        circuit_blocked: false,
                     });
                 } else {
-                    // No error handler, cancel remaining tasks
+                    // No error handler or fallback, cancel remaining tasks
                     cancellation_token.cancel();
                     join_set.shutdown().await;
 
@@ -873,6 +889,7 @@ mod tests {
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
+            &HashMap::new(),
             0,
         )
         .await
@@ -910,6 +927,7 @@ mod tests {
             None,
             &pending_interrupts,
             &scratchpad,
+            &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
@@ -953,6 +971,7 @@ mod tests {
             None,
             &pending_interrupts,
             &scratchpad,
+            &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
@@ -1003,6 +1022,7 @@ mod tests {
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
+            &HashMap::new(),
             0,
         )
         .await;
@@ -1034,6 +1054,7 @@ mod tests {
             None,
             &pending_interrupts,
             &scratchpad,
+            &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
@@ -1496,6 +1517,7 @@ mod tests {
             &HashMap::new(),
             &retry_policies,
             &HashMap::new(),
+            &HashMap::new(),
             0,
         )
         .await
@@ -1569,6 +1591,7 @@ mod tests {
             &HashMap::new(),
             &retry_policies,
             &HashMap::new(),
+            &HashMap::new(),
             0,
         )
         .await;
@@ -1640,6 +1663,7 @@ mod tests {
             &scratchpad,
             &HashMap::new(),
             &retry_policies,
+            &HashMap::new(),
             &HashMap::new(),
             0,
         )
@@ -1739,6 +1763,7 @@ mod tests {
             &error_handlers,
             &retry_policies,
             &HashMap::new(),
+            &HashMap::new(),
             0,
         )
         .await;
@@ -1790,6 +1815,7 @@ mod tests {
             None,
             &pending_interrupts,
             &scratchpad,
+            &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
@@ -1850,6 +1876,7 @@ mod tests {
             &HashMap::new(),
             &HashMap::new(),
             &timeout_policies,
+            &HashMap::new(),
             0,
         )
         .await
@@ -1906,6 +1933,7 @@ mod tests {
             &HashMap::new(),
             &HashMap::new(),
             &timeout_policies,
+            &HashMap::new(),
             0,
         )
         .await;
@@ -1990,6 +2018,7 @@ mod tests {
             &HashMap::new(),
             &retry_policies,
             &timeout_policies,
+            &HashMap::new(),
             0,
         )
         .await;
@@ -2073,6 +2102,7 @@ mod tests {
             &error_handlers,
             &HashMap::new(),
             &timeout_policies,
+            &HashMap::new(),
             0,
         )
         .await
@@ -2129,6 +2159,7 @@ mod tests {
             None,
             &pending_interrupts,
             &scratchpad,
+            &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),

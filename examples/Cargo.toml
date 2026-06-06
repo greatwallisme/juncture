@@ -96,5 +96,29 @@ path = "src/telemetry_demo.rs"
 name = "16_juncture_telemetry"
 path = "src/16_juncture_telemetry.rs"
 
+[[bin]]
+name = "17_circuit_breaker"
+path = "src/17_circuit_breaker.rs"
+
+[[bin]]
+name = "18_fallback_node"
+path = "src/18_fallback_node.rs"
+
+[[bin]]
+name = "19_resource_limits"
+path = "src/19_resource_limits.rs"
+
+[[bin]]
+name = "20_health_check"
+path = "src/20_health_check.rs"
+
+[[bin]]
+name = "21_ring_buffer_channel"
+path = "src/21_ring_buffer_channel.rs"
+
+[[bin]]
+name = "22_graph_visualization"
+path = "src/22_graph_visualization.rs"
+
 [lints]
 workspace = true

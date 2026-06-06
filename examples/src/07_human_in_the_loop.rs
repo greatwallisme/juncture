@@ -83,7 +83,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // Execute - will stop before review node
-    let output = compiled.invoke(initial_state, &RunnableConfig::default())?;
+    let output = compiled.invoke(initial_state, &RunnableConfig::new())?;
 
     let mut stdout = std::io::stdout();
 

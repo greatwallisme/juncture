@@ -65,7 +65,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         messages: vec![human_message],
     };
 
-    let output = compiled.invoke(initial_state, &RunnableConfig::default())?;
+    let output = compiled.invoke(initial_state, &RunnableConfig::new())?;
 
     let mut stdout = std::io::stdout();
     writeln!(stdout, "Conversation:")?;

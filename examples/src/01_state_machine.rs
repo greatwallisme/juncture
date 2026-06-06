@@ -74,7 +74,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // Execute the graph (blocking call - creates its own tokio runtime)
-    let output = compiled.invoke(initial_state, &RunnableConfig::default())?;
+    let output = compiled.invoke(initial_state, &RunnableConfig::new())?;
 
     // Display the final state
     let mut stdout = std::io::stdout();

@@ -181,10 +181,11 @@ impl TopologyValidator {
         nodes: &IndexMap<String, Arc<dyn crate::Node<S>>>,
         edges: &[Edge<S>],
         entry_point: Option<&str>,
+        builder_metadata: &IndexMap<String, crate::graph::builder::NodeMetadata>,
     ) -> Result<(), TopologyError> {
         Self::check_entry_point(entry_point)?;
         Self::check_edge_targets(nodes, edges)?;
-        Self::check_reachability(nodes, edges, entry_point)?;
+        Self::check_reachability(nodes, edges, entry_point, builder_metadata)?;
         Self::check_isolated_nodes(nodes, edges)?;
         Self::check_infinite_loops(nodes, edges)?;
 
@@ -238,6 +239,7 @@ impl TopologyValidator {
         nodes: &IndexMap<String, Arc<dyn crate::Node<S>>>,
         edges: &[Edge<S>],
         entry_point: Option<&str>,
+        builder_metadata: &IndexMap<String, crate::graph::builder::NodeMetadata>,
     ) -> Result<(), TopologyError> {
         let entry = entry_point.expect("entry point should exist");
 
@@ -270,6 +272,16 @@ impl TopologyValidator {
                         }
                     }
                 }
+            }
+        }
+
+        // Add fallback edges to adjacency list
+        for (node_name, meta) in builder_metadata {
+            if let Some(ref fallback) = meta.fallback_node {
+                adjacency
+                    .entry(node_name.clone())
+                    .or_default()
+                    .push(fallback.clone());
             }
         }
 

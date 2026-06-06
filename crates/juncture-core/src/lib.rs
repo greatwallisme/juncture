@@ -213,14 +213,17 @@ pub use client::{
     AuthConfig, ClientError, GraphClient, InvokeConfig, JunctureClient, StateSnapshot, Thread,
 };
 pub use command::{Command, CommandGoto, Final, Goto, GraphTarget, ParentCommand, SendTarget};
-pub use config::{CacheConfig, CachePolicy, EntrypointConfig, RunnableConfig, TaskConfig};
+pub use config::{
+    CacheConfig, CachePolicy, EntrypointConfig, ResourceLimits, RunnableConfig, TaskConfig,
+};
 pub use edge::{END, Edge, PathMap, RouteResult, Router, START, TriggerTable};
 pub use error::{ErrorCode, InvalidUpdateError, JunctureError, NodeTimeoutError};
 pub use func::{Runtime as FuncRuntime, compile_entrypoint, compile_entrypoint_with_config};
 pub use graph::{
-    CompiledGraph, DrawableEdge, DrawableGraph, DrawableNode, ErrorHandlerNode, GraphOutput,
-    GraphOutputMetadata, InterruptInfo, NodeMetadata, RetryPolicy, RetryingNode, StateFilter,
-    StateGraph, StateUpdate, StreamHandle, SubgraphInfo, TopologyError,
+    CircuitBreakerConfig, CircuitBreakerState, CircuitState, CompiledGraph, DrawableEdge,
+    DrawableGraph, DrawableNode, ErrorHandlerNode, GraphOutput, GraphOutputMetadata, InterruptInfo,
+    NodeMetadata, RetryPolicy, RetryingNode, StateFilter, StateGraph, StateUpdate, StreamHandle,
+    SubgraphInfo, TopologyError,
 };
 pub use interrupt::{
     HIDDEN_TAG, InterruptContext, InterruptSignal, ResumeValue, Scratchpad, generate_interrupt_id,
@@ -236,9 +239,10 @@ pub use prebuilt::{PromptSource, ReactAgentConfig};
 pub use pregel::{
     BubbleUp, BudgetConfig, BudgetExceededAction, BudgetExceededReason, BudgetTracker, BudgetUsage,
     Durability, ExecutionConfig, ExecutionContext, FieldVersionTracker, GraphDrained,
-    GraphInterrupt, LoopStatus, PendingTask, PregelLoop, PregelProtocol,
-    StreamEvent as PregelStreamEvent, SuperstepResult, SyncAsyncFuture, TaskOutput, TaskTrigger,
-    TimeoutPolicy, TriggerToNodes, apply_writes, compute_next_tasks, execute_superstep,
+    GraphInterrupt, HealthStatus, LoopStatus, NodeHealth, NodeHealthState, PendingTask, PregelLoop,
+    PregelProtocol, StreamEvent as PregelStreamEvent, SuperstepResult, SyncAsyncFuture, TaskOutput,
+    TaskTrigger, TimeoutPolicy, TriggerToNodes, apply_writes, compute_next_tasks,
+    execute_superstep,
 };
 pub use runtime::{
     ExecutionInfo, Heartbeat, HeartbeatWatcher, ManagedValues, RunControl, Runtime,
@@ -249,8 +253,8 @@ pub use state::{
     AnyValueReducer, AppendReducer, Channel, Content, ContentPart, CowState, DeltaBlob,
     DeltaChannel, EphemeralChannel, FieldsChanged, FromState, ImageData, ImageSource, IntoState,
     LastValueAfterFinishChannel, LastWriteWinsReducer, Message, MessagesState, MessagesStateUpdate,
-    Overwrite, REMOVE_ALL_MESSAGES, Reducer, RemoveMessage, ReplaceReducer, Role, State,
-    TokenUsage, ToolCall, UntrackedChannel, messages_reducer,
+    Overwrite, REMOVE_ALL_MESSAGES, Reducer, RemoveMessage, ReplaceReducer, RingBufferChannel,
+    Role, State, TokenUsage, ToolCall, UntrackedChannel, messages_reducer,
 };
 pub use store::{
     EmbeddingFunc, FilterExpr, IndexConfig, Item, MemoryStore, SearchItem, SearchQuery,

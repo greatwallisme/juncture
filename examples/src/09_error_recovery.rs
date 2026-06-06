@@ -89,7 +89,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // Execute with error handling
-    match compiled.invoke(initial_state, &RunnableConfig::default()) {
+    match compiled.invoke(initial_state, &RunnableConfig::new()) {
         Ok(output) => {
             let mut stdout = std::io::stdout();
             writeln!(stdout, "Execution completed successfully")?;

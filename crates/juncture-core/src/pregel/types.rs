@@ -133,6 +133,14 @@ pub struct TaskOutput<S: State> {
     /// output. When absent but the task failed, the error propagates
     /// immediately (no recovery).
     pub error: Option<crate::JunctureError>,
+
+    /// Whether this task was blocked by a circuit breaker.
+    ///
+    /// When `true`, the task was never executed because its circuit was open.
+    /// Circuit-blocked tasks should not trigger fallback or error handler
+    /// scheduling, as they represent a deliberate prevention, not an execution
+    /// failure.
+    pub circuit_blocked: bool,
 }
 
 impl<S: State> std::fmt::Debug for TaskOutput<S> {
@@ -145,6 +153,7 @@ impl<S: State> std::fmt::Debug for TaskOutput<S> {
             .field("trigger", &self.trigger)
             .field("triggered_fields", &self.triggered_fields)
             .field("error", &self.error)
+            .field("circuit_blocked", &self.circuit_blocked)
             .finish()
     }
 }
@@ -168,6 +177,7 @@ where
                 .error
                 .as_ref()
                 .map(|e| crate::JunctureError::execution(e.to_string())),
+            circuit_blocked: self.circuit_blocked,
         }
     }
 }
@@ -535,6 +545,70 @@ impl<T> SyncAsyncFuture<T> {
 impl<T> From<T> for SyncAsyncFuture<T> {
     fn from(value: T) -> Self {
         Self::Ready(Some(value))
+    }
+}
+
+/// Health status of the graph execution
+///
+/// Provides a snapshot of the current health state including per-node
+/// health information and circuit breaker states.
+#[derive(Clone, Debug)]
+pub struct HealthStatus {
+    /// Whether the graph is overall healthy
+    pub healthy: bool,
+
+    /// Per-node health information
+    pub nodes: std::collections::HashMap<String, NodeHealth>,
+
+    /// Number of open circuit breakers
+    pub open_circuit_breakers: usize,
+}
+
+/// Health status of an individual node
+#[derive(Clone, Debug)]
+pub struct NodeHealth {
+    /// Current health state
+    pub status: NodeHealthState,
+
+    /// Number of consecutive failures
+    pub consecutive_failures: usize,
+
+    /// Circuit breaker state (if configured)
+    pub circuit_state: Option<String>,
+}
+
+/// Health state of a node
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NodeHealthState {
+    /// Node is healthy and operating normally
+    Healthy,
+
+    /// Node is degraded (circuit breaker half-open or recent failures)
+    Degraded,
+
+    /// Node is unhealthy (circuit breaker open)
+    Unhealthy,
+}
+
+impl std::fmt::Display for NodeHealthState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Healthy => write!(f, "healthy"),
+            Self::Degraded => write!(f, "degraded"),
+            Self::Unhealthy => write!(f, "unhealthy"),
+        }
+    }
+}
+
+impl std::fmt::Display for HealthStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "HealthStatus(healthy={}, nodes={}, open_circuit_breakers={})",
+            self.healthy,
+            self.nodes.len(),
+            self.open_circuit_breakers
+        )
     }
 }
 

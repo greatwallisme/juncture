@@ -112,6 +112,9 @@ pub struct RunnableConfig {
     /// Nodes can access this via [`Self::budget_tracker`] to report LLM
     /// token usage for automatic budget enforcement.
     pub budget_tracker: Option<Arc<BudgetTracker>>,
+
+    /// Resource limits for concurrent LLM/tool calls and state size
+    pub resource_limits: Option<ResourceLimits>,
 }
 
 impl std::fmt::Debug for RunnableConfig {
@@ -167,6 +170,7 @@ impl std::fmt::Debug for RunnableConfig {
                 "budget_tracker",
                 &self.budget_tracker.as_ref().map(|_| "<BudgetTracker>"),
             )
+            .field("resource_limits", &self.resource_limits)
             .finish()
     }
 }
@@ -359,6 +363,24 @@ impl RunnableConfig {
     pub const fn budget_tracker(&self) -> Option<&Arc<BudgetTracker>> {
         self.budget_tracker.as_ref()
     }
+
+    /// Set resource limits for concurrent LLM/tool calls and state size
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// use juncture_core::config::{RunnableConfig, ResourceLimits};
+    ///
+    /// let limits = ResourceLimits::new()
+    ///     .with_max_state_size_bytes(10 * 1024 * 1024);
+    /// let config = RunnableConfig::new()
+    ///     .with_resource_limits(limits);
+    /// ```
+    #[must_use]
+    pub const fn with_resource_limits(mut self, limits: ResourceLimits) -> Self {
+        self.resource_limits = Some(limits);
+        self
+    }
 }
 
 /// Cache configuration for node results
@@ -490,6 +512,48 @@ impl std::fmt::Debug for EntrypointConfig {
             )
             .field("store", &self.store.as_ref().map(|_| "<Store>"))
             .finish()
+    }
+}
+
+/// Resource limits for graph execution
+///
+/// Controls concurrent access to shared resources like LLM calls and tool
+/// executions, and enforces state size limits to prevent unbounded memory growth.
+///
+/// # Examples
+///
+/// ```ignore
+/// use juncture_core::config::ResourceLimits;
+///
+/// let limits = ResourceLimits::new()
+///     .with_max_state_size_bytes(10 * 1024 * 1024); // 10 MB
+/// ```
+#[derive(Clone, Default)]
+pub struct ResourceLimits {
+    /// Maximum state size in bytes after serialization (None = unlimited)
+    pub max_state_size_bytes: Option<usize>,
+}
+
+impl std::fmt::Debug for ResourceLimits {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ResourceLimits")
+            .field("max_state_size_bytes", &self.max_state_size_bytes)
+            .finish()
+    }
+}
+
+impl ResourceLimits {
+    /// Create a new resource limits configuration with no limits
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set maximum state size in bytes
+    #[must_use]
+    pub const fn with_max_state_size_bytes(mut self, max: usize) -> Self {
+        self.max_state_size_bytes = Some(max);
+        self
     }
 }
 

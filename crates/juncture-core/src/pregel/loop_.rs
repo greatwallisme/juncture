@@ -18,7 +18,7 @@ use crate::{
         runner::execute_superstep,
         scheduler::{
             FieldVersionTracker, VersionsSeen, apply_writes, compute_next_tasks,
-            schedule_error_handlers,
+            schedule_error_handlers_filtered, schedule_fallback_tasks,
         },
         types::{BubbleUp, LoopStatus, PendingTask, SuperstepResult},
     },
@@ -224,6 +224,26 @@ pub struct PregelLoop<S: State> {
     /// retry policy is also configured).
     timeout_policies: HashMap<String, crate::pregel::context::TimeoutPolicy>,
 
+    /// Per-node circuit breaker configurations extracted from builder metadata.
+    ///
+    /// When a node has an entry here, its execution is guarded by a circuit
+    /// breaker that tracks consecutive failures and opens the circuit when
+    /// the threshold is reached, preventing further execution until cooldown.
+    circuit_breaker_configs: HashMap<String, crate::graph::CircuitBreakerConfig>,
+
+    /// Per-node circuit breaker runtime state.
+    ///
+    /// Tracks the current state (Closed/Open/HalfOpen) and failure count
+    /// for each node that has a circuit breaker configured.
+    circuit_breaker_states: HashMap<String, crate::graph::CircuitBreakerState>,
+
+    /// Per-node fallback node mappings from builder metadata.
+    ///
+    /// When a task fails and its node has a fallback, the engine creates
+    /// a recovery task targeting the fallback node instead of propagating
+    /// the error or using the error handler.
+    fallback_map: HashMap<String, String>,
+
     /// Per-channel delta counters tracking updates and supersteps since last full snapshot.
     ///
     /// Keys are channel names (e.g. `"field_0"`), values track cumulative write counts.
@@ -280,6 +300,15 @@ impl<S: State> std::fmt::Debug for PregelLoop<S> {
                 "timeout_policies",
                 &self.timeout_policies.keys().collect::<Vec<_>>(),
             )
+            .field(
+                "circuit_breaker_configs",
+                &self.circuit_breaker_configs.keys().collect::<Vec<_>>(),
+            )
+            .field(
+                "circuit_breaker_states",
+                &self.circuit_breaker_states.keys().collect::<Vec<_>>(),
+            )
+            .field("fallback_map", &self.fallback_map.len())
             .field("delta_counters", &self.delta_counters.len())
             .field("channels_finished", &self.channels_finished)
             .finish()
@@ -400,6 +429,9 @@ impl<S: State> PregelLoop<S> {
             trigger_to_nodes,
             retry_policies: HashMap::new(),
             timeout_policies: HashMap::new(),
+            circuit_breaker_configs: HashMap::new(),
+            circuit_breaker_states: HashMap::new(),
+            fallback_map: HashMap::new(),
             delta_counters: HashMap::new(),
             channels_finished: false,
         })
@@ -466,6 +498,244 @@ impl<S: State> PregelLoop<S> {
         policies: HashMap<String, crate::pregel::context::TimeoutPolicy>,
     ) {
         self.timeout_policies = policies;
+    }
+
+    /// Set per-node circuit breaker configurations
+    ///
+    /// Each entry maps a node name to its [`CircuitBreakerConfig`](crate::graph::CircuitBreakerConfig).
+    /// During superstep execution, nodes with a configured circuit breaker are
+    /// checked before execution. If the circuit is open (too many consecutive
+    /// failures), the node is skipped and an error is returned.
+    pub fn set_circuit_breaker_policies(
+        &mut self,
+        configs: HashMap<String, crate::graph::CircuitBreakerConfig>,
+    ) {
+        // Initialize runtime states for each configured circuit breaker
+        let states = configs
+            .keys()
+            .map(|name| (name.clone(), crate::graph::CircuitBreakerState::new()))
+            .collect();
+        self.circuit_breaker_configs = configs;
+        self.circuit_breaker_states = states;
+    }
+
+    /// Set per-node fallback node mappings
+    ///
+    /// Each entry maps a node name to its fallback node name. When a task
+    /// fails and its node has a fallback, the engine creates a recovery
+    /// task targeting the fallback node instead of propagating the error.
+    pub fn set_fallback_map(&mut self, map: HashMap<String, String>) {
+        self.fallback_map = map;
+    }
+
+    /// Check circuit breakers for all pending tasks.
+    ///
+    /// Tasks whose circuit is open are removed from `pending_tasks` and
+    /// returned as `TaskOutput` entries with errors. This allows other
+    /// tasks in the same superstep to proceed normally.
+    fn check_circuit_breakers(&mut self) -> Vec<crate::pregel::types::TaskOutput<S>> {
+        if self.circuit_breaker_configs.is_empty() {
+            return Vec::new();
+        }
+
+        let mut blocked_outputs = Vec::new();
+        let mut blocked_ids = std::collections::HashSet::new();
+
+        for task in &self.pending_tasks {
+            if let Some(config) = self.circuit_breaker_configs.get(&task.node_name) {
+                if let Some(state) = self.circuit_breaker_states.get_mut(&task.node_name) {
+                    if !state.should_allow(config) {
+                        let failures = state.consecutive_failures();
+
+                        tracing::warn!(
+                            name: "juncture.circuit_breaker.open",
+                            node_name = %task.node_name,
+                            consecutive_failures = failures,
+                            "Circuit breaker is open, skipping node execution"
+                        );
+
+                        blocked_outputs.push(crate::pregel::types::TaskOutput {
+                            task_id: task.id.clone(),
+                            node_name: task.node_name.clone(),
+                            command: crate::Command::default(),
+                            duration: std::time::Duration::ZERO,
+                            trigger: crate::pregel::types::TaskTrigger::Pull,
+                            triggered_fields: Vec::new(),
+                            error: Some(crate::JunctureError::execution(format!(
+                                "Circuit breaker open for node '{}': {failures} consecutive failures",
+                                task.node_name,
+                            ))),
+                            circuit_blocked: true,
+                        });
+                        blocked_ids.insert(task.id.clone());
+                    }
+                }
+            }
+        }
+
+        // Remove blocked tasks by ID while preserving order of remaining tasks
+        self.pending_tasks
+            .retain(|task| !blocked_ids.contains(&task.id));
+
+        // Emit metric for blocked tasks count
+        if !blocked_outputs.is_empty() {
+            let count = u64::try_from(blocked_outputs.len()).unwrap_or(u64::MAX);
+            self.emit_counter("juncture.circuit_breaker.blocked", count);
+        }
+
+        blocked_outputs
+    }
+
+    /// Record circuit breaker results after task execution.
+    ///
+    /// Updates circuit breaker states based on whether each task succeeded or failed.
+    fn record_circuit_breaker_results(&mut self, outputs: &[crate::pregel::types::TaskOutput<S>]) {
+        if self.circuit_breaker_configs.is_empty() {
+            return;
+        }
+
+        for output in outputs {
+            if let Some(config) = self.circuit_breaker_configs.get(&output.node_name) {
+                if let Some(state) = self.circuit_breaker_states.get_mut(&output.node_name) {
+                    // Consume half-open probe budget for tasks that actually executed.
+                    // This must happen before record_success/record_failure because
+                    // those methods may change the circuit state.
+                    state.mark_half_open_attempt();
+
+                    if output.error.is_some() {
+                        state.record_failure(config);
+
+                        tracing::debug!(
+                            name: "juncture.circuit_breaker.failure_recorded",
+                            node_name = %output.node_name,
+                            consecutive_failures = state.consecutive_failures(),
+                            circuit_state = ?state.state(),
+                            "Circuit breaker recorded failure"
+                        );
+                    } else {
+                        state.record_success();
+                    }
+                }
+            }
+        }
+    }
+
+    /// Check if the current state exceeds the configured size limit.
+    ///
+    /// Serializes the state to JSON and checks the byte length against
+    /// `max_state_size_bytes` from the resource limits. Returns an error
+    /// if the limit is exceeded.
+    ///
+    /// Optimization: skips the check if no fields changed in this superstep,
+    /// avoiding `O(state_size)` serialization overhead when the state is unchanged.
+    fn check_state_size_limit(&self, changed: &crate::FieldsChanged) -> Result<(), JunctureError>
+    where
+        S: serde::Serialize,
+    {
+        let Some(ref limits) = self.runnable_config.resource_limits else {
+            return Ok(());
+        };
+
+        let Some(max_bytes) = limits.max_state_size_bytes else {
+            return Ok(());
+        };
+
+        // Skip serialization if no fields changed in this superstep
+        if changed.is_empty() {
+            return Ok(());
+        }
+
+        let serialized = serde_json::to_vec(&self.state).map_err(|e| {
+            JunctureError::execution(format!("State serialization failed for size check: {e}"))
+        })?;
+
+        if serialized.len() > max_bytes {
+            tracing::warn!(
+                name: "juncture.resource.state_size_exceeded",
+                actual_bytes = serialized.len(),
+                max_bytes = max_bytes,
+                "State size exceeds configured limit"
+            );
+
+            // Emit metric
+            self.emit_counter("juncture.resource.state_size_exceeded", 1);
+
+            return Err(JunctureError::execution(format!(
+                "State size limit exceeded: {} bytes > {} bytes limit",
+                serialized.len(),
+                max_bytes,
+            )));
+        }
+
+        Ok(())
+    }
+
+    /// Get the current health status of the graph execution
+    ///
+    /// Returns a snapshot of the health state including per-node health
+    /// information based on circuit breaker states. This is useful for
+    /// monitoring and diagnostics.
+    #[must_use]
+    pub fn health(&self) -> crate::pregel::types::HealthStatus {
+        use crate::graph::CircuitState;
+        use crate::pregel::types::{NodeHealth, NodeHealthState};
+
+        let mut nodes = std::collections::HashMap::new();
+        let mut open_circuit_breakers = 0;
+
+        // Compute health for each node that has a circuit breaker
+        for node_name in self.circuit_breaker_configs.keys() {
+            if let Some(state) = self.circuit_breaker_states.get(node_name) {
+                let (status, circuit_state_str) = match state.state() {
+                    CircuitState::Closed => {
+                        if state.consecutive_failures() > 0 {
+                            (NodeHealthState::Degraded, "closed".to_string())
+                        } else {
+                            (NodeHealthState::Healthy, "closed".to_string())
+                        }
+                    }
+                    CircuitState::HalfOpen => (NodeHealthState::Degraded, "half_open".to_string()),
+                    CircuitState::Open => {
+                        open_circuit_breakers += 1;
+                        (NodeHealthState::Unhealthy, "open".to_string())
+                    }
+                };
+
+                nodes.insert(
+                    node_name.clone(),
+                    NodeHealth {
+                        status,
+                        consecutive_failures: state.consecutive_failures(),
+                        circuit_state: Some(circuit_state_str),
+                    },
+                );
+            }
+        }
+
+        // Add nodes without circuit breakers as healthy
+        for node_name in self.nodes.keys() {
+            if !nodes.contains_key(node_name) {
+                nodes.insert(
+                    node_name.clone(),
+                    NodeHealth {
+                        status: NodeHealthState::Healthy,
+                        consecutive_failures: 0,
+                        circuit_state: None,
+                    },
+                );
+            }
+        }
+
+        // Graph is healthy only if ALL nodes are healthy (no degraded or unhealthy)
+        let has_degraded_or_unhealthy =
+            nodes.values().any(|n| n.status != NodeHealthState::Healthy);
+        let healthy = !has_degraded_or_unhealthy;
+
+        crate::pregel::types::HealthStatus {
+            healthy,
+            nodes,
+            open_circuit_breakers,
+        }
     }
 
     /// Compute initial tasks from entry point
@@ -699,6 +969,11 @@ impl<S: State> PregelLoop<S> {
         // passing to the runner so each task gets its own state instance.
         Self::resolve_state_json(&mut self.pending_tasks)?;
 
+        // Check circuit breakers before executing tasks.
+        // Tasks whose circuit is open are removed from pending_tasks and
+        // recorded as errors in the result, allowing other tasks to proceed.
+        let circuit_blocked = self.check_circuit_breakers();
+
         // Move state into Arc for zero-copy sharing with spawned tasks.
         // std::mem::take replaces self.state with Default::default() (free),
         // avoiding the O(state_size) clone that caused O(N^2) total cost
@@ -751,6 +1026,7 @@ impl<S: State> PregelLoop<S> {
             &self.error_handler_map,
             &self.retry_policies,
             &self.timeout_policies,
+            &self.fallback_map,
             self.step,
         )
         .await?;
@@ -802,11 +1078,20 @@ impl<S: State> PregelLoop<S> {
             duration_ms = duration,
         );
 
+        // Record circuit breaker results for executed tasks
+        self.record_circuit_breaker_results(&result.task_outputs);
+
+        // Merge circuit-blocked tasks with executed task results
+        let mut merged_result = result;
+        if !circuit_blocked.is_empty() {
+            merged_result.task_outputs.extend(circuit_blocked);
+        }
+
         // Store the interrupt receiver for after_tick to drain
         // We use Option to allow moving it into after_tick
         self.interrupt_rx = Some(interrupt_rx);
 
-        Ok(result)
+        Ok(merged_result)
     }
 
     /// Process results after a superstep
@@ -844,16 +1129,54 @@ impl<S: State> PregelLoop<S> {
         // nodes activate based on pre-superstep versions, not post-superstep.
         let versions_before_apply = self.field_versions.versions().to_vec();
 
+        // Save state snapshot before applying writes for rollback on size limit exceeded.
+        // This ensures atomicity: either all writes are applied or none are.
+        let needs_snapshot = self
+            .runnable_config
+            .resource_limits
+            .as_ref()
+            .is_some_and(|r| r.max_state_size_bytes.is_some());
+        let state_snapshot = needs_snapshot.then(|| self.state.clone());
+        let field_versions_snapshot = needs_snapshot.then(|| self.field_versions.clone());
+        let circuit_breaker_snapshot = needs_snapshot.then(|| self.circuit_breaker_states.clone());
+
         // Apply writes from completed tasks using path-based deterministic merge order.
         // apply_writes sorts by trigger type (PULL before PUSH) then by node name / send
         // index so that concurrent writes to the same field produce a deterministic result
         // matching LangGraph semantics. It also checks for replace-field conflicts before
         // applying any writes, so a double-write rejects the entire superstep.
+        // Circuit-blocked tasks are excluded -- they never executed and have no real writes.
+        let executed_task_outputs: Vec<_> = result
+            .task_outputs
+            .iter()
+            .filter(|o| !o.circuit_blocked)
+            .cloned()
+            .collect();
         let total_changed = apply_writes(
             &mut self.state,
-            &result.task_outputs,
+            &executed_task_outputs,
             &mut self.field_versions,
         )?;
+
+        // Check state size limit AFTER applying writes but BEFORE committing delta counters.
+        // If the check fails, roll back to the snapshot to maintain consistency.
+        if let Err(e) = self.check_state_size_limit(&total_changed) {
+            if let (Some(snapshot), Some(versions_snapshot), Some(cb_snapshot)) = (
+                state_snapshot,
+                field_versions_snapshot,
+                circuit_breaker_snapshot,
+            ) {
+                self.state = snapshot;
+                self.field_versions = versions_snapshot;
+                self.circuit_breaker_states = cb_snapshot;
+                tracing::warn!(
+                    name: "juncture.resource.state_size_rollback",
+                    step = self.step,
+                    "State size limit exceeded, rolled back to pre-superstep snapshot"
+                );
+            }
+            return Err(e);
+        }
 
         // Increment delta counters for all tracked fields.
         // DeltaChannel fields get update+superstep increments; other changed
@@ -877,7 +1200,12 @@ impl<S: State> PregelLoop<S> {
         // Mark versions as consumed using the versions captured BEFORE apply_writes (A-001 fix).
         // This records the channel state that existed when tasks were executing,
         // ensuring node activation semantics match the design specification.
+        // Circuit-blocked tasks are excluded -- they never executed, so their
+        // nodes should not be marked as having consumed the current versions.
         for task_output in &result.task_outputs {
+            if task_output.circuit_blocked {
+                continue;
+            }
             self.versions_seen
                 .mark_consumed(&task_output.node_name, &versions_before_apply);
         }
@@ -885,9 +1213,12 @@ impl<S: State> PregelLoop<S> {
         // Reset ephemeral fields
         self.state.reset_ephemeral();
 
-        // Emit stream events
+        // Emit stream events (skip circuit-blocked tasks -- they never executed)
         if let Some(ref tx) = self.stream_tx {
             for task_output in &result.task_outputs {
+                if task_output.circuit_blocked {
+                    continue;
+                }
                 // Emit TaskStart event before TaskEnd (retroactive, but provides task_id info)
                 let start_event = StreamEvent::TaskStart {
                     node: task_output.node_name.clone(),
@@ -948,20 +1279,63 @@ impl<S: State> PregelLoop<S> {
             }
         }
 
-        // Compute next pending tasks (uses cached trigger_to_nodes)
+        // Compute next pending tasks (uses cached trigger_to_nodes).
+        // Circuit-blocked tasks are excluded -- they never executed, so their
+        // outgoing edges should not trigger downstream node scheduling.
+        let executed_outputs: Vec<_> = result
+            .task_outputs
+            .iter()
+            .filter(|o| !o.circuit_blocked)
+            .cloned()
+            .collect();
         self.pending_tasks = compute_next_tasks(
-            &result.task_outputs,
+            &executed_outputs,
             &self.trigger_table,
             &self.trigger_to_nodes,
             &self.state,
         )
         .await?;
 
-        // Schedule error handler recovery tasks for any failed nodes that have
-        // a registered error handler. These tasks run the handler node which
-        // receives the error context and returns a recovery Command.
-        let recovery_tasks =
-            schedule_error_handlers(&result.task_outputs, &self.nodes, &self.error_handler_map);
+        // Schedule fallback tasks for failed nodes that have a fallback configured.
+        // Fallback takes priority over error handlers -- if a node has both, only
+        // the fallback is used. The returned set of handled node names is used to
+        // filter out those nodes from error handler scheduling.
+        // Uses executed_outputs (excluding circuit-blocked tasks) to avoid
+        // spurious recovery scheduling.
+        // Deduplicate: only add fallback tasks for nodes not already scheduled.
+        let (fallback_tasks, fallback_handled) =
+            schedule_fallback_tasks(&executed_outputs, &self.nodes, &self.fallback_map);
+        if !fallback_tasks.is_empty() {
+            let existing_nodes: std::collections::HashSet<&str> = self
+                .pending_tasks
+                .iter()
+                .map(|t| t.node_name.as_str())
+                .collect();
+            let deduplicated_fallbacks: Vec<_> = fallback_tasks
+                .into_iter()
+                .filter(|t| !existing_nodes.contains(t.node_name.as_str()))
+                .collect();
+            tracing::debug!(
+                name: "juncture.fallback.recovery_tasks",
+                step = self.step,
+                count = deduplicated_fallbacks.len(),
+                "Scheduling fallback recovery tasks"
+            );
+            self.pending_tasks.extend(deduplicated_fallbacks);
+        }
+
+        // Schedule error handler recovery tasks for failed nodes that have
+        // a registered error handler AND were not handled by fallback.
+        // These tasks run the handler node which receives the error context
+        // and returns a recovery Command.
+        // Uses executed_outputs (excluding circuit-blocked tasks) to avoid
+        // spurious recovery scheduling.
+        let recovery_tasks = schedule_error_handlers_filtered(
+            &executed_outputs,
+            &self.nodes,
+            &self.error_handler_map,
+            &fallback_handled,
+        );
         if !recovery_tasks.is_empty() {
             tracing::debug!(
                 name: "juncture.error_handler.recovery_tasks",
@@ -2493,7 +2867,7 @@ mod tests {
         fn reset_ephemeral(&mut self) {}
     }
 
-    #[derive(Clone, Debug, Default, serde::Serialize)]
+    #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
     struct TestUpdate;
 
     // --- B-04-001: delta counter tests ---
@@ -2505,7 +2879,7 @@ mod tests {
         messages: Vec<String>,
     }
 
-    #[derive(Clone, Debug, Default, serde::Serialize)]
+    #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
     struct DeltaTestUpdate {
         value: Option<i32>,
         messages: Option<Vec<String>>,
@@ -4118,6 +4492,7 @@ mod tests {
                 duration: std::time::Duration::from_millis(1),
                 trigger: TaskTrigger::Pull,
                 error: None,
+                circuit_blocked: false,
             }],
             bubble_ups: Vec::new(),
         };
@@ -4162,6 +4537,7 @@ mod tests {
                 duration: std::time::Duration::from_millis(1),
                 trigger: TaskTrigger::Pull,
                 error: None,
+                circuit_blocked: false,
             }],
             bubble_ups: Vec::new(),
         };
@@ -4201,6 +4577,7 @@ mod tests {
                     duration: std::time::Duration::from_millis(1),
                     trigger: TaskTrigger::Pull,
                     error: None,
+                    circuit_blocked: false,
                 },
                 TaskOutput {
                     triggered_fields: vec![],
@@ -4210,6 +4587,7 @@ mod tests {
                     duration: std::time::Duration::from_millis(2),
                     trigger: TaskTrigger::Pull,
                     error: None,
+                    circuit_blocked: false,
                 },
             ],
             bubble_ups: Vec::new(),

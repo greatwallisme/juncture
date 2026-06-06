@@ -810,28 +810,136 @@ pub fn consume_triggered_channels<S: State>(state: &mut S, triggered_channels: &
 /// # Examples
 ///
 /// ```ignore
-/// use juncture_core::pregel::scheduler::schedule_error_handlers;
+/// use juncture_core::pregel::scheduler::schedule_error_handlers_filtered;
 ///
-/// let recovery_tasks = schedule_error_handlers(&task_outputs, &nodes, &error_handler_map);
+/// let recovery_tasks = schedule_error_handlers_filtered(&task_outputs, &nodes, &error_handler_map, &std::collections::HashSet::new());
 /// for task in recovery_tasks {
 ///     // Execute error handler task in next superstep
 /// }
 /// ```
+/// Schedule fallback tasks for failed nodes that have fallback node configured.
+///
+/// Scans the task outputs for failures and creates recovery tasks targeting
+/// the fallback node. Returns the set of node names that have fallbacks
+/// (so error handler scheduling can skip them).
 #[expect(
     clippy::implicit_hasher,
     reason = "public API accepts std HashMap; callers typically construct from builder metadata"
 )]
-pub fn schedule_error_handlers<S: State>(
+#[expect(
+    clippy::cognitive_complexity,
+    reason = "function has multiple early-return guards (circuit_blocked, error, fallback_map, missing node, self-reference) that are individually simple but add up"
+)]
+pub fn schedule_fallback_tasks<S: State>(
+    task_outputs: &[TaskOutput<S>],
+    nodes: &indexmap::IndexMap<String, std::sync::Arc<dyn crate::Node<S>>>,
+    fallback_map: &std::collections::HashMap<String, String>,
+) -> (Vec<PendingTask<S>>, std::collections::HashSet<String>) {
+    let mut recovery_tasks = Vec::new();
+    let mut handled_nodes = std::collections::HashSet::new();
+
+    for output in task_outputs {
+        // Skip circuit-blocked tasks -- they were deliberately prevented from
+        // executing and should not trigger fallback or error handler scheduling.
+        if output.circuit_blocked {
+            continue;
+        }
+
+        let Some(ref error) = output.error else {
+            continue;
+        };
+
+        let Some(fallback_name) = fallback_map.get(&output.node_name) else {
+            continue;
+        };
+
+        // Verify the fallback node actually exists in the graph
+        if !nodes.contains_key(fallback_name) {
+            tracing::warn!(
+                name: "juncture.fallback.missing_node",
+                node_name = %output.node_name,
+                fallback_name = %fallback_name,
+                error = %error,
+                "Fallback node not found in graph, skipping fallback"
+            );
+            continue;
+        }
+
+        // Prevent self-referential fallback which would create an infinite loop
+        if fallback_name == &output.node_name {
+            tracing::warn!(
+                name: "juncture.fallback.self_reference",
+                node_name = %output.node_name,
+                error = %error,
+                "Node configured as its own fallback, skipping to prevent infinite loop"
+            );
+            continue;
+        }
+
+        // Prevent mutual cycles (A->B->A) by checking if the fallback target
+        // has already been handled in this superstep. If A's fallback is B,
+        // and B's fallback is A, then when processing B, A is already in
+        // handled_nodes, so we skip B's fallback to break the cycle.
+        if handled_nodes.contains(fallback_name) {
+            tracing::warn!(
+                name: "juncture.fallback.cycle_detected",
+                node_name = %output.node_name,
+                fallback_name = %fallback_name,
+                error = %error,
+                "Fallback cycle detected, skipping to prevent infinite loop"
+            );
+            continue;
+        }
+
+        tracing::info!(
+            name: "juncture.fallback.scheduled",
+            node_name = %output.node_name,
+            fallback_name = %fallback_name,
+            error = %error,
+            "Scheduling fallback node for failed task"
+        );
+
+        recovery_tasks.push(PendingTask::pull(
+            uuid::Uuid::new_v4().to_string(),
+            fallback_name.clone(),
+        ));
+        handled_nodes.insert(output.node_name.clone());
+    }
+
+    (recovery_tasks, handled_nodes)
+}
+
+/// Schedule error handler recovery tasks, excluding nodes already handled by fallback.
+///
+/// Skips nodes whose names appear in `fallback_handled`. This prevents
+/// double-recovery when a node has both a fallback and an error handler configured.
+#[expect(
+    clippy::implicit_hasher,
+    reason = "public API accepts std HashMap; callers typically construct from builder metadata"
+)]
+pub fn schedule_error_handlers_filtered<S: State>(
     task_outputs: &[TaskOutput<S>],
     nodes: &indexmap::IndexMap<String, std::sync::Arc<dyn crate::Node<S>>>,
     error_handler_map: &std::collections::HashMap<String, String>,
+    fallback_handled: &std::collections::HashSet<String>,
 ) -> Vec<PendingTask<S>> {
     let mut recovery_tasks = Vec::new();
 
     for output in task_outputs {
+        // Skip circuit-blocked tasks -- they were deliberately prevented from
+        // executing and should not trigger fallback or error handler scheduling.
+        if output.circuit_blocked {
+            continue;
+        }
+
         let Some(ref error) = output.error else {
             continue;
         };
+
+        // Skip nodes already handled by fallback
+        if fallback_handled.contains(&output.node_name) {
+            continue;
+        }
 
         let Some(handler_name) = error_handler_map.get(&output.node_name) else {
             continue;
@@ -988,6 +1096,7 @@ mod scheduler_tests {
                 command: Command::end(),
                 duration: std::time::Duration::from_millis(10),
                 error: None,
+                circuit_blocked: false,
             };
 
         let result: SuperstepResult<TestState> = SuperstepResult {
@@ -1019,7 +1128,12 @@ mod scheduler_tests {
         let task_outputs: Vec<TaskOutput<TestState>> = Vec::new();
         let error_handler_map = std::collections::HashMap::new();
 
-        let recovery_tasks = schedule_error_handlers(&task_outputs, &nodes, &error_handler_map);
+        let recovery_tasks = schedule_error_handlers_filtered(
+            &task_outputs,
+            &nodes,
+            &error_handler_map,
+            &std::collections::HashSet::new(),
+        );
         assert!(recovery_tasks.is_empty());
     }
 
@@ -1043,12 +1157,18 @@ mod scheduler_tests {
             duration: std::time::Duration::ZERO,
             trigger: crate::pregel::types::TaskTrigger::Pull,
             error: Some(crate::JunctureError::execution("test failure")),
+            circuit_blocked: false,
         }];
 
         let mut error_handler_map = std::collections::HashMap::new();
         error_handler_map.insert("failing_node".to_string(), "error_handler_a".to_string());
 
-        let recovery_tasks = schedule_error_handlers(&task_outputs, &nodes, &error_handler_map);
+        let recovery_tasks = schedule_error_handlers_filtered(
+            &task_outputs,
+            &nodes,
+            &error_handler_map,
+            &std::collections::HashSet::new(),
+        );
         assert_eq!(recovery_tasks.len(), 1);
         assert_eq!(recovery_tasks[0].node_name, "error_handler_a");
     }
@@ -1068,6 +1188,7 @@ mod scheduler_tests {
             duration: std::time::Duration::ZERO,
             trigger: crate::pregel::types::TaskTrigger::Pull,
             error: Some(crate::JunctureError::execution("test failure")),
+            circuit_blocked: false,
         }];
 
         let mut error_handler_map = std::collections::HashMap::new();
@@ -1076,7 +1197,12 @@ mod scheduler_tests {
             "nonexistent_handler".to_string(),
         );
 
-        let recovery_tasks = schedule_error_handlers(&task_outputs, &nodes, &error_handler_map);
+        let recovery_tasks = schedule_error_handlers_filtered(
+            &task_outputs,
+            &nodes,
+            &error_handler_map,
+            &std::collections::HashSet::new(),
+        );
         assert!(
             recovery_tasks.is_empty(),
             "handler node not in graph, no recovery task"
@@ -1098,11 +1224,17 @@ mod scheduler_tests {
             duration: std::time::Duration::ZERO,
             trigger: crate::pregel::types::TaskTrigger::Pull,
             error: Some(crate::JunctureError::execution("test failure")),
+            circuit_blocked: false,
         }];
 
         let error_handler_map = std::collections::HashMap::new();
 
-        let recovery_tasks = schedule_error_handlers(&task_outputs, &nodes, &error_handler_map);
+        let recovery_tasks = schedule_error_handlers_filtered(
+            &task_outputs,
+            &nodes,
+            &error_handler_map,
+            &std::collections::HashSet::new(),
+        );
         assert!(recovery_tasks.is_empty());
     }
 
@@ -1121,6 +1253,189 @@ mod scheduler_tests {
 
         let handler = get_error_handler_node("node_a", &error_handler_map);
         assert!(handler.is_none());
+    }
+
+    // --- schedule_fallback_tasks tests ---
+
+    #[test]
+    fn test_schedule_fallback_tasks_no_errors() {
+        use crate::Command;
+
+        let mut nodes = indexmap::IndexMap::new();
+        nodes.insert(
+            "node_a".to_string(),
+            crate::node::NodeFnCommand(|_s: &TestState| async move { Ok(Command::end()) })
+                .into_node("node_a"),
+        );
+
+        let task_outputs = vec![TaskOutput {
+            triggered_fields: vec![],
+            task_id: "task-1".to_string(),
+            node_name: "node_a".to_string(),
+            trigger: crate::pregel::types::TaskTrigger::Pull,
+            command: Command::end(),
+            duration: std::time::Duration::ZERO,
+            error: None,
+            circuit_blocked: false,
+        }];
+
+        let fallback_map = std::collections::HashMap::new();
+        let (tasks, handled) = schedule_fallback_tasks(&task_outputs, &nodes, &fallback_map);
+        assert!(tasks.is_empty());
+        assert!(handled.is_empty());
+    }
+
+    #[test]
+    fn test_schedule_fallback_tasks_with_fallback() {
+        use crate::Command;
+
+        let mut nodes = indexmap::IndexMap::new();
+        nodes.insert(
+            "node_a".to_string(),
+            crate::node::NodeFnCommand(|_s: &TestState| async move { Ok(Command::end()) })
+                .into_node("node_a"),
+        );
+        nodes.insert(
+            "fallback_a".to_string(),
+            crate::node::NodeFnCommand(|_s: &TestState| async move { Ok(Command::end()) })
+                .into_node("fallback_a"),
+        );
+
+        let task_outputs = vec![TaskOutput {
+            triggered_fields: vec![],
+            task_id: "task-1".to_string(),
+            node_name: "node_a".to_string(),
+            trigger: crate::pregel::types::TaskTrigger::Pull,
+            command: Command::default(),
+            duration: std::time::Duration::ZERO,
+            error: Some(crate::JunctureError::execution("test error")),
+            circuit_blocked: false,
+        }];
+
+        let mut fallback_map = std::collections::HashMap::new();
+        fallback_map.insert("node_a".to_string(), "fallback_a".to_string());
+
+        let (tasks, handled) = schedule_fallback_tasks(&task_outputs, &nodes, &fallback_map);
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].node_name, "fallback_a");
+        assert!(handled.contains("node_a"));
+    }
+
+    #[test]
+    fn test_schedule_fallback_tasks_skips_circuit_blocked() {
+        use crate::Command;
+
+        let mut nodes = indexmap::IndexMap::new();
+        nodes.insert(
+            "node_a".to_string(),
+            crate::node::NodeFnCommand(|_s: &TestState| async move { Ok(Command::end()) })
+                .into_node("node_a"),
+        );
+        nodes.insert(
+            "fallback_a".to_string(),
+            crate::node::NodeFnCommand(|_s: &TestState| async move { Ok(Command::end()) })
+                .into_node("fallback_a"),
+        );
+
+        let task_outputs = vec![TaskOutput {
+            triggered_fields: vec![],
+            task_id: "task-1".to_string(),
+            node_name: "node_a".to_string(),
+            trigger: crate::pregel::types::TaskTrigger::Pull,
+            command: Command::default(),
+            duration: std::time::Duration::ZERO,
+            error: Some(crate::JunctureError::execution("circuit open")),
+            circuit_blocked: true,
+        }];
+
+        let mut fallback_map = std::collections::HashMap::new();
+        fallback_map.insert("node_a".to_string(), "fallback_a".to_string());
+
+        let (tasks, handled) = schedule_fallback_tasks(&task_outputs, &nodes, &fallback_map);
+        assert!(tasks.is_empty());
+        assert!(handled.is_empty());
+    }
+
+    #[test]
+    fn test_schedule_fallback_tasks_self_reference_guard() {
+        use crate::Command;
+
+        let mut nodes = indexmap::IndexMap::new();
+        nodes.insert(
+            "node_a".to_string(),
+            crate::node::NodeFnCommand(|_s: &TestState| async move { Ok(Command::end()) })
+                .into_node("node_a"),
+        );
+
+        let task_outputs = vec![TaskOutput {
+            triggered_fields: vec![],
+            task_id: "task-1".to_string(),
+            node_name: "node_a".to_string(),
+            trigger: crate::pregel::types::TaskTrigger::Pull,
+            command: Command::default(),
+            duration: std::time::Duration::ZERO,
+            error: Some(crate::JunctureError::execution("test error")),
+            circuit_blocked: false,
+        }];
+
+        let mut fallback_map = std::collections::HashMap::new();
+        fallback_map.insert("node_a".to_string(), "node_a".to_string());
+
+        let (tasks, handled) = schedule_fallback_tasks(&task_outputs, &nodes, &fallback_map);
+        assert!(tasks.is_empty());
+        assert!(handled.is_empty());
+    }
+
+    #[test]
+    fn test_schedule_fallback_tasks_cycle_guard() {
+        use crate::Command;
+
+        let mut nodes = indexmap::IndexMap::new();
+        nodes.insert(
+            "node_a".to_string(),
+            crate::node::NodeFnCommand(|_s: &TestState| async move { Ok(Command::end()) })
+                .into_node("node_a"),
+        );
+        nodes.insert(
+            "node_b".to_string(),
+            crate::node::NodeFnCommand(|_s: &TestState| async move { Ok(Command::end()) })
+                .into_node("node_b"),
+        );
+
+        // Both nodes fail, both have fallbacks pointing to each other
+        let task_outputs = vec![
+            TaskOutput {
+                triggered_fields: vec![],
+                task_id: "task-1".to_string(),
+                node_name: "node_a".to_string(),
+                trigger: crate::pregel::types::TaskTrigger::Pull,
+                command: Command::default(),
+                duration: std::time::Duration::ZERO,
+                error: Some(crate::JunctureError::execution("node_a failed")),
+                circuit_blocked: false,
+            },
+            TaskOutput {
+                triggered_fields: vec![],
+                task_id: "task-2".to_string(),
+                node_name: "node_b".to_string(),
+                trigger: crate::pregel::types::TaskTrigger::Pull,
+                command: Command::default(),
+                duration: std::time::Duration::ZERO,
+                error: Some(crate::JunctureError::execution("node_b failed")),
+                circuit_blocked: false,
+            },
+        ];
+
+        let mut fallback_map = std::collections::HashMap::new();
+        fallback_map.insert("node_a".to_string(), "node_b".to_string());
+        fallback_map.insert("node_b".to_string(), "node_a".to_string());
+
+        let (tasks, handled) = schedule_fallback_tasks(&task_outputs, &nodes, &fallback_map);
+        // First node's fallback (node_b) is scheduled, second node's fallback
+        // (node_a) is skipped because node_a is already in scheduled_fallbacks
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].node_name, "node_b");
+        assert!(handled.contains("node_a"));
     }
 }
 
