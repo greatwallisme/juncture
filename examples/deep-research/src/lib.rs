@@ -6,7 +6,6 @@ pub mod config;
 pub mod llm;
 pub mod memory;
 pub mod orchestrator;
-pub mod state;
 pub mod tools;
 
 // Re-export commonly used types

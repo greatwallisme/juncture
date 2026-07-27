@@ -31,7 +31,6 @@ mod config;
 mod llm;
 mod memory;
 mod orchestrator;
-mod state;
 mod tools;
 
 use config::ResearchConfig;

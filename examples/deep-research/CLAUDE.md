@@ -24,7 +24,6 @@ src/
   main.rs         -- CLI entry point with clap derive + telemetry integration
   lib.rs          -- library root, module declarations
   config.rs       -- ResearchConfig from env vars and CLI args
-  state.rs        -- ResearchState using #[derive(State)]
   llm.rs          -- LLM model builder with middleware chain (logging + circuit breaker)
   orchestrator.rs -- LLM-driven orchestrator using create_agent_with_middleware
   memory/
