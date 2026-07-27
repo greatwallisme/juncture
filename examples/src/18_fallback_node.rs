@@ -31,7 +31,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     writeln!(stdout)?;
     writeln!(stdout, "Fallback nodes provide graceful degradation:")?;
     writeln!(stdout, "  - When primary node fails, fallback is executed")?;
-    writeln!(stdout, "  - Fallback receives the same state as the failed node")?;
+    writeln!(
+        stdout,
+        "  - Fallback receives the same state as the failed node"
+    )?;
     writeln!(stdout, "  - Priority: fallback > error handler > cancel")?;
     writeln!(stdout)?;
 

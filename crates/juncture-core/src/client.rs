@@ -83,14 +83,6 @@ pub enum ClientError {
     #[error("connection error: {0}")]
     Connection(String),
 
-    /// Authentication failed
-    #[error("authentication failed: {0}")]
-    Auth(String),
-
-    /// Graph not found
-    #[error("graph not found: {0}")]
-    GraphNotFound(String),
-
     /// Thread not found
     #[error("thread not found: {0}")]
     ThreadNotFound(String),
@@ -115,14 +107,6 @@ pub enum ClientError {
         /// Error message
         message: String,
     },
-
-    /// Timeout
-    #[error("timeout")]
-    Timeout,
-
-    /// Other errors
-    #[error("client error: {0}")]
-    Other(String),
 }
 
 /// Juncture client for server interaction

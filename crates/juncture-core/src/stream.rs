@@ -32,7 +32,7 @@ pub enum StreamMode {
     Tasks,
 
     /// Combine multiple stream modes
-    Multi(Vec<StreamMode>),
+    Multi(Vec<Self>),
 }
 
 /// Stream event during graph execution

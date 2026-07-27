@@ -60,6 +60,15 @@ struct SummaryData<'a> {
     stored_at: String,
 }
 
+/// Converts a [`StoreError`] into a [`MemoryError::StoreError`].
+fn map_store_error(e: StoreError) -> MemoryError {
+    match e {
+        StoreError::Serialize(e) => MemoryError::StoreError(format!("serialization error: {e}")),
+        StoreError::Storage(e) => MemoryError::StoreError(format!("storage error: {e}")),
+        StoreError::VectorSearch(e) => MemoryError::StoreError(format!("vector search error: {e}")),
+    }
+}
+
 impl<S: Store> ConversationMemory<S> {
     /// Create a new conversation memory manager.
     ///
@@ -203,13 +212,7 @@ impl<S: Store> ConversationMemory<S> {
         self.store
             .put(&self.namespace, &key, value, None)
             .await
-            .map_err(|e| match e {
-                StoreError::Serialize(e) => {
-                    MemoryError::StoreError(format!("serialization error: {e}"))
-                }
-                StoreError::Storage(e) => MemoryError::StoreError(format!("storage error: {e}")),
-                _ => MemoryError::StoreError(format!("store error: {e}")),
-            })?;
+            .map_err(map_store_error)?;
 
         Ok(())
     }
@@ -235,13 +238,7 @@ impl<S: Store> ConversationMemory<S> {
             .store
             .get(&self.namespace, &key)
             .await
-            .map_err(|e| match e {
-                StoreError::Serialize(e) => {
-                    MemoryError::StoreError(format!("serialization error: {e}"))
-                }
-                StoreError::Storage(e) => MemoryError::StoreError(format!("storage error: {e}")),
-                _ => MemoryError::StoreError(format!("store error: {e}")),
-            })?;
+            .map_err(map_store_error)?;
 
         match item {
             Some(item) => {

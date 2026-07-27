@@ -524,8 +524,7 @@ where
                                     .await
                             };
 
-                            timeout_result.map_or_else(
-                                |_| {
+                            timeout_result.unwrap_or_else(|_| {
                                     Err(crate::JunctureError::node_timeout(
                                         crate::error::NodeTimeoutError::RunTimeout {
                                             node: timeout_node_name,
@@ -533,9 +532,7 @@ where
                                                 .unwrap_or(u64::MAX),
                                         },
                                     ))
-                                },
-                                std::convert::identity,
-                            )
+                                })
                         } else {
                             inner_future.await
                         }

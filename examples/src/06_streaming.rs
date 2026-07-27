@@ -76,11 +76,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Stream execution
     let handle = compiled
-        .stream(
-            initial_state,
-            &RunnableConfig::new(),
-            StreamMode::Values,
-        )
+        .stream(initial_state, &RunnableConfig::new(), StreamMode::Values)
         .await?;
 
     // Process stream events

@@ -22,7 +22,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Create a ring buffer with capacity 5
     let mut buffer = RingBufferChannel::new(Vec::new(), 5);
-    writeln!(stdout, "Created buffer with capacity: {}", buffer.capacity())?;
+    writeln!(
+        stdout,
+        "Created buffer with capacity: {}",
+        buffer.capacity()
+    )?;
 
     // Add items using Channel trait
     for i in 1..=8 {
@@ -44,12 +48,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Demonstrate checkpoint round-trip
     writeln!(stdout, "=== Checkpoint Round-trip ===")?;
-    let checkpoint = <RingBufferChannel<String> as Channel<Vec<String>>>::checkpoint(&buffer)
-        .unwrap();
+    let checkpoint =
+        <RingBufferChannel<String> as Channel<Vec<String>>>::checkpoint(&buffer).unwrap();
     writeln!(stdout, "Checkpoint: {checkpoint}")?;
 
-    let restored = <RingBufferChannel<String> as Channel<Vec<String>>>::from_checkpoint(checkpoint)
-        .unwrap();
+    let restored =
+        <RingBufferChannel<String> as Channel<Vec<String>>>::from_checkpoint(checkpoint).unwrap();
     writeln!(
         stdout,
         "Restored: len={}, capacity={}",

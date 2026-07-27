@@ -26,6 +26,7 @@ struct JokeInput {
 }
 
 #[derive(State, Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[expect(dead_code, reason = "defined for subgraph type parameter in benchmark")]
 struct JokeOutput {
     jokes: Vec<String>,
 }

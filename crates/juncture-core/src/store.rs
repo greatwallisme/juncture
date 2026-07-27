@@ -18,19 +18,6 @@ use sqlx::Row;
 /// Store error types
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
-    /// Item not found
-    #[error("item not found: {namespace}/{key}")]
-    NotFound {
-        /// Namespace of the missing item
-        namespace: String,
-        /// Key of the missing item
-        key: String,
-    },
-
-    /// Invalid namespace format
-    #[error("invalid namespace: {0}")]
-    InvalidNamespace(String),
-
     /// Serialization error
     #[error("serialization error: {0}")]
     Serialize(#[from] serde_json::Error),
@@ -42,10 +29,6 @@ pub enum StoreError {
     /// Vector search error
     #[error("vector search error: {0}")]
     VectorSearch(String),
-
-    /// Embedding computation error
-    #[error("embedding error: {0}")]
-    Embedding(String),
 }
 
 /// Store trait for cross-thread long-term memory
@@ -246,19 +229,19 @@ pub enum FilterExpr {
     #[serde(rename = "$and")]
     And {
         /// Sub-expressions
-        expressions: Vec<FilterExpr>,
+        expressions: Vec<Self>,
     },
     /// Logical OR
     #[serde(rename = "$or")]
     Or {
         /// Sub-expressions
-        expressions: Vec<FilterExpr>,
+        expressions: Vec<Self>,
     },
     /// Logical NOT
     #[serde(rename = "$not")]
     Not {
         /// Negated expression
-        expr: Box<FilterExpr>,
+        expr: Box<Self>,
     },
 }
 
@@ -407,7 +390,7 @@ pub struct MemoryStore {
 ///
 /// # Errors
 ///
-/// Implementations should return [`StoreError::Embedding`] or a suitable variant
+/// Implementations should return a suitable [`StoreError`]
 /// if embedding generation fails (network error, model error, etc.).
 #[async_trait::async_trait]
 pub trait EmbeddingFunc: Send + Sync + 'static {
@@ -644,26 +627,27 @@ impl Store for MemoryStore {
             return Ok(None);
         }
 
-        if self.ttl_config.refresh_on_read && self.ttl_config.default_ttl.is_some() {
-            // Phase 2b: write lock -- refresh TTL and return item
-            let ttl = self.ttl_config.default_ttl.expect("checked is_some above");
-            let now = Utc::now();
-            let new_expires =
-                now + chrono::Duration::from_std(ttl).unwrap_or(chrono::Duration::MAX);
+        if self.ttl_config.refresh_on_read {
+            if let Some(ttl) = self.ttl_config.default_ttl {
+                // Phase 2b: write lock -- refresh TTL and return item
+                let now = Utc::now();
+                let new_expires =
+                    now + chrono::Duration::from_std(ttl).unwrap_or(chrono::Duration::MAX);
 
-            let mut data = self.data.write().await;
-            if let Some(ns_map) = data.get_mut(namespace)
-                && let Some(item) = ns_map.get_mut(key)
-            {
-                item.expires_at = Some(new_expires);
-                item.updated_at = now;
-                let cloned = item.clone();
+                let mut data = self.data.write().await;
+                if let Some(ns_map) = data.get_mut(namespace)
+                    && let Some(item) = ns_map.get_mut(key)
+                {
+                    item.expires_at = Some(new_expires);
+                    item.updated_at = now;
+                    let cloned = item.clone();
+                    drop(data);
+                    return Ok(Some(cloned));
+                }
                 drop(data);
-                return Ok(Some(cloned));
+                // Item was removed between read and write phases
+                return Ok(None);
             }
-            drop(data);
-            // Item was removed between read and write phases
-            return Ok(None);
         }
 
         // Phase 2c: read lock -- return item without modification
@@ -1737,7 +1721,7 @@ fn vector_to_bytea(vec: &[f32]) -> Vec<u8> {
 /// Expects little-endian byte order.
 #[cfg(feature = "postgres")]
 fn bytea_to_vector(bytes: &[u8]) -> Result<Vec<f32>, StoreError> {
-    if bytes.len() % std::mem::size_of::<f32>() != 0 {
+    if !bytes.len().is_multiple_of(std::mem::size_of::<f32>()) {
         return Err(StoreError::VectorSearch(
             "Invalid BYTEA length for vector data".to_string(),
         ));
@@ -1769,7 +1753,7 @@ fn vector_to_blob(vec: &[f32]) -> Vec<u8> {
 /// Expects little-endian byte order.
 #[cfg(feature = "sqlite")]
 fn blob_to_vector(bytes: &[u8]) -> Result<Vec<f32>, StoreError> {
-    if bytes.len() % std::mem::size_of::<f32>() != 0 {
+    if !bytes.len().is_multiple_of(std::mem::size_of::<f32>()) {
         return Err(StoreError::VectorSearch(
             "Invalid BLOB length for vector data".to_string(),
         ));

@@ -222,8 +222,8 @@ pub use func::{Runtime as FuncRuntime, compile_entrypoint, compile_entrypoint_wi
 pub use graph::{
     CircuitBreakerConfig, CircuitBreakerState, CircuitState, CompiledGraph, DrawableEdge,
     DrawableGraph, DrawableNode, ErrorHandlerNode, GraphOutput, GraphOutputMetadata, InterruptInfo,
-    NodeMetadata, RetryPolicy, RetryingNode, StateFilter, StateGraph, StateUpdate, StreamHandle,
-    SubgraphInfo, TopologyError,
+    NodeError, NodeMetadata, RetryPolicy, RetryingNode, StateFilter, StateGraph, StateUpdate,
+    StreamHandle, SubgraphInfo, TopologyError,
 };
 pub use interrupt::{
     HIDDEN_TAG, InterruptContext, InterruptSignal, ResumeValue, Scratchpad, generate_interrupt_id,
@@ -233,7 +233,7 @@ pub use llm::{
     CallOptions, ChatModel, JsonSchema, LlmError, MessageChunk, StructuredOutputModel, ToolChoice,
     ToolDefinition,
 };
-pub use node::{IntoNode, Node, NodeError};
+pub use node::{IntoNode, Node};
 pub use observability::{CacheKeyInput, GraphLifecycleCallback, MetricsCollector};
 pub use prebuilt::{PromptSource, ReactAgentConfig};
 pub use pregel::{

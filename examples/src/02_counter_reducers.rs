@@ -45,7 +45,11 @@ fn merge_scores(
 }
 
 const fn counter_router(state: &CounterState) -> &str {
-    if state.value >= 3 { "collect" } else { "increment" }
+    if state.value >= 3 {
+        "collect"
+    } else {
+        "increment"
+    }
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -90,7 +94,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     graph.add_conditional_edges(
         "set_status",
-        std::sync::Arc::new(counter_router) as std::sync::Arc<dyn juncture_core::edge::Router<CounterState>>,
+        std::sync::Arc::new(counter_router)
+            as std::sync::Arc<dyn juncture_core::edge::Router<CounterState>>,
         juncture_core::edge::PathMap::from(&[("collect", "collect"), ("increment", "increment")]),
     );
 

@@ -12,8 +12,8 @@
 //! - `to_html()` for interactive HTML visualization
 //! - `display()` for terminal output
 
-use juncture_core::node::NodeFnUpdate;
 use juncture_core::StateGraph;
+use juncture_core::node::NodeFnUpdate;
 use juncture_derive::State;
 use std::io::Write;
 

@@ -890,13 +890,13 @@ impl<T> RingBufferChannel<T> {
 
     /// Get the current number of elements
     #[must_use]
-    pub fn len(&self) -> usize {
+    pub const fn len(&self) -> usize {
         self.values.len()
     }
 
     /// Check if the ring buffer is empty
     #[must_use]
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.values.is_empty()
     }
 

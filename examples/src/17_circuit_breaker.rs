@@ -41,7 +41,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cb_config = CircuitBreakerConfig::new(2, Duration::from_secs(1));
 
     writeln!(stdout, "Configuration:")?;
-    writeln!(stdout, "  Failure threshold: {}", cb_config.failure_threshold)?;
+    writeln!(
+        stdout,
+        "  Failure threshold: {}",
+        cb_config.failure_threshold
+    )?;
     writeln!(
         stdout,
         "  Cooldown duration: {:?}",
@@ -61,7 +65,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "unstable_service",
         NodeFnUpdate(|_state: &AppState| async move {
             // Simulate a failing service
-            Err(juncture_core::JunctureError::execution("Service unavailable"))
+            Err(juncture_core::JunctureError::execution(
+                "Service unavailable",
+            ))
         }),
         cb_config,
     )?;
@@ -102,8 +108,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             writeln!(stdout)?;
             writeln!(stdout, "This demonstrates the circuit breaker in action:")?;
             writeln!(stdout, "  - After 2 failures, the circuit opens")?;
-            writeln!(stdout, "  - Open circuit rejects further execution attempts")?;
-            writeln!(stdout, "  - After cooldown (1s), circuit transitions to HalfOpen")?;
+            writeln!(
+                stdout,
+                "  - Open circuit rejects further execution attempts"
+            )?;
+            writeln!(
+                stdout,
+                "  - After cooldown (1s), circuit transitions to HalfOpen"
+            )?;
             writeln!(stdout, "  - HalfOpen allows one probe attempt")?;
         }
     }

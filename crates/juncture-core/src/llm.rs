@@ -49,18 +49,6 @@ pub enum LlmError {
     #[error("invalid response: {0}")]
     InvalidResponse(String),
 
-    /// Requested model not found
-    #[error("model not found: {0}")]
-    ModelNotFound(String),
-
-    /// Content was filtered by provider
-    #[error("content filtered")]
-    ContentFiltered,
-
-    /// Request timeout
-    #[error("timeout after {0:?}")]
-    Timeout(std::time::Duration),
-
     /// Other errors
     #[error("llm error: {0}")]
     Other(#[source] Box<dyn std::error::Error + Send + Sync>),

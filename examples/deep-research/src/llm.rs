@@ -4,6 +4,9 @@ use juncture::llm::{
     ChatOpenAI, CircuitBreaker, CircuitBreakerConfig, LoggingMiddleware, MiddlewareModel,
 };
 
+/// Recovery timeout for the circuit breaker (60 seconds).
+const RECOVERY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1).saturating_mul(60);
+
 /// Build a `ChatOpenAI` model with middleware chain.
 ///
 /// This wraps the base model with:
@@ -46,7 +49,7 @@ pub fn build_model_with_middleware(
     // Allows 1 test call in half-open state
     let circuit_breaker = CircuitBreaker::new(CircuitBreakerConfig {
         failure_threshold: 3,
-        recovery_timeout: std::time::Duration::from_secs(60),
+        recovery_timeout: RECOVERY_TIMEOUT,
         half_open_max_calls: 1,
     });
 

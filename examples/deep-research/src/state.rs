@@ -6,6 +6,8 @@ use serde::{Deserialize, Serialize};
 
 /// A research finding from a sub-task.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+// Part of reference research state schema; may be used in extended workflows.
+#[allow(dead_code)]
 pub struct Finding {
     /// Sub-task identifier that produced this finding.
     pub sub_task: String,
@@ -19,6 +21,8 @@ pub struct Finding {
 
 /// A sub-task in the research plan.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+// Part of reference research state schema; may be used in extended workflows.
+#[allow(dead_code)]
 pub struct SubTask {
     /// Unique identifier for this sub-task.
     pub id: usize,
@@ -32,6 +36,8 @@ pub struct SubTask {
 
 /// Status of a sub-task in the research plan.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+// Part of reference research state schema; may be used in extended workflows.
+#[allow(dead_code)]
 pub enum TaskStatus {
     /// Task is pending execution.
     #[default]
@@ -44,6 +50,8 @@ pub enum TaskStatus {
 
 /// Research state tracking the multi-agent workflow.
 #[derive(State, Clone, Debug, Default, Serialize, Deserialize)]
+// Reference state schema for multi-agent research workflows.
+#[allow(dead_code)]
 pub struct ResearchState {
     /// Conversation history with append semantics.
     #[reducer(append)]

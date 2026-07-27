@@ -877,13 +877,11 @@ impl<S: State> ToolNode<S> {
                     )]));
                 }
             }
-            "boolean" => {
-                if !arguments.is_boolean() {
-                    return Err(ToolError::validation_failed(vec![format!(
-                        "Expected boolean arguments, got '{}'",
-                        Self::value_type_name(arguments)
-                    )]));
-                }
+            "boolean" if !arguments.is_boolean() => {
+                return Err(ToolError::validation_failed(vec![format!(
+                    "Expected boolean arguments, got '{}'",
+                    Self::value_type_name(arguments)
+                )]));
             }
             _ => {} // Unknown type, skip validation
         }

@@ -34,9 +34,10 @@ use crate::tools::ToolDefinition;
 ///
 /// Defines whether a tool can be executed without approval, requires human
 /// approval before execution, or is blocked entirely.
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
 pub enum Permission {
     /// Tool is always allowed without prompting
+    #[default]
     Allow,
 
     /// Tool requires user approval before execution (triggers interrupt)
@@ -44,12 +45,6 @@ pub enum Permission {
 
     /// Tool is blocked and cannot be executed
     Block,
-}
-
-impl Default for Permission {
-    fn default() -> Self {
-        Self::Allow
-    }
 }
 
 /// Permission configuration for a specific tool
@@ -428,51 +423,6 @@ impl PermissionGuard {
     }
 }
 
-/// Errors that can occur when checking tool permissions
-///
-/// These errors are returned when attempting to execute a tool that is
-/// blocked or requires approval.
-#[derive(Debug, thiserror::Error)]
-pub enum PermissionError {
-    /// Tool is blocked and cannot be executed
-    #[error("tool '{tool}' is blocked: {reason}")]
-    Blocked { tool: String, reason: String },
-
-    /// Tool requires user approval before execution
-    #[error("tool '{tool}' requires approval: {reason}")]
-    RequiresApproval { tool: String, reason: String },
-}
-
-impl PermissionError {
-    /// Creates a new blocked error
-    ///
-    /// # Arguments
-    ///
-    /// * `tool` - Name of the blocked tool
-    /// * `reason` - Reason why the tool is blocked
-    #[must_use]
-    pub fn blocked(tool: impl Into<String>, reason: impl Into<String>) -> Self {
-        Self::Blocked {
-            tool: tool.into(),
-            reason: reason.into(),
-        }
-    }
-
-    /// Creates a new requires approval error
-    ///
-    /// # Arguments
-    ///
-    /// * `tool` - Name of the tool requiring approval
-    /// * `reason` - Reason why approval is required
-    #[must_use]
-    pub fn requires_approval(tool: impl Into<String>, reason: impl Into<String>) -> Self {
-        Self::RequiresApproval {
-            tool: tool.into(),
-            reason: reason.into(),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -621,21 +571,6 @@ mod tests {
         assert!(results[1].requires_approval());
         assert!(results[2].is_blocked());
         assert!(results[3].is_allowed()); // uses default
-    }
-
-    // 11. test_permission_error_display
-    #[test]
-    fn test_permission_error_display() {
-        let blocked_err = PermissionError::blocked("system_shutdown", "Not allowed");
-        assert!(blocked_err.to_string().contains("system_shutdown"));
-        assert!(blocked_err.to_string().contains("blocked"));
-        assert!(blocked_err.to_string().contains("Not allowed"));
-
-        let approval_err =
-            PermissionError::requires_approval("file_delete", "Irreversible operation");
-        assert!(approval_err.to_string().contains("file_delete"));
-        assert!(approval_err.to_string().contains("requires approval"));
-        assert!(approval_err.to_string().contains("Irreversible operation"));
     }
 
     // 12. test_permission_config_with_reason

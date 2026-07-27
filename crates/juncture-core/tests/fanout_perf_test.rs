@@ -29,6 +29,10 @@ struct ChildState {
 }
 
 #[derive(State, Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[expect(
+    dead_code,
+    reason = "part of subgraph API contract, defined for graph type parameter"
+)]
 struct ChildInput {
     subject: String,
 }

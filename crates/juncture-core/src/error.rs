@@ -127,14 +127,6 @@ pub enum InvalidUpdateError {
 /// Describes timeout conditions during node execution.
 #[derive(Clone, Debug, thiserror::Error)]
 pub enum NodeTimeoutError {
-    /// Node execution exceeded the specified timeout duration
-    #[error("node '{node}' timed out after {timeout_ms}ms")]
-    Timeout {
-        /// Name of the node that timed out
-        node: String,
-        /// Timeout duration in milliseconds
-        timeout_ms: u64,
-    },
     /// Node execution exceeded its run timeout
     #[error("node '{node}' run timeout after {timeout}ms")]
     RunTimeout {
@@ -150,12 +142,6 @@ pub enum NodeTimeoutError {
         node: String,
         /// Timeout duration in milliseconds
         timeout: u64,
-    },
-    /// Node execution exceeded its deadline
-    #[error("node '{node}' deadline exceeded")]
-    DeadlineExceeded {
-        /// Name of the node that exceeded its deadline
-        node: String,
     },
 }
 
@@ -654,19 +640,20 @@ mod tests {
     #[test]
     fn node_timeout_error_display() {
         assert_eq!(
-            NodeTimeoutError::Timeout {
+            NodeTimeoutError::RunTimeout {
                 node: "my_node".to_string(),
-                timeout_ms: 5000
+                timeout: 5000
             }
             .to_string(),
-            "node 'my_node' timed out after 5000ms"
+            "node 'my_node' run timeout after 5000ms"
         );
         assert_eq!(
-            NodeTimeoutError::DeadlineExceeded {
-                node: "my_node".to_string()
+            NodeTimeoutError::IdleTimeout {
+                node: "my_node".to_string(),
+                timeout: 30000
             }
             .to_string(),
-            "node 'my_node' deadline exceeded"
+            "node 'my_node' idle timeout after 30000ms"
         );
     }
 

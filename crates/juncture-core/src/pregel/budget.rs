@@ -38,7 +38,7 @@ pub enum BudgetExceededAction {
     Interrupt,
 
     /// Custom handler that decides the action based on current usage
-    Custom(std::sync::Arc<dyn Fn(BudgetUsage) -> BudgetExceededAction + Send + Sync>),
+    Custom(std::sync::Arc<dyn Fn(BudgetUsage) -> Self + Send + Sync>),
 }
 
 impl std::fmt::Debug for BudgetExceededAction {

@@ -36,9 +36,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let step = state.step;
             async move {
                 // Add a large chunk of data each step
-                let new_data: Vec<String> = (0..1000)
-                    .map(|i| format!("item_{step}_{i}"))
-                    .collect();
+                let new_data: Vec<String> = (0..1000).map(|i| format!("item_{step}_{i}")).collect();
                 Ok(DataStateUpdate {
                     data: Some(new_data),
                     step: Some(step + 1),
@@ -49,9 +47,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     graph.add_node_simple(
         "finish",
-        NodeFnUpdate(|_state: &DataState| async move {
-            Ok(DataStateUpdate::default())
-        }),
+        NodeFnUpdate(|_state: &DataState| async move { Ok(DataStateUpdate::default()) }),
     )?;
 
     graph.add_edge("add_data", "add_data");

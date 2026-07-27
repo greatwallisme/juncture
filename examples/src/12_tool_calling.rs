@@ -60,7 +60,7 @@ impl Tool for CalculatorTool {
 /// Does not use `eval` or external crates -- limited to flat `term op term` patterns.
 fn evaluate_expression(expr: &str) -> Result<f64, ToolError> {
     let tokens: Vec<&str> = expr.split_whitespace().collect();
-    if tokens.len() < 3 || tokens.len() % 2 == 0 {
+    if tokens.len() < 3 || tokens.len().is_multiple_of(2) {
         return Err(ToolError::InvalidInput(
             "Expression must be in the form: number op number [op number ...]".to_string(),
         ));

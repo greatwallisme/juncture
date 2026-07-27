@@ -535,11 +535,7 @@ impl MetricsMiddleware {
         let error_count = self.error_count.load(Ordering::Relaxed);
         let total_duration_ms = self.total_duration_ms.load(Ordering::Relaxed);
 
-        let avg_duration_ms = if invoke_count > 0 {
-            total_duration_ms / invoke_count
-        } else {
-            0
-        };
+        let avg_duration_ms = total_duration_ms.checked_div(invoke_count).unwrap_or(0);
 
         LlmMetrics {
             invoke_count,

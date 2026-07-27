@@ -405,6 +405,22 @@ impl<S: State> std::fmt::Debug for NodeError<S> {
     }
 }
 
+impl<S: State> std::fmt::Display for NodeError<S> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Node '{}' failed on attempt {}: {}",
+            self.node, self.attempt, self.error
+        )
+    }
+}
+
+impl<S: State> std::error::Error for NodeError<S> {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.error.source()
+    }
+}
+
 /// Node wrapper that adds error recovery handling
 ///
 /// Wraps an inner node and invokes the error handler when the inner

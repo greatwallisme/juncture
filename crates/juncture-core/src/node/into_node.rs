@@ -959,8 +959,8 @@ mod tests {
         type FieldVersions = FieldVersions;
 
         fn apply(&mut self, update: Self::Update) -> FieldsChanged {
-            if update.value.is_some() {
-                self.value = update.value.unwrap();
+            if let Some(val) = update.value {
+                self.value = val;
                 FieldsChanged(1u64) // Field 0 changed
             } else {
                 FieldsChanged(0)

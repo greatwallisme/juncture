@@ -175,7 +175,7 @@ pub fn recover_from_deltas(
                 .or_insert(serde_json::Value::Array(vec![]));
 
             if let Some(arr) = entry.as_array_mut() {
-                arr.extend(values.clone().into_iter());
+                arr.extend(values.clone());
             }
         } else {
             // Non-array values use Replace semantics

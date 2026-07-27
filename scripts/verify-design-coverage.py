@@ -291,8 +291,8 @@ def main() -> int:
     parser.add_argument(
         "--src-dir",
         type=Path,
-        default=Path("src"),
-        help="Rust source directory (default: src)",
+        default=Path("crates"),
+        help="Rust source directory (default: crates)",
     )
     parser.add_argument(
         "--checklists-dir",
