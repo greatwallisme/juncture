@@ -462,8 +462,13 @@ fn generate_apply_arms(
 /// Generate `try_apply()` match arms for each field.
 ///
 /// Identical to `apply()` logic but returns `Result<FieldsChanged, InvalidUpdateError>`.
-/// Replace fields return `InvalidUpdateError::MultipleOverwrite` if a second write
-/// is detected within the same superstep; all other reducer types always succeed.
+///
+/// Note: these arms never return `Err` — multi-writer detection for replace
+/// fields happens at the Pregel engine level via `check_replace_conflicts()`
+/// (which inspects all task outputs and rejects the whole superstep before
+/// `apply_writes` runs). `try_apply` therefore always succeeds for derived
+/// states; the `Result` is retained for hand-implemented `State` types that
+/// may enforce their own reducer constraints.
 fn generate_try_apply_arms(
     field_names: &[Ident],
     field_reducers: &[ReducerType],
