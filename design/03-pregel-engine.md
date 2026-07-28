@@ -156,8 +156,8 @@ pub struct PregelLoop<S: State> {
     /// 预算追踪器
     budget_tracker: BudgetTracker,
     
-    /// Stream 事件发送端
-    stream_tx: Option<mpsc::UnboundedSender<StreamEvent<S>>>,
+    /// Stream 事件发送端（有界，见 05-streaming §3.4）
+    stream_tx: Option<mpsc::Sender<StreamEvent<S>>>,
     
     /// 当前 superstep 待执行的节点
     pending_tasks: Vec<PendingTask<S>>,
@@ -233,8 +233,10 @@ pub struct PregelLoop<S: State> {
     pub cancellation_token: CancellationToken,
     /// 预算追踪器
     pub budget_tracker: BudgetTracker,
-    /// Stream 事件发送端
-    pub stream_tx: Option<mpsc::UnboundedSender<StreamEvent<S>>>,
+    /// Stream 事件发送端（有界通道，容量与背压策略见 `05-streaming.md` §3.4：
+    /// Messages/Debug=256、其他=32；满时 `send().await` 阻塞发送方形成背压，
+    /// 避免慢消费者导致无界缓冲 OOM。消费者 drop receiver 时 send 返回 SendError。）
+    pub stream_tx: Option<mpsc::Sender<StreamEvent<S>>>,
     /// 当前 superstep 编号
     pub step: usize,
     /// 循环状态
@@ -655,7 +657,7 @@ pub async fn execute_superstep<S: State>(
     config: &RunnableConfig,
     cancellation_token: &CancellationToken,
     checkpointer: &Arc<dyn CheckpointSaver>,
-    stream_tx: &Option<mpsc::UnboundedSender<StreamEvent<S>>>,
+    stream_tx: &Option<mpsc::Sender<StreamEvent<S>>>,
     /// 有界并发控制：使用 Semaphore 限制并行任务数量。
     /// 防止大量 Send 目标或大型图中节点过多导致系统资源耗尽。
     /// Semaphore::new(permits) 创建许可池，task spawn 前获取许可，
