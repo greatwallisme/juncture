@@ -144,8 +144,10 @@ pub struct PregelLoop<S: State> {
     /// Cancellation token
     pub cancellation_token: CancellationToken,
 
-    /// Optional stream event sender
-    pub stream_tx: Option<mpsc::UnboundedSender<StreamEvent<S>>>,
+    /// Optional stream event sender (bounded `mpsc::Sender`; capacity/backpressure
+    /// per `design/05-streaming.md` §3.4 — `send().await` blocks when full to
+    /// avoid unbounded-buffer OOM under a slow consumer).
+    pub stream_tx: Option<mpsc::Sender<StreamEvent<S>>>,
 
     /// Optional checkpoint saver for crash recovery
     pub checkpointer: Option<Arc<dyn crate::checkpoint::CheckpointSaver>>,
@@ -444,10 +446,10 @@ impl<S: State> PregelLoop<S> {
     /// ```ignore
     /// use tokio::sync::mpsc;
     ///
-    /// let (tx, _rx) = mpsc::unbounded_channel();
+    /// let (tx, _rx) = mpsc::channel(32);
     /// loop.set_stream_sender(tx);
     /// ```
-    pub fn set_stream_sender(&mut self, tx: mpsc::UnboundedSender<StreamEvent<S>>) {
+    pub fn set_stream_sender(&mut self, tx: mpsc::Sender<StreamEvent<S>>) {
         self.stream_tx = Some(tx);
     }
 
@@ -1008,14 +1010,16 @@ impl<S: State> PregelLoop<S> {
 
         // Emit SuperstepStart debug event if streaming is configured
         if let Some(ref tx) = self.stream_tx {
-            let _ = tx.send(StreamEvent::Debug(DebugEvent::SuperstepStart {
-                step: self.step,
-                pending_nodes: node_names
-                    .iter()
-                    .copied()
-                    .map(std::string::ToString::to_string)
-                    .collect(),
-            }));
+            let _ = tx
+                .send(StreamEvent::Debug(DebugEvent::SuperstepStart {
+                    step: self.step,
+                    pending_nodes: node_names
+                        .iter()
+                        .copied()
+                        .map(std::string::ToString::to_string)
+                        .collect(),
+                }))
+                .await;
         }
 
         // Emit superstep tasks counter metric
@@ -1259,7 +1263,7 @@ impl<S: State> PregelLoop<S> {
                     task_id: task_output.task_id.clone(),
                     step: self.step,
                 };
-                let _ = tx.send(start_event);
+                let _ = tx.send(start_event).await;
 
                 // Emit TaskEnd event
                 let end_event = StreamEvent::TaskEnd {
@@ -1269,7 +1273,7 @@ impl<S: State> PregelLoop<S> {
                     duration_ms: u64::try_from(task_output.duration.as_millis())
                         .unwrap_or(u64::MAX),
                 };
-                let _ = tx.send(end_event);
+                let _ = tx.send(end_event).await;
 
                 // Emit custom stream events from the command's stream_data.
                 // Each entry in stream_data produces one StreamEvent::Custom
@@ -1280,7 +1284,7 @@ impl<S: State> PregelLoop<S> {
                         data: data.clone(),
                         ns: Vec::new(),
                     };
-                    let _ = tx.send(custom_event);
+                    let _ = tx.send(custom_event).await;
                 }
 
                 // Emit Updates event if the task produced an update
@@ -1290,7 +1294,7 @@ impl<S: State> PregelLoop<S> {
                         update: update.clone(),
                         step: self.step,
                     };
-                    let _ = tx.send(updates_event);
+                    let _ = tx.send(updates_event).await;
                 }
             }
 
@@ -1299,7 +1303,7 @@ impl<S: State> PregelLoop<S> {
                 state: self.state.clone(),
                 step: self.step,
             };
-            let _ = tx.send(values_event);
+            let _ = tx.send(values_event).await;
 
             // Emit SuperstepEnd debug event with duration
             if let Some(superstep_start) = self.superstep_start {
@@ -1309,7 +1313,7 @@ impl<S: State> PregelLoop<S> {
                     step: self.step,
                     duration_ms,
                 });
-                let _ = tx.send(end_event);
+                let _ = tx.send(end_event).await;
             }
         }
 
@@ -1394,7 +1398,7 @@ impl<S: State> PregelLoop<S> {
                     to: node_name.clone(),
                     edge_type: "conditional".to_string(),
                 });
-                let _ = tx.send(edge_event);
+                let _ = tx.send(edge_event).await;
             }
         }
 
@@ -1425,7 +1429,7 @@ impl<S: State> PregelLoop<S> {
             self.status = LoopStatus::InterruptAfter(node_interrupts.clone());
 
             // Emit interrupt events to stream (hidden nodes filtered)
-            self.emit_interrupt_events(&node_interrupts);
+            self.emit_interrupt_events(&node_interrupts).await;
 
             // Save checkpoint with Interrupt source for HITL recovery
             let node = self.interrupt_node_name().to_string();
@@ -1437,7 +1441,7 @@ impl<S: State> PregelLoop<S> {
         }
 
         // Handle BubbleUp events from subgraph execution.
-        if result.has_bubble_ups() && self.handle_bubble_ups(&result.bubble_ups) {
+        if result.has_bubble_ups() && self.handle_bubble_ups(&result.bubble_ups).await {
             // Save checkpoint with Interrupt source if a BubbleUp interrupt was
             // the reason for stopping.
             if self.status.is_interrupted() {
@@ -1475,7 +1479,7 @@ impl<S: State> PregelLoop<S> {
                 self.status = LoopStatus::InterruptAfter(signals.clone());
 
                 // Emit interrupt events to stream (hidden nodes filtered)
-                self.emit_interrupt_events(&signals);
+                self.emit_interrupt_events(&signals).await;
 
                 // Save checkpoint with Interrupt source for HITL recovery
                 let node = self.interrupt_node_name().to_string();
@@ -1517,13 +1521,13 @@ impl<S: State> PregelLoop<S> {
     ///
     /// Returns `true` if the parent loop should stop (interrupt or drain occurred),
     /// `false` if execution should continue.
-    fn handle_bubble_ups(&mut self, bubble_ups: &[BubbleUp<S>]) -> bool {
+    async fn handle_bubble_ups(&mut self, bubble_ups: &[BubbleUp<S>]) -> bool {
         let mut should_stop = false;
 
         for bubble_up in bubble_ups {
             match bubble_up {
                 BubbleUp::Interrupt(graph_interrupt) => {
-                    self.handle_bubble_up_interrupt(graph_interrupt);
+                    self.handle_bubble_up_interrupt(graph_interrupt).await;
                     should_stop = true;
                 }
                 BubbleUp::Drained(drained) => {
@@ -1540,7 +1544,7 @@ impl<S: State> PregelLoop<S> {
     }
 
     /// Handle a subgraph interrupt bubbling up to the parent graph
-    fn handle_bubble_up_interrupt(
+    async fn handle_bubble_up_interrupt(
         &mut self,
         graph_interrupt: &crate::pregel::types::GraphInterrupt,
     ) {
@@ -1562,7 +1566,8 @@ impl<S: State> PregelLoop<S> {
         self.emit_interrupt_events_with_namespace(
             &graph_interrupt.interrupts,
             &graph_interrupt.namespace,
-        );
+        )
+        .await;
     }
 
     /// Handle a subgraph drain bubbling up to the parent graph
@@ -1863,7 +1868,8 @@ impl<S: State> PregelLoop<S> {
                                 cp_id_for_event,
                                 metadata_for_event,
                                 step,
-                            );
+                            )
+                            .await;
                         }
                         Err(err) => {
                             tracing::warn!(
@@ -1907,7 +1913,8 @@ impl<S: State> PregelLoop<S> {
                                 cp_id.clone(),
                                 metadata_for_event,
                                 self.step,
-                            );
+                            )
+                            .await;
                         }
                     }
                     Err(err) => {
@@ -2063,7 +2070,8 @@ impl<S: State> PregelLoop<S> {
                                 cp_id_for_event,
                                 metadata_for_event,
                                 step,
-                            );
+                            )
+                            .await;
                         }
                         Err(err) => {
                             tracing::warn!(
@@ -2110,7 +2118,8 @@ impl<S: State> PregelLoop<S> {
                                 cp_id.clone(),
                                 metadata_for_event,
                                 self.step,
-                            );
+                            )
+                            .await;
                         }
                     }
                     Err(err) => {
@@ -2194,8 +2203,9 @@ impl<S: State> PregelLoop<S> {
     ///
     /// Hidden nodes represent internal infrastructure (routing, error handling)
     /// that should never surface to external stream consumers.
-    fn emit_interrupt_events(&self, signals: &[crate::interrupt::InterruptSignal]) {
-        self.emit_interrupt_events_with_namespace(signals, &self.current_ns());
+    async fn emit_interrupt_events(&self, signals: &[crate::interrupt::InterruptSignal]) {
+        self.emit_interrupt_events_with_namespace(signals, &self.current_ns())
+            .await;
     }
 
     /// Emit interrupt stream events with the specified namespace, filtering out
@@ -2208,7 +2218,7 @@ impl<S: State> PregelLoop<S> {
     ///
     /// * `signals` - Interrupt signals to emit
     /// * `namespace` - Namespace to use for the events (typically from a subgraph)
-    fn emit_interrupt_events_with_namespace(
+    async fn emit_interrupt_events_with_namespace(
         &self,
         signals: &[crate::interrupt::InterruptSignal],
         namespace: &[String],
@@ -2237,7 +2247,7 @@ impl<S: State> PregelLoop<S> {
                 resumable: true,
                 ns: namespace.to_vec(),
             };
-            let _ = tx.send(event);
+            let _ = tx.send(event).await;
         }
     }
 
@@ -2449,7 +2459,8 @@ impl<S: State> PregelLoop<S> {
                         cp_id.clone(),
                         metadata_for_event,
                         self.step,
-                    );
+                    )
+                    .await;
                 }
             }
             Err(err) => {
@@ -2601,18 +2612,23 @@ impl<S: State> PregelLoop<S> {
 
     /// Emit `CheckpointSaved` event to stream if a stream sender is configured.
     #[inline]
-    fn emit_checkpoint_saved_event(
-        stream_tx: Option<&mpsc::UnboundedSender<StreamEvent<S>>>,
+    async fn emit_checkpoint_saved_event(
+        stream_tx: Option<&mpsc::Sender<StreamEvent<S>>>,
         checkpoint_id: String,
         metadata: CheckpointMetadata,
         step: usize,
     ) {
         if let Some(tx) = stream_tx {
-            let _ = tx.send(StreamEvent::CheckpointSaved {
-                checkpoint_id,
-                metadata,
-                step,
-            });
+            // Bounded send: backpressure when the stream consumer is slow; the
+            // `let _ =` swallows SendError if the receiver was dropped (consumer
+            // disconnected — design 05-streaming §3.4: engine continues).
+            let _ = tx
+                .send(StreamEvent::CheckpointSaved {
+                    checkpoint_id,
+                    metadata,
+                    step,
+                })
+                .await;
         }
     }
 }
@@ -2699,8 +2715,8 @@ mod tests {
         assert!(!rc.is_drain_requested());
     }
 
-    #[test]
-    fn test_handle_bubble_up_interrupt_sets_status() {
+    #[tokio::test]
+    async fn test_handle_bubble_up_interrupt_sets_status() {
         let state = TestState;
         let mut nodes = IndexMap::new();
         nodes.insert(
@@ -2734,7 +2750,7 @@ mod tests {
             namespace: vec![],
         })];
 
-        let should_stop = loop_.handle_bubble_ups(&bubble_ups);
+        let should_stop = loop_.handle_bubble_ups(&bubble_ups).await;
 
         assert!(should_stop);
         assert!(loop_.status.is_interrupted());
@@ -2742,8 +2758,8 @@ mod tests {
         assert_eq!(loop_.pending_interrupts[0].id.as_deref(), Some("sub-int-0"));
     }
 
-    #[test]
-    fn test_handle_bubble_up_drained_sets_status() {
+    #[tokio::test]
+    async fn test_handle_bubble_up_drained_sets_status() {
         let state = TestState;
         let mut nodes = IndexMap::new();
         nodes.insert(
@@ -2769,15 +2785,15 @@ mod tests {
             reason: "subgraph completed".to_string(),
         })];
 
-        let should_stop = loop_.handle_bubble_ups(&bubble_ups);
+        let should_stop = loop_.handle_bubble_ups(&bubble_ups).await;
 
         assert!(should_stop);
         assert!(loop_.status.is_terminal());
         assert!(matches!(loop_.status, LoopStatus::Drained));
     }
 
-    #[test]
-    fn test_handle_bubble_up_parent_command_does_not_stop() {
+    #[tokio::test]
+    async fn test_handle_bubble_up_parent_command_does_not_stop() {
         let state = TestState;
         let mut nodes = IndexMap::new();
         nodes.insert(
@@ -2806,14 +2822,14 @@ mod tests {
         );
         let bubble_ups = vec![BubbleUp::ParentCommand(parent_cmd)];
 
-        let should_stop = loop_.handle_bubble_ups(&bubble_ups);
+        let should_stop = loop_.handle_bubble_ups(&bubble_ups).await;
 
         assert!(!should_stop);
         assert!(loop_.status.is_running());
     }
 
-    #[test]
-    fn test_handle_bubble_up_empty_does_nothing() {
+    #[tokio::test]
+    async fn test_handle_bubble_up_empty_does_nothing() {
         let state = TestState;
         let mut nodes = IndexMap::new();
         nodes.insert(
@@ -2835,14 +2851,14 @@ mod tests {
 
         let mut loop_ = PregelLoop::new(state, nodes, trigger_table, config, 0).unwrap();
 
-        let should_stop = loop_.handle_bubble_ups(&[]);
+        let should_stop = loop_.handle_bubble_ups(&[]).await;
 
         assert!(!should_stop);
         assert!(loop_.status.is_running());
     }
 
-    #[test]
-    fn test_handle_bubble_up_interrupt_takes_priority_over_drain() {
+    #[tokio::test]
+    async fn test_handle_bubble_up_interrupt_takes_priority_over_drain() {
         let state = TestState;
         let mut nodes = IndexMap::new();
         nodes.insert(
@@ -2880,7 +2896,7 @@ mod tests {
             }),
         ];
 
-        let should_stop = loop_.handle_bubble_ups(&bubble_ups);
+        let should_stop = loop_.handle_bubble_ups(&bubble_ups).await;
 
         assert!(should_stop);
         // Interrupt is processed last, so status reflects the interrupt
@@ -3896,8 +3912,8 @@ mod tests {
 
     /// Verify that a bubble-up interrupt emitted to the stream carries the
     /// namespace from the execution context (fix for B-06-003).
-    #[test]
-    fn test_bubble_up_interrupt_emits_ns_from_checkpoint_ns() {
+    #[tokio::test]
+    async fn test_bubble_up_interrupt_emits_ns_from_checkpoint_ns() {
         let state = TestState;
         let mut nodes = IndexMap::new();
         nodes.insert(
@@ -3926,7 +3942,7 @@ mod tests {
         let mut loop_ = PregelLoop::new(state, nodes, trigger_table, config, 0).unwrap();
 
         // Attach a stream receiver to capture emitted events
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = mpsc::channel(32);
         loop_.stream_tx = Some(tx);
 
         let signals = vec![crate::interrupt::InterruptSignal {
@@ -3941,7 +3957,7 @@ mod tests {
             namespace: vec!["review".to_string()],
         })];
 
-        let _ = loop_.handle_bubble_ups(&bubble_ups);
+        let _ = loop_.handle_bubble_ups(&bubble_ups).await;
 
         // The emitted event should carry the checkpoint namespace
         let event = rx
@@ -3959,8 +3975,8 @@ mod tests {
 
     /// Verify that hidden nodes (names starting/ending with `__`) are filtered
     /// from bubble-up interrupt stream events.
-    #[test]
-    fn test_hidden_node_filtered_from_bubble_up_interrupt_stream() {
+    #[tokio::test]
+    async fn test_hidden_node_filtered_from_bubble_up_interrupt_stream() {
         let state = TestState;
         let mut nodes = IndexMap::new();
         nodes.insert(
@@ -3982,7 +3998,7 @@ mod tests {
 
         let mut loop_ = PregelLoop::new(state, nodes, trigger_table, config, 0).unwrap();
 
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = mpsc::channel(32);
         loop_.stream_tx = Some(tx);
 
         // Mix of visible and hidden node signals
@@ -4012,7 +4028,7 @@ mod tests {
             namespace: vec![],
         })];
 
-        let _ = loop_.handle_bubble_ups(&bubble_ups);
+        let _ = loop_.handle_bubble_ups(&bubble_ups).await;
 
         // Should receive exactly 2 events (agent and review), __route__ filtered
         let mut received_nodes = Vec::new();
@@ -4030,8 +4046,8 @@ mod tests {
     }
 
     /// Verify that all-hidden-node signals produce zero stream events.
-    #[test]
-    fn test_all_hidden_nodes_produce_no_stream_events() {
+    #[tokio::test]
+    async fn test_all_hidden_nodes_produce_no_stream_events() {
         let state = TestState;
         let mut nodes = IndexMap::new();
         nodes.insert(
@@ -4053,7 +4069,7 @@ mod tests {
 
         let mut loop_ = PregelLoop::new(state, nodes, trigger_table, config, 0).unwrap();
 
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = mpsc::channel(32);
         loop_.stream_tx = Some(tx);
 
         let signals = vec![
@@ -4076,7 +4092,7 @@ mod tests {
             namespace: vec![],
         })];
 
-        let _ = loop_.handle_bubble_ups(&bubble_ups);
+        let _ = loop_.handle_bubble_ups(&bubble_ups).await;
 
         // No events should be emitted
         assert!(
@@ -4511,7 +4527,7 @@ mod tests {
 
         let mut loop_ = PregelLoop::new(state, nodes, trigger_table, config, 0).unwrap();
 
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = mpsc::channel(32);
         loop_.stream_tx = Some(tx);
 
         // Build a SuperstepResult with a task output that has stream_data
@@ -4558,7 +4574,7 @@ mod tests {
 
         let mut loop_ = PregelLoop::new(state, nodes, trigger_table, config, 0).unwrap();
 
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = mpsc::channel(32);
         loop_.stream_tx = Some(tx);
 
         // Build a SuperstepResult with a task output that has NO stream_data
@@ -4597,7 +4613,7 @@ mod tests {
 
         let mut loop_ = PregelLoop::new(state, nodes, trigger_table, config, 0).unwrap();
 
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = mpsc::channel(32);
         loop_.stream_tx = Some(tx);
 
         // Build a SuperstepResult with two task outputs, one with stream_data

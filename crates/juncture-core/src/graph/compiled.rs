@@ -735,11 +735,13 @@ impl<S: State, I: IntoState<S>, O: FromState<S>> CompiledGraph<S, I, O> {
         let run_id = pregel.run_id().to_string();
         let recursion_limit = pregel.runnable_config.recursion_limit;
 
-        // Create a separate channel for PregelLoop's internal stream events.
-        // Unbounded is acceptable here because this is an internal relay between
-        // PregelLoop (sync send) and the forwarding task; the output channel
-        // above provides the actual backpressure.
-        let (pregel_tx, mut pregel_rx) = mpsc::unbounded_channel();
+        // Bounded internal relay channel for PregelLoop's stream events. Bounded
+        // (NOT unbounded) so backpressure propagates end-to-end: when the output
+        // channel fills, the forwarder blocks -> this channel fills -> PregelLoop's
+        // `send().await` blocks, preventing unbounded buffering/OOM under a slow
+        // consumer (audit M-3; design 05-streaming §3.4). An unbounded relay would
+        // grow without limit while the forwarder is blocked on the full output.
+        let (pregel_tx, mut pregel_rx) = mpsc::channel(capacity);
         pregel.set_stream_sender(pregel_tx);
 
         // Spawn graph execution in background task
@@ -997,8 +999,9 @@ impl<S: State, I: IntoState<S>, O: FromState<S>> CompiledGraph<S, I, O> {
         let run_id = pregel.run_id().to_string();
         let recursion_limit = pregel.runnable_config.recursion_limit;
 
-        // Create a separate channel for PregelLoop's internal stream events
-        let (pregel_tx, mut pregel_rx) = mpsc::unbounded_channel();
+        // Bounded internal relay (see stream()); backpressure propagates to
+        // PregelLoop via send().await (audit M-3; design 05-streaming §3.4).
+        let (pregel_tx, mut pregel_rx) = mpsc::channel(stream_capacity(&mode));
         pregel.set_stream_sender(pregel_tx);
 
         // Spawn task to forward PregelLoop events through the emitter
@@ -1426,11 +1429,9 @@ impl<S: State, I: IntoState<S>, O: FromState<S>> CompiledGraph<S, I, O> {
             .unwrap_or_else(|| "unnamed".to_string());
         let recursion_limit = pregel.runnable_config.recursion_limit;
 
-        // Create a separate channel for PregelLoop's internal stream events.
-        // Unbounded is acceptable here because this is an internal relay between
-        // PregelLoop (sync send) and the forwarding task; the output channel
-        // above provides the actual backpressure.
-        let (pregel_tx, mut pregel_rx) = mpsc::unbounded_channel();
+        // Bounded internal relay (see stream()); backpressure propagates to
+        // PregelLoop via send().await (audit M-3; design 05-streaming §3.4).
+        let (pregel_tx, mut pregel_rx) = mpsc::channel(capacity);
         pregel.set_stream_sender(pregel_tx);
 
         let handle = tokio::spawn(
