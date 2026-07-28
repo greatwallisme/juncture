@@ -43,13 +43,21 @@ const CHANNEL_CAPACITY_DEFAULT: usize = 32;
 
 /// Determine the channel capacity based on the stream mode.
 ///
-/// Returns [`CHANNEL_CAPACITY_MESSAGES`] (256) for Messages mode and
-/// [`CHANNEL_CAPACITY_DEFAULT`] (32) for all other modes. Multi mode uses
-/// the larger capacity if any sub-mode is Messages.
+/// Returns [`CHANNEL_CAPACITY_MESSAGES`] (256) for Messages and Debug modes,
+/// and [`CHANNEL_CAPACITY_DEFAULT`] (32) for all other modes. Multi mode uses
+/// the larger capacity if any sub-mode is Messages or Debug. Per design
+/// `05-streaming` §3.4: `Messages | Debug => 256; _ => 32` -- Debug mode
+/// emits high-frequency internal events (NodeStart/NodeEnd/ChannelWrite/...)
+/// so it needs the same larger buffer as Messages mode to avoid backpressure
+/// stalls distorting the observed execution timeline.
 fn stream_capacity(mode: &StreamMode) -> usize {
     match mode {
-        StreamMode::Messages => CHANNEL_CAPACITY_MESSAGES,
-        StreamMode::Multi(modes) if modes.iter().any(|m| matches!(m, StreamMode::Messages)) => {
+        StreamMode::Messages | StreamMode::Debug => CHANNEL_CAPACITY_MESSAGES,
+        StreamMode::Multi(modes)
+            if modes
+                .iter()
+                .any(|m| matches!(m, StreamMode::Messages | StreamMode::Debug)) =>
+        {
             CHANNEL_CAPACITY_MESSAGES
         }
         _ => CHANNEL_CAPACITY_DEFAULT,
@@ -170,11 +178,22 @@ impl<S: State, I: IntoState<S>, O: FromState<S>> CompiledGraph<S, I, O> {
                 interrupt_before,
                 interrupt_after,
                 subgraphs,
+                cache_policy: None,
                 active_invocations: std::sync::atomic::AtomicU64::new(0),
             }),
             _input: std::marker::PhantomData,
             _output: std::marker::PhantomData,
         }
+    }
+
+    /// Set the compile-time node-result cache policy (design `03-pregel-engine`
+    /// §13.3). Called by `compile_inner` with the `CompileConfig::cache_policy` so
+    /// a `TaskConfig::cache_policy` reaches the entrypoint's result cache.
+    pub(crate) fn with_cache_policy(mut self, policy: Option<crate::config::CachePolicy>) -> Self {
+        if let Some(inner) = Arc::get_mut(&mut self.inner) {
+            inner.cache_policy = policy;
+        }
+        self
     }
 
     /// Extract error handler map from builder metadata.
@@ -331,7 +350,7 @@ impl<S: State, I: IntoState<S>, O: FromState<S>> CompiledGraph<S, I, O> {
     where
         S: serde::de::DeserializeOwned + serde::Serialize,
         S::Update: serde::Serialize,
-        O: FromState<S>,
+        O: FromState<S> + serde::Serialize,
     {
         let effective = self.effective_config(config);
 
@@ -380,7 +399,7 @@ impl<S: State, I: IntoState<S>, O: FromState<S>> CompiledGraph<S, I, O> {
     where
         S: serde::de::DeserializeOwned + serde::Serialize,
         S::Update: serde::Serialize,
-        O: FromState<S>,
+        O: FromState<S> + serde::Serialize,
     {
         let effective = self.effective_config(config);
         self.invoke_async_inner(input, &effective).await
@@ -399,7 +418,7 @@ impl<S: State, I: IntoState<S>, O: FromState<S>> CompiledGraph<S, I, O> {
     where
         S: serde::de::DeserializeOwned + serde::Serialize,
         S::Update: serde::Serialize,
-        O: FromState<S>,
+        O: FromState<S> + serde::Serialize,
     {
         // Maximum number of fields supported (u64 bitmask in FieldsChanged)
         let num_fields = 64;
@@ -422,12 +441,63 @@ impl<S: State, I: IntoState<S>, O: FromState<S>> CompiledGraph<S, I, O> {
         // Convert input type I into state type S
         let state_input = input.into_state();
 
+        // Node-result cache check (design `03-pregel-engine` §13.3, audit B-012):
+        // entrypoint graphs compiled with a `TaskConfig::cache_policy` carry it on
+        // `inner.cache_policy`. Generate the key from the serialized input state +
+        // run config; a hit deserializes the cached result state and returns it
+        // without executing the graph. A miss proceeds and stores the fresh result
+        // state before returning (see below).
+        let cache_key_input_json = self
+            .inner
+            .cache_policy
+            .as_ref()
+            .and_then(|_| serde_json::to_value(&state_input).ok());
+        if let (Some(policy), Some(state_json)) = (
+            self.inner.cache_policy.as_ref(),
+            cache_key_input_json.as_ref(),
+        ) {
+            let key = policy.generate_key(state_json, config);
+            if let Some(cached_json) = policy.get(&key) {
+                let cached_state: S = serde_json::from_value(cached_json).map_err(|e| {
+                    JunctureError::execution(format!("node-result cache deserialize failed: {e}"))
+                })?;
+                let output = O::from_state(&cached_state);
+                return Ok(GraphOutput {
+                    value: cached_state,
+                    output,
+                    interrupts: Vec::new(),
+                    metadata: GraphOutputMetadata {
+                        steps: 0,
+                        run_id: config
+                            .run_id
+                            .clone()
+                            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+                        checkpoint_id: config.checkpoint_id.clone(),
+                        budget_usage: None,
+                    },
+                });
+            }
+        }
+
+        // Previous Result Injection (design `03-pregel-engine` §14): load the
+        // last run's return value from the latest checkpoint's `__return__`
+        // (metadata.return_value) into the run config so the runner can scope
+        // it as the `PREVIOUS` task-local and entrypoint nodes can access it
+        // via `func::Runtime::previous`. `None` on first execution and when no
+        // checkpointer is configured.
+        let mut run_config = config.clone();
+        if let Some(cp) = self.inner.checkpointer.as_ref() {
+            if let Ok(Some(tuple)) = cp.get_tuple(&run_config).await {
+                run_config.previous = tuple.metadata.return_value;
+            }
+        }
+
         // Create Pregel loop
         let mut pregel = PregelLoop::with_error_handlers(
             state_input,
             self.inner.nodes.clone(),
             self.inner.trigger_table.clone(),
-            config.clone(),
+            run_config,
             num_fields,
             error_handler_map,
         )?;
@@ -504,6 +574,10 @@ impl<S: State, I: IntoState<S>, O: FromState<S>> CompiledGraph<S, I, O> {
             // Extract step and run_id before consuming pregel
             let steps = pregel.step();
             let run_id = pregel.run_id().to_string();
+            // Capture the loop's runnable config before `into_state` consumes
+            // pregel; it carries the (possibly updated) checkpoint_id needed to
+            // persist the entrypoint return value below.
+            let loop_config = pregel.runnable_config.clone();
 
             // Return final state with extracted output
             let final_state = pregel.into_state();
@@ -522,6 +596,57 @@ impl<S: State, I: IntoState<S>, O: FromState<S>> CompiledGraph<S, I, O> {
             }
 
             execution_result?;
+
+            // Node-result cache store (design `03-pregel-engine` §13.3, audit B-012):
+            // persist the fresh result state so the next identical input hits the
+            // cache (checked at the top of this fn). Only on successful completion.
+            if let (Some(policy), Some(state_json)) = (
+                self.inner.cache_policy.as_ref(),
+                cache_key_input_json.as_ref(),
+            ) {
+                if let Ok(result_json) = serde_json::to_value(&final_state) {
+                    let key = policy.generate_key(state_json, config);
+                    policy.put(key, result_json);
+                }
+            }
+
+            // Previous Result Injection (design `03-pregel-engine` §14): persist
+            // this run's output as `__return__` (metadata.return_value) on the
+            // latest checkpoint so the next invocation can load it into
+            // `Runtime::previous` for accumulation / incremental patterns. Only
+            // on successful completion (an errored run has no usable return
+            // value). Best-effort: a failure here is logged, not fatal -- the
+            // run already succeeded and the primary state checkpoint landed;
+            // missing `__return__` only degrades the next run's `previous`.
+            if let Some(cp) = self.inner.checkpointer.as_ref() {
+                match serde_json::to_value(&output) {
+                    Ok(return_value) => {
+                        if let Ok(Some(tuple)) = cp.get_tuple(&loop_config).await {
+                            let updated_metadata = CheckpointMetadata {
+                                return_value: Some(return_value),
+                                ..tuple.metadata
+                            };
+                            if let Err(err) = cp
+                                .put(&loop_config, tuple.checkpoint, updated_metadata)
+                                .await
+                            {
+                                tracing::warn!(
+                                    name: "juncture.entrypoint.return_value.save_failed",
+                                    error = %err,
+                                    "Failed to persist entrypoint return value (__return__)"
+                                );
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        tracing::warn!(
+                            name: "juncture.entrypoint.return_value.serialize_failed",
+                            error = %err,
+                            "Failed to serialize entrypoint return value for __return__"
+                        );
+                    }
+                }
+            }
 
             Ok(GraphOutput {
                 value: final_state,
@@ -1133,6 +1258,21 @@ impl<S: State, I: IntoState<S>, O: FromState<S>> CompiledGraph<S, I, O> {
         // Deserialize state from checkpoint (applies schema migration if needed)
         let state = Self::deserialize_with_migration(&tuple.checkpoint)?;
 
+        // Fire on_resume lifecycle callbacks (design 09 §5.1, C-09-001) for
+        // each node being resumed, before the resume value is moved into the
+        // run config. The node name comes from the interrupt payload.
+        if let Some(ref handler) = config.callback_handler {
+            let resume_json = resume_value.to_json_value();
+            for signal in &tuple.checkpoint.pending_interrupts {
+                let node = signal
+                    .payload
+                    .get("node")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown");
+                handler.on_resume(node, &resume_json);
+            }
+        }
+
         // Merge compile-time defaults with runtime config, then add resume value
         let mut resume_config = self.effective_config(config);
         resume_config.resume_value = Some(resume_value);
@@ -1346,6 +1486,21 @@ impl<S: State, I: IntoState<S>, O: FromState<S>> CompiledGraph<S, I, O> {
 
         // Deserialize state from checkpoint (applies schema migration if needed)
         let state = Self::deserialize_with_migration(&tuple.checkpoint)?;
+
+        // Fire on_resume lifecycle callbacks (design 09 §5.1, C-09-001) for
+        // each node being resumed, before the resume value is moved into the
+        // run config. The node name comes from the interrupt payload.
+        if let Some(ref handler) = config.callback_handler {
+            let resume_json = resume_value.to_json_value();
+            for signal in &tuple.checkpoint.pending_interrupts {
+                let node = signal
+                    .payload
+                    .get("node")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown");
+                handler.on_resume(node, &resume_json);
+            }
+        }
 
         // Merge compile-time defaults with runtime config, then add resume value
         let mut resume_config = self.effective_config(config);
@@ -1573,28 +1728,54 @@ impl<S: State, I: IntoState<S>, O: FromState<S>> CompiledGraph<S, I, O> {
     ///
     /// # Errors
     ///
-    /// Returns `JunctureError::Checkpoint` if no checkpointer is configured
-    /// or if the history cannot be retrieved.
-    #[expect(
-        clippy::unused_async,
-        reason = "async API consistency for checkpoint operations"
-    )]
+    /// Returns `JunctureError::Checkpoint` if no checkpointer is configured,
+    /// the checkpointer `list` call fails, or any checkpoint in the history
+    /// cannot be deserialized into `S` (applies schema migration).
+    ///
+    /// # Notes
+    ///
+    /// Requires `S: DeserializeOwned` to hydrate each historical checkpoint's
+    /// channel values back into the state type. The checkpointer's `list`
+    /// already returns checkpoints newest-first; this method preserves that
+    /// ordering.
     pub async fn get_state_history(
         &self,
-        _config: &RunnableConfig,
+        config: &RunnableConfig,
         filter: Option<CheckpointFilter>,
-    ) -> Result<Vec<StateSnapshot<S>>, JunctureError> {
+    ) -> Result<Vec<StateSnapshot<S>>, JunctureError>
+    where
+        S: serde::de::DeserializeOwned,
+    {
         let checkpointer = self.inner.checkpointer.as_ref().ok_or_else(|| {
             JunctureError::checkpoint("no checkpointer configured for get_state_history")
         })?;
 
-        let _ = (checkpointer, filter);
+        let tuples = checkpointer
+            .list(config, filter)
+            .await
+            .map_err(|e| JunctureError::checkpoint(e.to_string()))?;
 
-        // Full implementation requires deserialization of checkpoint history,
-        // which will be completed in Phase 6 (checkpoint integration).
-        Err(JunctureError::checkpoint(
-            "get_state_history not yet implemented: requires checkpoint state recovery",
-        ))
+        let mut snapshots = Vec::with_capacity(tuples.len());
+        for tuple in tuples {
+            // Deserialize channel values into S (applies schema migration).
+            let values = Self::deserialize_with_migration(&tuple.checkpoint)?;
+            let next: Vec<String> = tuple
+                .checkpoint
+                .pending_tasks
+                .iter()
+                .map(|t| t.node.clone())
+                .collect();
+            snapshots.push(StateSnapshot {
+                values,
+                next,
+                config: tuple.config,
+                metadata: tuple.metadata,
+                created_at: tuple.checkpoint.created_at,
+                parent_config: tuple.parent_config,
+                tasks: vec![],
+            });
+        }
+        Ok(snapshots)
     }
 
     /// Manually update the state at a checkpoint
@@ -1681,40 +1862,98 @@ impl<S: State, I: IntoState<S>, O: FromState<S>> CompiledGraph<S, I, O> {
             .map_err(|e| JunctureError::checkpoint(e.to_string()))
     }
 
-    /// Bulk update state across multiple checkpoints
+    /// Bulk update state atomically in a single checkpoint
     ///
-    /// Applies multiple state updates atomically. If any update fails,
-    /// none of the updates are applied.
+    /// Applies multiple state updates in order against the current checkpoint
+    /// state, then persists a single new checkpoint reflecting all of them.
+    /// Per design `02-graph-builder` §`CompiledGraph` API: "批量更新状态（原子操作，
+    /// 创建单个 checkpoint）。所有 updates 按顺序应用，`as_node` 指定每个 `update`
+    /// 的来源节点。"
+    ///
+    /// # Atomicity
+    ///
+    /// All updates are applied to an in-memory copy of the state and only one
+    /// `put` is issued. If any step before the `put` fails (no checkpointer,
+    /// no checkpoint found, deserialization or serialization failure), the
+    /// method returns `Err` without saving, so no partial update is persisted.
+    /// A failure of the final `put` itself is surfaced as `Err`; the
+    /// checkpointer's own transactional semantics govern whether the write
+    /// landed.
     ///
     /// # Arguments
     ///
     /// * `config` - Configuration with `thread_id` set
-    /// * `updates` - List of state updates to apply
+    /// * `updates` - List of state updates to apply in order; each carries an
+    ///   `update` payload and an optional `as_node` writer recorded in
+    ///   metadata.writes.
     ///
     /// # Errors
     ///
-    /// Returns `JunctureError::Checkpoint` if no checkpointer is configured
-    /// or if any update cannot be applied.
-    #[expect(
-        clippy::unused_async,
-        reason = "async API consistency for checkpoint operations"
-    )]
+    /// Returns `JunctureError::Checkpoint` if no checkpointer is configured,
+    /// no checkpoint exists for the thread, state deserialization/serialization
+    /// fails, or the checkpoint cannot be saved.
     pub async fn bulk_update_state(
         &self,
-        _config: &RunnableConfig,
+        config: &RunnableConfig,
         updates: Vec<StateUpdate<S>>,
-    ) -> Result<Vec<RunnableConfig>, JunctureError> {
+    ) -> Result<RunnableConfig, JunctureError>
+    where
+        S: serde::de::DeserializeOwned + serde::Serialize,
+    {
         let checkpointer = self.inner.checkpointer.as_ref().ok_or_else(|| {
             JunctureError::checkpoint("no checkpointer configured for bulk_update_state")
         })?;
 
-        let _ = (checkpointer, updates);
+        // Load current checkpoint.
+        let tuple = checkpointer
+            .get_tuple(config)
+            .await
+            .map_err(|e| JunctureError::checkpoint(e.to_string()))?;
+        let Some(tuple) = tuple else {
+            return Err(JunctureError::checkpoint(
+                "no checkpoint found for bulk_update_state",
+            ));
+        };
 
-        // Full implementation requires atomic checkpoint state modification,
-        // which will be completed in Phase 6 (checkpoint integration).
-        Err(JunctureError::checkpoint(
-            "bulk_update_state not yet implemented: requires checkpoint state recovery",
-        ))
+        // Deserialize current state from checkpoint (applies schema migration).
+        let mut state = Self::deserialize_with_migration(&tuple.checkpoint)?;
+
+        // Apply all updates in order, recording each writer node. `State::apply`
+        // is infallible (returns FieldsChanged), so the in-memory accumulation
+        // cannot partially fail; atomicity is preserved by deferring the single
+        // `put` until after every update has been applied.
+        let mut writes = tuple.metadata.writes;
+        for upd in updates {
+            state.apply(upd.update);
+            if let Some(as_node) = upd.as_node {
+                writes.insert(as_node, serde_json::Value::Null);
+            }
+        }
+
+        // Re-serialize the accumulated state once.
+        let updated_values = serde_json::to_value(&state).map_err(|e| {
+            JunctureError::checkpoint(format!("failed to serialize bulk-updated state: {e}"))
+        })?;
+
+        // Build a single updated checkpoint with new channel values.
+        let updated_checkpoint = Checkpoint {
+            channel_values: updated_values,
+            ..tuple.checkpoint
+        };
+
+        // Source=Update, step incremented, writers merged from all updates.
+        let metadata = CheckpointMetadata {
+            source: CheckpointSource::Update,
+            step: tuple.metadata.step + 1,
+            writes,
+            ..tuple.metadata
+        };
+
+        // Persist the single combined checkpoint.
+        checkpointer
+            .put(config, updated_checkpoint, metadata)
+            .await
+            .map_err(|e| JunctureError::checkpoint(e.to_string()))
     }
 
     /// Get a drawable graph representation
@@ -1726,14 +1965,43 @@ impl<S: State, I: IntoState<S>, O: FromState<S>> CompiledGraph<S, I, O> {
     ///
     /// * `xray` - Optional depth for subgraph x-ray visualization.
     ///   `None` renders only the top-level graph; `Some(n)` expands
-    ///   subgraphs up to `n` levels deep.
+    ///   subgraphs up to `n` levels deep. Inner node/edge names are prefixed
+    ///   with `subgraph_name/` so nested structure is unambiguous.
     #[must_use]
     pub fn get_graph(&self, xray: Option<usize>) -> DrawableGraph {
-        let _ = xray;
+        let mut drawable = self.to_drawable();
 
-        // Currently ignores xray depth; subgraph expansion will be
-        // implemented when subgraph visualization is fully supported.
-        self.to_drawable()
+        let Some(depth) = xray else {
+            return drawable;
+        };
+        if depth == 0 {
+            return drawable;
+        }
+
+        // X-ray expansion: for each node that is a subgraph mount, merge its
+        // inner graph's drawable (expanded to depth-1) with namespaced names.
+        // Non-subgraph nodes return `None` from `drawable_subgraph` (Node
+        // trait default) and are skipped.
+        for (node_name, node) in &self.inner.nodes {
+            if let Some(sub_drawable) = node.drawable_subgraph(depth - 1) {
+                drawable
+                    .nodes
+                    .extend(sub_drawable.nodes.into_iter().map(|inner| DrawableNode {
+                        name: format!("{node_name}/{}", inner.name),
+                        metadata: inner.metadata,
+                    }));
+                drawable
+                    .edges
+                    .extend(sub_drawable.edges.into_iter().map(|inner| DrawableEdge {
+                        from: format!("{node_name}/{}", inner.from),
+                        to: format!("{node_name}/{}", inner.to),
+                        conditional: inner.conditional,
+                        label: inner.label,
+                    }));
+            }
+        }
+
+        drawable
     }
 
     /// Get information about subgraphs in this compiled graph
@@ -2190,6 +2458,10 @@ struct CompiledGraphInner<S: State> {
     /// Mounted subgraph metadata
     subgraphs: Vec<SubgraphInfo>,
 
+    /// Compile-time node-result cache policy (design `03-pregel-engine` §13.3),
+    /// checked by `invoke`/`invoke_async` to cache the entrypoint's result.
+    cache_policy: Option<crate::config::CachePolicy>,
+
     /// Active invocation count for gauge metric emission.
     ///
     /// Tracks the number of currently executing graph invocations across
@@ -2359,6 +2631,64 @@ mod tests {
             vec![],
         );
         assert_eq!(compiled.nodes().len(), 1);
+    }
+
+    /// `get_graph(xray)` expands mounted subgraphs to the requested depth,
+    /// prefixing inner node names with `subgraph_name/` (design 02 §`get_graph`).
+    #[test]
+    fn test_get_graph_xray_expands_subgraphs() {
+        // Inner graph: one node "inner_a".
+        let mut inner_nodes: IndexMap<String, Arc<dyn crate::Node<StateDummy>>> = IndexMap::new();
+        inner_nodes.insert("inner_a".to_string(), mock_node("inner_a"));
+        let inner: CompiledGraph<StateDummy> = CompiledGraph::new(
+            inner_nodes,
+            TriggerTable::new(),
+            IndexMap::new(),
+            vec![],
+            vec![],
+            None,
+            vec![],
+        );
+
+        // Outer graph: one subgraph node "sub" wrapping the inner graph.
+        let sub_node = crate::subgraph::SubgraphNode::new(
+            Arc::new(inner),
+            "sub".to_string(),
+            Arc::new(|_s: &StateDummy| StateDummy),
+            Arc::new(|_sub: &StateDummy| StateDummyUpdate),
+            crate::subgraph::SubgraphConfig {
+                persistence: crate::subgraph::SubgraphPersistence::Inherit,
+            },
+        );
+        let mut outer_nodes: IndexMap<String, Arc<dyn crate::Node<StateDummy>>> = IndexMap::new();
+        outer_nodes.insert("sub".to_string(), Arc::new(sub_node));
+        let outer: CompiledGraph<StateDummy> = CompiledGraph::new(
+            outer_nodes,
+            TriggerTable::new(),
+            IndexMap::new(),
+            vec![],
+            vec![],
+            None,
+            vec![],
+        );
+
+        // xray=None: only the top-level subgraph node.
+        let top = outer.get_graph(None);
+        assert_eq!(top.nodes.len(), 1);
+        assert_eq!(top.nodes[0].name, "sub");
+
+        // xray=Some(0): same as None (no expansion).
+        let depth0 = outer.get_graph(Some(0));
+        assert_eq!(depth0.nodes.len(), 1);
+
+        // xray=Some(1): subgraph expanded — "sub" + namespaced "sub/inner_a".
+        let expanded = outer.get_graph(Some(1));
+        assert!(expanded.nodes.iter().any(|n| n.name == "sub"));
+        assert!(
+            expanded.nodes.iter().any(|n| n.name == "sub/inner_a"),
+            "expected namespaced subgraph inner node, got {:?}",
+            expanded.nodes.iter().map(|n| &n.name).collect::<Vec<_>>()
+        );
     }
 
     #[test]
@@ -2607,6 +2937,7 @@ mod tests {
                         writes: HashMap::new(),
                         parents: HashMap::new(),
                         run_id: "test_run".to_string(),
+                        return_value: None,
                     },
                     pending_writes: Vec::new(),
                     parent_config: None,
@@ -2824,6 +3155,7 @@ mod tests {
                         writes: HashMap::new(),
                         parents: HashMap::new(),
                         run_id: "test_run".to_string(),
+                        return_value: None,
                     },
                     pending_writes: Vec::new(),
                     parent_config: None,
@@ -3123,6 +3455,7 @@ mod tests {
                         writes: HashMap::new(),
                         parents: HashMap::new(),
                         run_id: "run_abc".to_string(),
+                        return_value: None,
                     },
                     pending_writes: Vec::new(),
                     parent_config: None,
@@ -3233,6 +3566,274 @@ mod tests {
         let result = compiled.bulk_update_state(&config, updates).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().is_checkpoint());
+    }
+
+    /// `bulk_update_state` applies all updates in order and persists exactly
+    /// one checkpoint with `CheckpointSource::Update` and an incremented step
+    /// (design 02 §`CompiledGraph` API: atomic, single checkpoint).
+    #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "inline MockCheckpointer impl + two-update atomic assertion is necessarily long"
+    )]
+    async fn test_bulk_update_state_success_atomic_single_checkpoint() {
+        use crate::checkpoint::{
+            Checkpoint, CheckpointError, CheckpointMetadata, CheckpointSource, CheckpointTuple,
+        };
+        use std::collections::HashMap;
+        use std::sync::{Arc, Mutex};
+
+        #[derive(Clone)]
+        enum ObservedCall {
+            Put {
+                source: CheckpointSource,
+                step: i64,
+                writes: Vec<String>,
+            },
+        }
+
+        struct MockCheckpointer {
+            observed: Arc<Mutex<Vec<ObservedCall>>>,
+        }
+
+        #[async_trait::async_trait]
+        impl crate::checkpoint::CheckpointSaver for MockCheckpointer {
+            async fn get_tuple(
+                &self,
+                _config: &crate::config::RunnableConfig,
+            ) -> Result<Option<CheckpointTuple>, CheckpointError> {
+                Ok(Some(CheckpointTuple {
+                    config: crate::config::RunnableConfig::new(),
+                    checkpoint: Checkpoint {
+                        id: "cp_bulk".to_string(),
+                        channel_values: serde_json::Value::Null,
+                        channel_versions: HashMap::new(),
+                        versions_seen: HashMap::new(),
+                        pending_tasks: Vec::new(),
+                        pending_sends: Vec::new(),
+                        pending_interrupts: Vec::new(),
+                        schema_version: 1,
+                        created_at: "2024-01-01T00:00:00Z".to_string(),
+                        v: 1,
+                        new_versions: HashMap::new(),
+                        counters_since_delta_snapshot: HashMap::new(),
+                    },
+                    metadata: CheckpointMetadata {
+                        source: CheckpointSource::Loop,
+                        step: 5,
+                        writes: HashMap::new(),
+                        parents: HashMap::new(),
+                        run_id: "run_bulk".to_string(),
+                        return_value: None,
+                    },
+                    pending_writes: Vec::new(),
+                    parent_config: None,
+                }))
+            }
+
+            async fn list(
+                &self,
+                _config: &crate::config::RunnableConfig,
+                _filter: Option<crate::checkpoint::CheckpointFilter>,
+            ) -> Result<Vec<CheckpointTuple>, CheckpointError> {
+                Ok(Vec::new())
+            }
+
+            async fn put(
+                &self,
+                _config: &crate::config::RunnableConfig,
+                _checkpoint: Checkpoint,
+                metadata: CheckpointMetadata,
+            ) -> Result<crate::config::RunnableConfig, CheckpointError> {
+                self.observed
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(ObservedCall::Put {
+                        source: metadata.source.clone(),
+                        step: metadata.step,
+                        writes: metadata.writes.keys().cloned().collect(),
+                    });
+                Ok(crate::config::RunnableConfig::new())
+            }
+
+            async fn put_writes(
+                &self,
+                _config: &crate::config::RunnableConfig,
+                _writes: Vec<crate::checkpoint::PendingWrite>,
+                _task_id: &str,
+            ) -> Result<(), CheckpointError> {
+                Ok(())
+            }
+        }
+
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let nodes = {
+            let mut nodes: IndexMap<String, Arc<dyn crate::Node<StateDummy>>> = IndexMap::new();
+            nodes.insert("a".to_string(), mock_node("a"));
+            nodes
+        };
+        let compiled: CompiledGraph<StateDummy> = CompiledGraph::new(
+            nodes,
+            TriggerTable::new(),
+            IndexMap::new(),
+            vec![],
+            vec![],
+            Some(Arc::new(MockCheckpointer {
+                observed: Arc::clone(&observed),
+            })),
+            vec![],
+        );
+
+        let config = RunnableConfig::new();
+        // Two updates, each attributed to a distinct writer node.
+        let updates = vec![
+            StateUpdate {
+                update: StateDummyUpdate,
+                label: None,
+                as_node: Some("writer_a".to_string()),
+            },
+            StateUpdate {
+                update: StateDummyUpdate,
+                label: None,
+                as_node: Some("writer_b".to_string()),
+            },
+        ];
+
+        let result = compiled.bulk_update_state(&config, updates).await;
+        assert!(result.is_ok(), "bulk_update_state should succeed");
+
+        // Atomicity: exactly one checkpoint put, carrying both writers and an
+        // incremented step.
+        let calls = observed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_eq!(calls.len(), 1, "Expected exactly one put call (atomic)");
+        match &calls[0] {
+            ObservedCall::Put {
+                source,
+                step,
+                writes,
+            } => {
+                assert!(
+                    matches!(source, CheckpointSource::Update),
+                    "Expected Update source, got {source:?}"
+                );
+                assert_eq!(*step, 6, "Expected step incremented from 5 to 6");
+                assert!(
+                    writes.iter().any(|w| w == "writer_a"),
+                    "writer_a should be recorded in metadata.writes"
+                );
+                assert!(
+                    writes.iter().any(|w| w == "writer_b"),
+                    "writer_b should be recorded in metadata.writes"
+                );
+            }
+        }
+    }
+
+    /// `get_state_history` hydrates every checkpoint returned by the
+    /// checkpointer's `list` into a `StateSnapshot`, preserving order.
+    #[tokio::test]
+    async fn test_get_state_history_hydrates_checkpoints() {
+        use crate::checkpoint::{
+            Checkpoint, CheckpointError, CheckpointMetadata, CheckpointSource, CheckpointTuple,
+        };
+        use std::collections::HashMap;
+
+        struct HistoryCheckpointer {
+            tuples: Vec<CheckpointTuple>,
+        }
+
+        #[async_trait::async_trait]
+        impl crate::checkpoint::CheckpointSaver for HistoryCheckpointer {
+            async fn get_tuple(
+                &self,
+                _config: &crate::config::RunnableConfig,
+            ) -> Result<Option<CheckpointTuple>, CheckpointError> {
+                Ok(self.tuples.first().cloned())
+            }
+
+            async fn list(
+                &self,
+                _config: &crate::config::RunnableConfig,
+                _filter: Option<crate::checkpoint::CheckpointFilter>,
+            ) -> Result<Vec<CheckpointTuple>, CheckpointError> {
+                Ok(self.tuples.clone())
+            }
+
+            async fn put(
+                &self,
+                _config: &crate::config::RunnableConfig,
+                _checkpoint: Checkpoint,
+                _metadata: CheckpointMetadata,
+            ) -> Result<crate::config::RunnableConfig, CheckpointError> {
+                Ok(crate::config::RunnableConfig::new())
+            }
+
+            async fn put_writes(
+                &self,
+                _config: &crate::config::RunnableConfig,
+                _writes: Vec<crate::checkpoint::PendingWrite>,
+                _task_id: &str,
+            ) -> Result<(), CheckpointError> {
+                Ok(())
+            }
+        }
+
+        let make_tuple = |id: &str, step: i64| CheckpointTuple {
+            config: crate::config::RunnableConfig::new(),
+            checkpoint: Checkpoint {
+                id: id.to_string(),
+                channel_values: serde_json::Value::Null,
+                channel_versions: HashMap::new(),
+                versions_seen: HashMap::new(),
+                pending_tasks: Vec::new(),
+                pending_sends: Vec::new(),
+                pending_interrupts: Vec::new(),
+                schema_version: 1,
+                created_at: "2024-01-01T00:00:00Z".to_string(),
+                v: 1,
+                new_versions: HashMap::new(),
+                counters_since_delta_snapshot: HashMap::new(),
+            },
+            metadata: CheckpointMetadata {
+                source: CheckpointSource::Loop,
+                step,
+                writes: HashMap::new(),
+                parents: HashMap::new(),
+                run_id: "run_hist".to_string(),
+                return_value: None,
+            },
+            pending_writes: Vec::new(),
+            parent_config: None,
+        };
+
+        let nodes = {
+            let mut nodes: IndexMap<String, Arc<dyn crate::Node<StateDummy>>> = IndexMap::new();
+            nodes.insert("a".to_string(), mock_node("a"));
+            nodes
+        };
+        let compiled: CompiledGraph<StateDummy> = CompiledGraph::new(
+            nodes,
+            TriggerTable::new(),
+            IndexMap::new(),
+            vec![],
+            vec![],
+            Some(Arc::new(HistoryCheckpointer {
+                tuples: vec![make_tuple("cp_new", 5), make_tuple("cp_old", 0)],
+            })),
+            vec![],
+        );
+
+        let config = RunnableConfig::new();
+        let history = compiled
+            .get_state_history(&config, None)
+            .await
+            .expect("get_state_history should succeed");
+        assert_eq!(history.len(), 2, "Expected two history snapshots");
+        // list returns newest-first; preserved by get_state_history.
+        assert_eq!(history[0].metadata.step, 5);
+        assert_eq!(history[1].metadata.step, 0);
     }
 
     #[test]
@@ -3644,6 +4245,7 @@ mod tests {
         let config = super::super::CompileConfig {
             interrupt_before: vec!["human_review".to_string()],
             interrupt_after: vec!["human_review".to_string()],
+            cache_policy: None,
         };
 
         let compiled = graph.compile_with_config(config).unwrap();

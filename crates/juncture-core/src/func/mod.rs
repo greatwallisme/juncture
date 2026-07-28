@@ -173,10 +173,23 @@ impl<S: State + Default> Runtime<S> {
     ///
     /// This extracts functional-API-specific context from the core runtime,
     /// allowing entrypoint functions to access features like previous values.
+    ///
+    /// `previous` falls back to the `PREVIOUS` task-local scoped by the Pregel
+    /// runner from `RunnableConfig::previous` (loaded from the checkpoint's
+    /// `__return__` field, design `03-pregel-engine` §14) when the core runtime
+    /// did not carry one -- which is the common case, since the engine injects
+    /// `previous` via the task-local rather than threading a `Runtime` into
+    /// `Node::call`.
     #[must_use]
     pub fn from_core(core: &CoreRuntime<S>) -> Self {
+        let previous = core.previous.clone().or_else(|| {
+            crate::pregel::PREVIOUS
+                .try_with(std::clone::Clone::clone)
+                .ok()
+                .flatten()
+        });
         Self {
-            previous: core.previous.clone(),
+            previous,
             checkpointer: None,
             store: core.store.clone(),
             core: core.clone(),
@@ -369,6 +382,16 @@ where
         .map(|p| vec![p.clone()])
         .unwrap_or_default();
 
+    // Wire TaskConfig::timeout into the node's TimeoutPolicy (was silently
+    // dropped -- audit B-012). `run_timeout` carries the duration; idle/refresh
+    // stay at their defaults.
+    let timeout_policies = config.timeout.map_or_else(Vec::new, |run_timeout| {
+        vec![crate::TimeoutPolicy {
+            run_timeout,
+            ..Default::default()
+        }]
+    });
+
     let mut graph = StateGraph::<S, I, O>::new();
 
     graph.add_node(
@@ -378,13 +401,23 @@ where
         None,
         None,
         retry_policies,
-        Vec::new(),
+        timeout_policies,
     )?;
 
     graph.set_entry_point(&entrypoint_name);
     graph.set_finish_point(&entrypoint_name);
 
-    graph.compile_with_checkpointer(checkpointer)
+    // Wire TaskConfig::cache_policy into the compiled graph's node-result cache
+    // policy (was silently dropped -- audit B-012). `invoke`/`invoke_async` will
+    // check this cache before executing the entrypoint and store the fresh result
+    // after (design 03-pregel-engine §13.3 `#[task(cache = ...)]`).
+    graph.compile_with_config_and_checkpointer(
+        crate::graph::CompileConfig {
+            cache_policy: config.cache_policy.clone(),
+            ..Default::default()
+        },
+        checkpointer,
+    )
 }
 
 #[cfg(test)]
@@ -418,6 +451,38 @@ mod tests {
         let previous = serde_json::json!("previous_value");
         let runtime = Runtime::<TestState>::new().with_previous(previous.clone());
         assert_eq!(runtime.previous, Some(previous));
+    }
+
+    /// `Runtime::from_core` falls back to the `PREVIOUS` task-local (scoped by
+    /// the Pregel runner from `RunnableConfig::previous`) when the core runtime
+    /// carries no `previous` -- the path that makes the engine-injected
+    /// `__return__` visible to entrypoint nodes (design `03-pregel-engine` §14).
+    #[tokio::test]
+    async fn test_runtime_from_core_falls_back_to_previous_task_local() {
+        let core = CoreRuntime::<TestState>::new();
+        let prev = serde_json::json!({"accumulated": 42});
+        crate::pregel::PREVIOUS
+            .scope(Some(prev.clone()), async {
+                let runtime = Runtime::<TestState>::from_core(&core);
+                assert_eq!(runtime.previous, Some(prev));
+            })
+            .await;
+    }
+
+    /// A `previous` set directly on the core runtime takes precedence over the
+    /// task-local fallback (explicit override wins).
+    #[tokio::test]
+    async fn test_runtime_from_core_prefers_core_previous_over_task_local() {
+        let explicit = serde_json::json!("explicit");
+        let from_task_local = serde_json::json!("task_local");
+        let mut core = CoreRuntime::<TestState>::new();
+        core.previous = Some(explicit.clone());
+        crate::pregel::PREVIOUS
+            .scope(Some(from_task_local), async {
+                let runtime = Runtime::<TestState>::from_core(&core);
+                assert_eq!(runtime.previous, Some(explicit));
+            })
+            .await;
     }
 
     #[test]
@@ -471,6 +536,52 @@ mod tests {
             None,
         );
         result.unwrap();
+    }
+
+    /// Node-result cache (design `03-pregel-engine` §13.3, audit B-012): an
+    /// entrypoint compiled with a `TaskConfig::cache_policy` runs once for a
+    /// given input; the second identical `invoke` returns the cached result
+    /// without re-executing the entrypoint function.
+    #[test]
+    fn test_compile_entrypoint_node_result_cache_hit_on_second_invoke() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let exec_count = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&exec_count);
+        let func = move |_state: &TestState| {
+            let c = Arc::clone(&counter);
+            async move {
+                c.fetch_add(1, Ordering::SeqCst);
+                Ok::<TestStateUpdate, JunctureError>(TestStateUpdate::default())
+            }
+        };
+
+        let config = TaskConfig {
+            cache_policy: Some(crate::config::CachePolicy::default_policy()),
+            ..Default::default()
+        };
+        let graph = compile_entrypoint_with_config::<TestState, TestState, TestState, _>(
+            crate::node::NodeFnUpdate(func),
+            &config,
+            None,
+        )
+        .expect("compile should succeed");
+
+        let input = TestState::default();
+        let runnable = crate::config::RunnableConfig::new().with_thread_id("cache-test");
+        // First invoke: executes the entrypoint (count = 1) and caches the result.
+        let first = graph.invoke(input.clone(), &runnable);
+        assert!(first.is_ok(), "first invoke should succeed");
+        assert_eq!(exec_count.load(Ordering::SeqCst), 1, "entrypoint ran once");
+        // Second identical invoke: cache hit — entrypoint NOT re-run (still 1).
+        let second = graph.invoke(input, &runnable);
+        assert!(second.is_ok(), "second invoke should succeed (cache hit)");
+        assert_eq!(
+            exec_count.load(Ordering::SeqCst),
+            1,
+            "second invoke must be served from the node-result cache, not re-executed"
+        );
     }
 }
 

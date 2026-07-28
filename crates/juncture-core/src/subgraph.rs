@@ -381,6 +381,12 @@ where
     fn name(&self) -> &str {
         &self.name
     }
+
+    /// Return the inner compiled graph's drawable expanded to `depth` further
+    /// levels (x-ray visualization, design `02-graph-builder` `get_graph(xray)`).
+    fn drawable_subgraph(&self, depth: usize) -> Option<crate::graph::DrawableGraph> {
+        Some(self.subgraph.get_graph(Some(depth)))
+    }
 }
 
 #[cfg(test)]
@@ -892,6 +898,7 @@ mod tests {
                 writes: std::collections::HashMap::new(),
                 parents: std::collections::HashMap::new(),
                 run_id: "run-1".to_string(),
+                return_value: None,
             },
             step: 1,
         };

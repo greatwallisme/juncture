@@ -976,6 +976,7 @@ mod tests {
             writes: std::collections::HashMap::new(),
             parents: std::collections::HashMap::new(),
             run_id: "test-run".to_string(),
+            return_value: None,
         }
     }
 

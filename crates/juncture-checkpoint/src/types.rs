@@ -302,6 +302,7 @@ mod tests {
             writes: std::collections::HashMap::new(),
             parents: std::collections::HashMap::new(),
             run_id: "run-123".to_string(),
+            return_value: None,
         };
 
         let serialized = serde_json::to_value(&metadata).unwrap();
@@ -514,6 +515,7 @@ mod tests {
                 writes: HashMap::new(),
                 parents: HashMap::new(),
                 run_id: "test-run".to_string(),
+                return_value: None,
             },
             pending_writes: vec![],
             parent_config: None,

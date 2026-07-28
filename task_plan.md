@@ -1,41 +1,60 @@
-# Task Plan: Fix Audit Findings Item-by-Item (2026-07-27)
+# Task Plan: Fix Re-Audit Findings Item-by-Item (2026-07-28)
 
 ## Goal
-Fix every BLOCKER and MAJOR finding from the production-readiness audit. NO code simplification — each fix must be a correct, complete implementation. Verify zero warnings/errors after each cluster.
+Fix every finding from the 2026-07-28 deep conformance re-audit (13 sync-reviewer findings B-001..B-013 + Sync-mode checkpoint propagation + Debug capacity + dead-code + chat.rs duplicate). NO code simplification — each fix must be a correct, complete implementation. Verify zero warnings/errors after each cluster.
 
-## Constraint
-- NEVER use unwrap/expect/todo/unimplemented/unreachable in committed code (project rule + rust-guidelines).
-- All `#[allow]` item-level with reason.
+## Constraint (per rust-guidelines 00_quality_gates + project CLAUDE.md)
+- NEVER use unwrap/expect/todo/unimplemented in committed code (unreachable! + justification allowed per quality_gates #4).
+- All `#[allow]`/`#[expect]` item-level with reason.
 - Propagate errors via `?`; no silent swallowing of Result.
-- No Cargo.toml lint relaxation.
-- Verify: `cargo build && cargo clippy -- -D warnings && cargo test && cargo fmt --check && RUSTDOCFLAGS="-D warnings" cargo doc`.
+- No Cargo.toml lint relaxation. No file-level allows.
+- Comments in American English.
+- Verify after each cluster: fmt/clippy/test --all-targets/test --doc/doc(-D warnings)/build.
 
-## Fix Phases (BLOCKERs first, then MAJOR, then tests/docs)
+## Fix Phases — STATUS
 
 | # | Phase | Status | Items |
 |---|-------|--------|-------|
-| 1 | Pregel durability BLOCKERs | partial | B-1 DONE; B-2 design-intended (Async fire-and-forget per design 03-pregel §11.3) — NOT a deviation; #3/M-5 DONE |
-| 2 | Pregel concurrency MAJORs | partial | M-1 DONE; M-2 DONE; M-6 known-limitation (snapshot reintroduces O(N²) wide-state regression; needs undo-log); m-1 compliant (unreachable!+justification allowed per quality_gates #4); m-2 DONE |
-| 3 | User-input panic BLOCKERs | complete | #4 interrupt macros + Send API DONE; #5 OpenAI+Anthropic from_env DONE |
-| 4 | Channel/resource | partial | #6 stream=broadcast design-accepted, interrupt=M-4 low-risk — documented; #8 DONE (logged failure) |
-| 5 | Subgraph/checkpoint propagation | complete | #7 DONE; checkpoint int expects (sqlite/postgres 6 sites) DONE |
-| 6 | Lock poisoning resilience | complete | 13 sites DONE (runtime/metrics/memory/stream → recover-poisoned) |
-| 7 | API ergonomics (LLM follow-up) | complete | ChatOpenAI from_env unified (read BASE_URL/MODEL, return Result) core+facade |
-| 8 | Packaging/docs | mostly complete | publish=false DONE; 62 rustdoc warnings → 0 DONE; ~20 doctests → 0 DONE; docs.rs metadata PENDING |
-| 9 | Tests (HIGH gaps) | pending | panic-in-JoinSet; concurrent-same-field-write; env-gated real-LLM; SqliteStore/PostgresStore; ReAct E2E |
-| 10 | CI | pending | .github/workflows |
-| 11 | Final verification | complete | ALL gates green: fmt/clippy/test(--all-targets + --doc)/doc(-D warnings)/build |
+| A | Isolated quick wins | COMPLETE | Debug capacity 256; Sync-mode checkpoint Err propagation (+FailingCheckpointer tests); scheduler dead_code integrated; B-013 Ollama token usage |
+| B | B-001 BLOCKER bulk_update_state | COMPLETE | Real atomic impl (single checkpoint, design sig) + get_state_history (audit-missed stub) + 2 success tests |
+| C | B-008 reserved_keys + error markers | COMPLETE | reserved_keys module; runner persists ERROR/ERROR_SOURCE_NODE markers; schedule_error_handlers_from_writes; after_tick wiring; 2 tests |
+| D | B-006 Previous Result Injection | COMPLETE | CheckpointMetadata.return_value; RunnableConfig.previous; PREVIOUS task-local+runner scope; func::Runtime fallback; invoke load/save __return__; 2 tests |
+| E | B-005 LLM cache wired | COMPLETE | observability::CachePolicy ttl+store; LLM_CACHE_POLICY task-local+runner scope; try_llm_cache_lookup/store; to_core_cache_key_input bridge; openai/anthropic/ollama wired; 5 tests |
+| F | B-012 compile_entrypoint cache_policy+timeout | COMPLETE | config::CachePolicy (node-result) store+generate_key+get/put; CompileConfig.cache_policy; timeout→TimeoutPolicy; invoke node-result cache check/store; cache-hit test |
+| G | B-007 DebugEvent variants emitted | COMPLETE | All 10 dead variants now emitted (GraphStart/NodeStart/NodeEnd/NodeError/ChannelWrite/ChannelUpdate/Merge/CheckpointSaved/BudgetCheck/GraphEnd) |
+| H | B-009 on_interrupt/on_resume invoked | COMPLETE | Core trait + engine calls (emit_interrupt_events, resume/resume_stream) + ResumeValue::to_json_value + tracing adapter forward |
+| I | B-002 RemoteGraph operations | COMPLETE | invoke/get_state/get_state_history/update_state/resume delegating to GraphClient + From<ClientError> for JunctureError |
+| J | B-003 PregelProtocol implementors | COMPLETE | impl PregelProtocol for CompiledGraph<S,S,S> (full); RemoteGraph documented as client-typed (no SSE/snapshot mismatch) |
+| K | B-010 Ollama tool calling | COMPLETE | tools field + bind_tools + OllamaTool conversion + tool_calls parsing (invoke+stream) + 7 tests |
+| B-011 | get_graph(xray) | COMPLETE | Node::drawable_subgraph + SubgraphNode override + get_graph expansion + test |
+| N | Docs/checklist reconciliation + StreamChannel | COMPLETE | 100% design coverage (214/214); StreamChannel implemented; 6 stale doc/checklist items reconciled |
+| L | B-004 #[entrypoint]/#[task] macros | PENDING | New proc-macro (extend juncture-derive or new crate) — very large |
+| M | chat.rs duplicate consolidation | PENDING | Facade llm types duplicate core (bridged for B-005 via to_core_cache_key_input); full consolidation is a large refactor |
+| Z | Final verification | IN PROGRESS | fmt/clippy/test --all-targets/test --doc/doc(-D warnings)/build all green |
 
-## Architectural decisions (per "design doc is the spec")
-- **B-2 (fire-and-forget async checkpoint)**: design/03-pregel-engine.md §11.3 explicitly defines `Durability::Async` as "background task writes checkpoint / if process crashes may lose recent checkpoint". The fire-and-forget is the DESIGNED tradeoff the user opts into by selecting Async. Error is already observable (`tracing::warn!` + `juncture.checkpoint.errors` metric). NOT rewriting to synchronous — that would change the design's explicit perf/durability tradeoff. Open refinement: ordering of concurrent spawn writes (a late older-step write overwriting a newer one) — would need backend-level step guarding or sequencing (sequencing defeats the async purpose); left as documented caveat.
-- **#6 stream channel (unbounded OOM)**: EventEmitter is broadcast semantics ("consumers may disconnect without disrupting execution"); unbounded is the standard tokio broadcast pattern and design-accepted. Bounding would block the producer (stall the engine). Interrupt channel (M-4): interrupts are HITL pause points (a node can't loop `interrupt!()` without resuming), so OOM is low-risk; left as documented caveat.
-- **M-6 (partial mutation on try_apply failure)**: `State: Clone` is implied, so snapshot+rollback is technically possible, but `S::clone(state)` per superstep reintroduces the O(N²) wide-state regression the prior `mem::take`+Arc optimization removed. Proper fix needs an undo-log (record changed fields' pre-values), not a full snapshot — a non-trivial design left as a known limitation.
+## Verified quality gates (current)
+- cargo fmt --all -- --check: PASS
+- cargo clippy --workspace --all-targets --all-features -- -D warnings: PASS
+- cargo test --workspace --all-targets --all-features: PASS (44 groups, 0 failures)
+- cargo test --workspace --doc --all-features: PASS
+- RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps: PASS
+- Design coverage: 214/214 (100.0%)
+
+## Architectural notes (design doc is the spec)
+- B-003: RemoteGraph deliberately does NOT impl PregelProtocol — HTTP GraphClient has no SSE stream endpoint and client::StateSnapshot shape differs from checkpoint's; implementing would fabricate data (a simplification). RemoteGraph offers equivalent ops via its own client-typed API (B-002).
+- B-005/B-012: TWO distinct CachePolicy types — observability::CachePolicy (LLM response cache, B-005) and config::CachePolicy (node-result cache, B-012). Both wired.
+- chat.rs duplicate: facade llm types (CallOptions/ToolDefinition/etc.) structurally duplicate core's. B-005 bridged via to_core_cache_key_input; full consolidation deferred (see M).
+
+## Remaining (2 large items, not started — require dedicated sessions)
+- **B-004 #[entrypoint]/#[task] attribute macros** (design 03 §13.3): new proc-macro. Approach: extend juncture-derive with `#[entrypoint]`/`#[task]` attribute macros that expand to `compile_entrypoint`/`compile_entrypoint_with_config` calls, parsing `cache`/`retry`/`timeout`/`name` args into TaskConfig. Est. large.
+- **chat.rs duplicate consolidation**: facade `crates/juncture/src/llm/{trait_,message}.rs` defines CallOptions/ToolDefinition/ToolChoice/ResponseFormat/Message duplicates of `juncture-core/src/llm.rs` + `state/messages.rs`. Consolidation: make facade re-export core types (verify no behavioral impls differ), update all facade providers/prelude. Est. large refactor.
 
 ## Errors Encountered
 | Error | Attempt | Resolution |
 |-------|---------|------------|
-| `too_many_lines` (102/100) after B-1 edit | 1 | Added item-level `#[allow(clippy::too_many_lines, reason=...)]` (length justified by coupled locals) |
-| `TryFrom` vs `From` blanket conflict for Send | 1 | Removed panicking `From`, kept `TryFrom`; updated 2 benchmark callers to `try_into()` + `?` |
-| `map_err(|_|...)` triggers `clippy::map_err_ignore` | 1 | Used lint-approved ignored identifier `|_err|` |
-| Pre-existing 3 doctests fail (TopicChannel/NamedBarrierChannel/SubgraphTransformer) | verified | Confirmed via git stash they fail on unmodified code; belong to Phase 8 rustdoc, not caused by fixes |
-| `cargo fmt` diffs after macro + runner edits | 1 | Ran `cargo fmt --all`; re-checked green |
+| rust-analyzer stale diagnostics after edits | many | Verified with `cargo check` (authoritative) — diagnostics were stale |
+| `assertions_on_result_states` (is_ok no-message) | 1 | Added messages to no-message asserts |
+| facade llm types distinct from core (B-005 block) | 1 | to_core_cache_key_input field-by-field bridge (identical types) |
+| config::CachePolicy vs observability::CachePolicy (B-012) | 2 | Initial observability approach wrong; reworked to config node-result |
+| inline `use` in generate_key (hook) | 1 | Moved to file top |
+| rustdoc broken `ClientError` links (remote.rs) | 1 | Full path `(crate::client::ClientError)` |

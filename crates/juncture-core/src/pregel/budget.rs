@@ -22,6 +22,18 @@ use std::time::Duration;
 // requiring explicit parameter passing through the ChatModel trait.
 tokio::task_local! {
     pub static BUDGET_TRACKER: Arc<BudgetTracker>;
+    /// Previous entrypoint return value (design `03-pregel-engine` §14), scoped
+    /// by the runner around each task from `RunnableConfig::previous` so
+    /// `func::Runtime::from_core` can pick it up without the engine threading a
+    /// `Runtime` into `Node::call`. `None` for non-entrypoint graphs and on the
+    /// first run.
+    pub static PREVIOUS: Option<serde_json::Value>;
+    /// LLM response cache policy (design `09-observability` §4.4 /
+    /// `03-pregel-engine` §13.3), scoped by the runner around each task from
+    /// `RunnableConfig::llm_cache_policy` so providers can consult it without a
+    /// trait signature change (same pattern as `BUDGET_TRACKER`). `None` when
+    /// no cache policy is configured (caching disabled).
+    pub static LLM_CACHE_POLICY: Option<Arc<crate::observability::CachePolicy>>;
 }
 
 /// Action to take when a budget limit is exceeded
@@ -571,6 +583,51 @@ pub fn try_report_model_call(
         .map_err(|_err| BudgetReportError::NoTracker)
 }
 
+/// Look up a cached LLM response for the given input.
+///
+/// Consults the `LLM_CACHE_POLICY` task-local (scoped by the runner from
+/// `RunnableConfig::llm_cache_policy`, design `09-observability` §4.4).
+/// Providers call this before the HTTP call; a `Some` result is a cache hit
+/// and the provider returns it without a network round-trip. Returns `None`
+/// when no cache policy is scoped (caching disabled) or on a miss/expiry.
+///
+/// # Examples
+///
+/// ```ignore
+/// use juncture_core::pregel::budget::try_llm_cache_lookup;
+///
+/// // In an LLM provider's invoke() method, before the HTTP call:
+/// if let Some(cached) = try_llm_cache_lookup(&key_input) {
+///     return Ok(cached);
+/// }
+/// ```
+#[must_use]
+pub fn try_llm_cache_lookup(input: &crate::observability::CacheKeyInput) -> Option<crate::Message> {
+    LLM_CACHE_POLICY
+        .try_with(|policy| {
+            policy.as_ref().and_then(|policy| {
+                let key = policy.generate_key(input);
+                policy.get(&key)
+            })
+        })
+        .ok()
+        .flatten()
+}
+
+/// Store an LLM response in the cache for the given input.
+///
+/// Consults the `LLM_CACHE_POLICY` task-local. Providers call this after a
+/// successful HTTP call so subsequent identical requests hit the cache. No-op
+/// when no cache policy is scoped (caching disabled).
+pub fn try_llm_cache_store(input: &crate::observability::CacheKeyInput, message: &crate::Message) {
+    let _ = LLM_CACHE_POLICY.try_with(|policy| {
+        if let Some(policy) = policy.as_ref() {
+            let key = policy.generate_key(input);
+            policy.put(key, message.clone());
+        }
+    });
+}
+
 /// Report an LLM call completion (for metrics)
 ///
 /// This function reports that an LLM call completed successfully,
@@ -676,6 +733,74 @@ impl std::error::Error for BudgetReportError {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn cache_input(model: &str) -> crate::observability::CacheKeyInput {
+        crate::observability::CacheKeyInput {
+            model: model.to_string(),
+            messages: vec![crate::Message::human("hi")],
+            tools: vec![],
+            config: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_llm_cache_lookup_store_roundtrip() {
+        let input = cache_input("gpt-4o");
+        let policy = Arc::new(crate::observability::CachePolicy::new());
+        LLM_CACHE_POLICY
+            .scope(Some(policy), async {
+                // Miss before store.
+                assert!(try_llm_cache_lookup(&input).is_none());
+                // Store then hit.
+                let response = crate::Message::ai("cached-response");
+                try_llm_cache_store(&input, &response);
+                let hit = try_llm_cache_lookup(&input).expect("cache hit after store");
+                assert_eq!(
+                    serde_json::to_value(&hit).expect("serialize hit"),
+                    serde_json::to_value(&response).expect("serialize response")
+                );
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn test_llm_cache_disabled_without_policy() {
+        let input = cache_input("gpt-4o");
+        // No task-local scoped -> lookup returns None (caching disabled), store no-op.
+        assert!(try_llm_cache_lookup(&input).is_none());
+        try_llm_cache_store(&input, &crate::Message::ai("x"));
+        assert!(try_llm_cache_lookup(&input).is_none());
+    }
+
+    #[tokio::test]
+    async fn test_llm_cache_distinct_keys_isolated() {
+        let policy = Arc::new(crate::observability::CachePolicy::new());
+        LLM_CACHE_POLICY
+            .scope(Some(policy), async {
+                let input_a = cache_input("gpt-4o");
+                let input_b = cache_input("claude-3");
+                try_llm_cache_store(&input_a, &crate::Message::ai("a-response"));
+                // Different model -> different key -> miss.
+                assert!(try_llm_cache_lookup(&input_b).is_none());
+                assert!(try_llm_cache_lookup(&input_a).is_some());
+            })
+            .await;
+    }
+
+    #[test]
+    fn test_cache_policy_ttl_expires_entries() {
+        let policy = crate::observability::CachePolicy::ttl(std::time::Duration::from_millis(1));
+        policy.put("k".to_string(), crate::Message::ai("v"));
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        assert!(policy.get("k").is_none(), "expired entry should be dropped");
+    }
+
+    #[test]
+    fn test_cache_policy_no_ttl_keeps_entries() {
+        let policy = crate::observability::CachePolicy::new();
+        policy.put("k".to_string(), crate::Message::ai("v"));
+        assert!(policy.get("k").is_some());
+    }
 
     #[test]
     fn test_budget_config_no_limits() {

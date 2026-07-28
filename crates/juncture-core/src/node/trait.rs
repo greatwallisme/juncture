@@ -81,6 +81,18 @@ pub trait Node<S: State>: Send + Sync + 'static {
     ///
     /// Returns the node's identifier used for logging, tracing, and error messages.
     fn name(&self) -> &str;
+
+    /// Return this node's expanded subgraph drawable for x-ray visualization.
+    ///
+    /// Most nodes are leaves and return `None` (the default). Subgraph nodes
+    /// override this to return their inner graph's [`crate::graph::DrawableGraph`]
+    /// expanded to `depth` further levels, enabling
+    /// [`crate::graph::CompiledGraph::get_graph`] to render nested structure when
+    /// `xray` is requested (design `02-graph-builder`: `get_graph(xray)`).
+    fn drawable_subgraph(&self, depth: usize) -> Option<crate::graph::DrawableGraph> {
+        let _ = depth;
+        None
+    }
 }
 
 // Rust guideline compliant 2025-01-18

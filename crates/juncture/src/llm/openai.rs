@@ -282,6 +282,16 @@ impl ChatModel for ChatOpenAI {
             .and_then(|o| o.model_override.as_ref())
             .unwrap_or(&self.model);
 
+        // LLM response cache lookup (design 09-observability §4.4): consult the
+        // cache policy scoped by the runner from `RunnableConfig::llm_cache_policy`
+        // before the HTTP call. A hit returns the cached response with no
+        // network round-trip; a miss proceeds and stores the fresh response below.
+        let cache_key_input =
+            crate::llm::to_core_cache_key_input(model, messages, &self.tools, options);
+        if let Some(cached) = juncture_core::pregel::try_llm_cache_lookup(&cache_key_input) {
+            return Ok(cached);
+        }
+
         #[cfg(not(target_family = "wasm"))]
         let span = tracing::info_span!(
             "juncture.llm.call",
@@ -398,6 +408,10 @@ impl ChatModel for ChatOpenAI {
         );
 
         let message = convert_api_response(&api_response)?;
+
+        // Store the fresh response in the cache for subsequent identical requests
+        // (design 09 §4.4); no-op when no cache policy is scoped.
+        juncture_core::pregel::try_llm_cache_store(&cache_key_input, &message);
 
         // Report token usage to the budget tracker (if configured)
         if let Some(ref usage) = message.usage {

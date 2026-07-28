@@ -279,25 +279,52 @@ pub struct MessageStreamMetadata {
 
 #[derive(Clone, Debug)]
 pub enum DebugEvent {
+    /// 图执行开始
+    GraphStart { thread_id: String, input: serde_json::Value },
+
     /// superstep 开始
-    SuperstepStart { step: usize, nodes: Vec<String> },
+    SuperstepStart { step: usize, pending_nodes: Vec<String> },
 
     /// superstep 结束
     SuperstepEnd { step: usize, duration_ms: u64 },
 
-    /// checkpoint 保存完成
-    CheckpointSaved { checkpoint_id: String, step: usize },
+    /// 节点执行开始
+    NodeStart { node: String, step: usize },
+
+    /// 节点执行完成
+    NodeEnd { node: String, step: usize, duration_ms: u64, output_type: String },
+
+    /// 节点执行失败
+    NodeError { node: String, step: usize, error: String },
+
+    /// channel 写入
+    ChannelWrite { channel: String, node: String, value_summary: String },
 
     /// channel 版本变更
-    ChannelUpdate { channel: String, version: u64 },
+    ChannelUpdate { channel: String, new_version: u64 },
 
-    /// 路由决策
-    RouteDecision { from: String, to: Vec<String>, step: usize },
+    /// 状态合并完成
+    Merge { step: usize, channels_updated: Vec<String> },
+
+    /// 路由决策（边遍历）
+    EdgeTraversed { from: String, to: String, edge_type: String },
+
+    /// checkpoint 保存完成
+    CheckpointSaved { checkpoint_id: String, step: usize, source: String },
 
     /// 预算使用情况
-    BudgetStatus { usage: BudgetUsage },
+    BudgetCheck { tokens_used: u64, cost_usd: f64, budget_remaining_pct: f32 },
+
+    /// 图执行完成
+    GraphEnd { total_steps: usize, total_duration_ms: u64 },
 }
 ```
+
+> **一致性说明 (2026-07-28)**: 本节的 `DebugEvent` 集合已对齐到
+> `09-observability.md` §5.1 的更丰富实现集。早期版本中的
+> `RouteDecision`/`BudgetStatus` 已分别更名为 `EdgeTraversed`/`BudgetCheck`，
+> 并新增 `GraphStart`/`NodeStart`/`NodeEnd`/`NodeError`/`ChannelWrite`/`Merge`/`GraphEnd`。
+> 实现（`crates/juncture-core/src/stream.rs`）全部发射以上变体。
 
 ### 2.4 统一流事件格式 (StreamPart)
 

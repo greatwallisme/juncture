@@ -72,6 +72,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = CompileConfig {
         interrupt_before: vec!["review".to_string()],
         interrupt_after: vec![],
+        cache_policy: None,
     };
 
     let compiled = graph.compile_with_config(config)?;

@@ -18,7 +18,8 @@ use crate::{
         runner::execute_superstep,
         scheduler::{
             FieldVersionTracker, VersionsSeen, apply_writes, compute_next_tasks,
-            schedule_error_handlers_filtered, schedule_fallback_tasks,
+            schedule_error_handlers_filtered, schedule_error_handlers_from_writes,
+            schedule_fallback_tasks,
         },
         types::{BubbleUp, LoopStatus, PendingTask, SuperstepResult},
     },
@@ -971,9 +972,19 @@ impl<S: State> PregelLoop<S> {
     )]
     pub async fn execute_superstep(&mut self) -> Result<SuperstepResult<S>, JunctureError>
     where
-        S: serde::de::DeserializeOwned,
+        S: serde::de::DeserializeOwned + serde::Serialize,
         S::Update: serde::Serialize,
     {
+        // Emit Debug::GraphStart envelope (design 09 §5.1) on the first
+        // superstep, capturing the graph input (the initial state).
+        if self.step == 0 {
+            self.emit_debug_event(DebugEvent::GraphStart {
+                thread_id: self.runnable_config.thread_id.clone().unwrap_or_default(),
+                input: serde_json::to_value(&self.state).unwrap_or(serde_json::Value::Null),
+            })
+            .await;
+        }
+
         // Resolve state_json → state_override for Send targets.
         // Send targets carry per-target state as JSON; deserialize it before
         // passing to the runner so each task gets its own state instance.
@@ -1222,6 +1233,35 @@ impl<S: State> PregelLoop<S> {
         // view of write activity across all channels.
         self.update_delta_counters(&total_changed);
 
+        // Emit Debug::Merge + Debug::ChannelUpdate events (design 09 §5.1:
+        // all internal events via stream). Channel names follow the existing
+        // `field_{idx}` convention used by the delta counters.
+        let field_names = S::field_names();
+        let channel_name = |idx: usize| {
+            field_names
+                .get(idx)
+                .copied()
+                .map_or_else(|| format!("field_{idx}"), std::string::ToString::to_string)
+        };
+        let updated_channels: Vec<String> = (0..64)
+            .filter(|idx| total_changed.has_field(*idx))
+            .map(channel_name)
+            .collect();
+        self.emit_debug_event(DebugEvent::Merge {
+            step: self.step,
+            channels_updated: updated_channels,
+        })
+        .await;
+        for idx in 0..64 {
+            if total_changed.has_field(idx) {
+                self.emit_debug_event(DebugEvent::ChannelUpdate {
+                    channel: channel_name(idx),
+                    new_version: self.field_versions.get(idx),
+                })
+                .await;
+            }
+        }
+
         // Consume the channels that were triggered by the PREVIOUS superstep's writes.
         // These are the fields that caused the current superstep's tasks to be scheduled.
         // We consume these fields after applying the current superstep's writes but before
@@ -1265,6 +1305,14 @@ impl<S: State> PregelLoop<S> {
                 };
                 let _ = tx.send(start_event).await;
 
+                // Emit Debug::NodeStart envelope (design 09 §5.1).
+                let _ = tx
+                    .send(StreamEvent::Debug(DebugEvent::NodeStart {
+                        node: task_output.node_name.clone(),
+                        step: self.step,
+                    }))
+                    .await;
+
                 // Emit TaskEnd event
                 let end_event = StreamEvent::TaskEnd {
                     node: task_output.node_name.clone(),
@@ -1274,6 +1322,42 @@ impl<S: State> PregelLoop<S> {
                         .unwrap_or(u64::MAX),
                 };
                 let _ = tx.send(end_event).await;
+
+                // Emit Debug::NodeEnd (success) or Debug::NodeError (failure)
+                // envelope (design 09 §5.1). output_type summarises the command.
+                if let Some(ref err) = task_output.error {
+                    let _ = tx
+                        .send(StreamEvent::Debug(DebugEvent::NodeError {
+                            node: task_output.node_name.clone(),
+                            step: self.step,
+                            error: err.to_string(),
+                        }))
+                        .await;
+                } else {
+                    let output_type = if task_output.command.update.is_some() {
+                        "update"
+                    } else if matches!(task_output.command.goto, crate::command::Goto::Send(_)) {
+                        "send"
+                    } else if matches!(
+                        task_output.command.goto,
+                        crate::command::Goto::Next(_) | crate::command::Goto::Multiple(_)
+                    ) {
+                        "goto"
+                    } else if task_output.command.resume.is_some() {
+                        "resume"
+                    } else {
+                        "none"
+                    };
+                    let _ = tx
+                        .send(StreamEvent::Debug(DebugEvent::NodeEnd {
+                            node: task_output.node_name.clone(),
+                            step: self.step,
+                            duration_ms: u64::try_from(task_output.duration.as_millis())
+                                .unwrap_or(u64::MAX),
+                            output_type: output_type.to_string(),
+                        }))
+                        .await;
+                }
 
                 // Emit custom stream events from the command's stream_data.
                 // Each entry in stream_data produces one StreamEvent::Custom
@@ -1295,6 +1379,18 @@ impl<S: State> PregelLoop<S> {
                         step: self.step,
                     };
                     let _ = tx.send(updates_event).await;
+
+                    // Emit Debug::ChannelWrite envelope (design 09 §5.1): the
+                    // node wrote to its output channel(s). The value summary is
+                    // the update's type name (full value already emitted via the
+                    // Updates event above).
+                    let _ = tx
+                        .send(StreamEvent::Debug(DebugEvent::ChannelWrite {
+                            channel: task_output.node_name.clone(),
+                            node: task_output.node_name.clone(),
+                            value_summary: std::any::type_name::<S::Update>().to_string(),
+                        }))
+                        .await;
                 }
             }
 
@@ -1384,6 +1480,43 @@ impl<S: State> PregelLoop<S> {
             self.pending_tasks.extend(recovery_tasks);
         }
 
+        // Crash-durable error-handler recovery (design 03 §11.5): scan the
+        // checkpoint's persisted `pending_writes` for ERROR_SOURCE_NODE
+        // markers from failures whose handler was not yet scheduled (e.g. the
+        // process crashed between the failure and the handler running). The
+        // in-memory path above handles failures observed in this superstep;
+        // this path handles markers that survived a crash. Skipped entirely
+        // when no error handlers are registered (no recovery possible) to
+        // avoid the `get_tuple` round-trip on the common superstep.
+        if !self.error_handler_map.is_empty() {
+            if let Some(ref cp) = self.checkpointer {
+                if let Ok(Some(tuple)) = cp.get_tuple(&self.runnable_config).await {
+                    // Exclude nodes already scheduled in-memory this superstep
+                    // (failed nodes present in executed_outputs) so the two
+                    // paths do not double-schedule the same recovery.
+                    let already_handled: std::collections::HashSet<String> = executed_outputs
+                        .iter()
+                        .filter_map(|o| o.error.as_ref().map(|_| o.node_name.clone()))
+                        .collect();
+                    let persisted_recovery = schedule_error_handlers_from_writes(
+                        &tuple.pending_writes,
+                        &self.nodes,
+                        &self.error_handler_map,
+                        &already_handled,
+                    );
+                    if !persisted_recovery.is_empty() {
+                        tracing::debug!(
+                            name: "juncture.error_handler.persisted_recovery_tasks",
+                            step = self.step,
+                            count = persisted_recovery.len(),
+                            "Scheduling error handler recovery from persisted markers"
+                        );
+                        self.pending_tasks.extend(persisted_recovery);
+                    }
+                }
+            }
+        }
+
         // Emit EdgeTraversed debug event after computing next tasks
         if let Some(ref tx) = self.stream_tx {
             let next_node_names: Vec<String> = self
@@ -1411,7 +1544,9 @@ impl<S: State> PregelLoop<S> {
         // This provides crash recovery for normal superstep completion (B-04-002).
         // The checkpoint is only saved when no interrupts are pending; interrupt
         // paths save their own checkpoint with richer context (pending_interrupts).
-        self.save_superstep_checkpoint().await;
+        // In Sync/Exit durability modes a write failure propagates and aborts
+        // the run (design §11.3 full-recovery guarantee); Async is fire-and-forget.
+        self.save_superstep_checkpoint().await?;
 
         // Drain interrupt signals from the channel
         // These are signals sent by the interrupt!() macro during node execution
@@ -1433,7 +1568,7 @@ impl<S: State> PregelLoop<S> {
 
             // Save checkpoint with Interrupt source for HITL recovery
             let node = self.interrupt_node_name().to_string();
-            self.save_interrupt_checkpoint(&node).await;
+            self.save_interrupt_checkpoint(&node).await?;
 
             // Finalize channels before returning
             self.finish_all_channels();
@@ -1446,7 +1581,7 @@ impl<S: State> PregelLoop<S> {
             // the reason for stopping.
             if self.status.is_interrupted() {
                 let node = self.interrupt_node_name().to_string();
-                self.save_interrupt_checkpoint(&node).await;
+                self.save_interrupt_checkpoint(&node).await?;
             }
             // Finalize channels before returning
             self.finish_all_channels();
@@ -1483,7 +1618,7 @@ impl<S: State> PregelLoop<S> {
 
                 // Save checkpoint with Interrupt source for HITL recovery
                 let node = self.interrupt_node_name().to_string();
-                self.save_interrupt_checkpoint(&node).await;
+                self.save_interrupt_checkpoint(&node).await?;
 
                 // Finalize channels before returning
                 self.finish_all_channels();
@@ -1509,6 +1644,49 @@ impl<S: State> PregelLoop<S> {
         // Report step to budget tracker
         if let Some(ref tracker) = self.budget_tracker {
             tracker.report_step();
+        }
+
+        // Emit Debug::BudgetCheck envelope (design 09 §5.1) reflecting the
+        // current budget consumption after this superstep.
+        if let Some(ref tracker) = self.budget_tracker {
+            let usage = tracker.current_usage();
+            let remaining_pct = self
+                .runnable_config
+                .budget
+                .as_ref()
+                .and_then(|b| b.max_tokens)
+                .map_or(100.0_f32, |max| {
+                    if max == 0 {
+                        0.0
+                    } else {
+                        #[allow(
+                            clippy::cast_precision_loss,
+                            reason = "token counts as f32 retain ample precision for a 0-100 percentage"
+                        )]
+                        {
+                            (max.saturating_sub(usage.tokens_used) as f32 / max as f32) * 100.0
+                        }
+                    }
+                });
+            self.emit_debug_event(DebugEvent::BudgetCheck {
+                tokens_used: usage.tokens_used,
+                cost_usd: usage.cost_usd,
+                budget_remaining_pct: remaining_pct,
+            })
+            .await;
+        }
+
+        // Emit Debug::GraphEnd envelope (design 09 §5.1) when no more tasks
+        // remain (the next tick will return false and the run completes).
+        if self.pending_tasks.is_empty() {
+            let total_duration_ms = self.superstep_start.map_or(0, |s| {
+                u64::try_from(s.elapsed().as_millis()).unwrap_or(u64::MAX)
+            });
+            self.emit_debug_event(DebugEvent::GraphEnd {
+                total_steps: self.step,
+                total_duration_ms,
+            })
+            .await;
         }
 
         Ok(())
@@ -1776,25 +1954,40 @@ impl<S: State> PregelLoop<S> {
     /// Save a checkpoint with [`CheckpointSource::Interrupt`] when a checkpointer is configured.
     ///
     /// Builds a full checkpoint from the current loop state, sets the source to
-    /// `Interrupt { node }`, and persists it via the checkpointer. Errors are
-    /// logged but do not propagate -- interrupt checkpointing is best-effort and
-    /// should not prevent the interrupt from being surfaced to the caller.
+    /// `Interrupt { node }`, and persists it via the checkpointer.
+    ///
+    /// # Durability semantics (design `03-pregel-engine` §11.3)
+    ///
+    /// - `Durability::Async`: fire-and-forget background write; errors are
+    ///   logged + counted and do NOT propagate (accepted async tradeoff).
+    /// - `Durability::Sync` | `Durability::Exit`: the write is awaited and a
+    ///   failure propagates as `Err`. An interrupt checkpoint is what makes
+    ///   HITL resume possible; if it cannot be persisted in the full-recovery
+    ///   mode, the run aborts so the caller knows resume would not work,
+    ///   rather than silently surfacing an interrupt whose state was never
+    ///   durably saved. Consistent with `save_superstep_checkpoint` and the
+    ///   per-task `put_writes` propagation in `runner.rs` (audit M-5).
     ///
     /// # Type Parameters
     ///
     /// Requires `S: serde::Serialize` to serialize the current state into
     /// `channel_values` for the checkpoint.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err(JunctureError::Checkpoint(...))` only in `Sync`/`Exit`
+    /// modes when the checkpointer rejects the interrupt checkpoint write.
     #[allow(
         clippy::cognitive_complexity,
         clippy::too_many_lines,
         reason = "durability match arms and checkpoint construction logic are necessarily complex for handling Sync/Async/Exit modes"
     )]
-    async fn save_interrupt_checkpoint(&mut self, node: &str)
+    async fn save_interrupt_checkpoint(&mut self, node: &str) -> Result<(), JunctureError>
     where
         S: serde::Serialize,
     {
         let Some(ref checkpointer) = self.checkpointer else {
-            return;
+            return Ok(());
         };
 
         let channel_values = match serde_json::to_value(&self.state) {
@@ -1806,7 +1999,7 @@ impl<S: State> PregelLoop<S> {
                     error = %err,
                     "Failed to serialize state for interrupt checkpoint"
                 );
-                return;
+                return Ok(());
             }
         };
 
@@ -1839,6 +2032,7 @@ impl<S: State> PregelLoop<S> {
             writes: HashMap::new(),
             parents: HashMap::new(),
             run_id: self.run_id.clone(),
+            return_value: None,
         };
 
         let cp_config = self.runnable_config.clone();
@@ -1922,14 +2116,20 @@ impl<S: State> PregelLoop<S> {
                             name: "juncture.checkpoint.interrupt.save_failed",
                             node = node,
                             error = %err,
-                            "Failed to save interrupt checkpoint"
+                            "Failed to save interrupt checkpoint (Sync/Exit -- propagating)"
                         );
                         // Emit checkpoint error metric
                         self.emit_counter("juncture.checkpoint.errors", 1);
+                        // Sync/Exit full-recovery guarantee (design §11.3): an
+                        // interrupt checkpoint that cannot be persisted means
+                        // HITL resume is impossible, so abort the run rather
+                        // than surface an interrupt whose state was never saved.
+                        return Err(err.into());
                     }
                 }
             }
         }
+        Ok(())
     }
 
     /// Save a checkpoint with [`CheckpointSource::Loop`] after normal superstep completion.
@@ -1943,27 +2143,43 @@ impl<S: State> PregelLoop<S> {
     /// crash recovery can resume from the last completed superstep rather than
     /// replaying from the initial state or last interrupt.
     ///
-    /// No-op if no checkpointer is configured. Errors are logged but do not
-    /// propagate -- superstep checkpointing is best-effort and must not prevent
-    /// the graph from continuing execution.
+    /// No-op if no checkpointer is configured.
+    ///
+    /// # Durability semantics (design `03-pregel-engine` §11.3)
+    ///
+    /// - `Durability::Async`: fire-and-forget background write. Errors are
+    ///   logged + counted and do NOT propagate -- the design explicitly trades
+    ///   "may lose the last checkpoint on crash" for lower latency, so a failed
+    ///   async write is an accepted outcome, not a run-fatal event.
+    /// - `Durability::Sync` | `Durability::Exit`: the write is awaited and a
+    ///   failure DOES propagate as `Err`. Sync is the "full recovery / critical
+    ///   workflow" mode -- silently continuing after a failed checkpoint write
+    ///   would let the user believe they have a durable guarantee they do not,
+    ///   so the run aborts and surfaces the storage failure. This matches the
+    ///   per-task `put_writes` propagation already in `runner.rs` (audit M-5).
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err(JunctureError::Checkpoint(...))` only in `Sync`/`Exit`
+    /// modes when the checkpointer rejects the full-snapshot write.
     #[allow(
         clippy::cognitive_complexity,
         clippy::too_many_lines,
         reason = "durability match arms and checkpoint construction logic are necessarily complex for handling Sync/Async/Exit modes"
     )]
-    async fn save_superstep_checkpoint(&mut self)
+    async fn save_superstep_checkpoint(&mut self) -> Result<(), JunctureError>
     where
         S: serde::Serialize,
     {
         let Some(ref checkpointer) = self.checkpointer else {
-            return;
+            return Ok(());
         };
 
         // In Exit mode, skip normal superstep checkpoints. Only save on
         // graph completion or interrupt, where checkpoints are treated as
         // the final durable snapshot.
         if self.effective_durability() == Durability::Exit {
-            return;
+            return Ok(());
         }
 
         // Evaluate whether delta-channel write counts have exceeded their
@@ -1986,7 +2202,7 @@ impl<S: State> PregelLoop<S> {
                 step = self.step,
                 "Skipped full checkpoint - delta optimization active"
             );
-            return;
+            return Ok(());
         }
 
         let channel_values = match serde_json::to_value(&self.state) {
@@ -1998,7 +2214,7 @@ impl<S: State> PregelLoop<S> {
                     error = %err,
                     "Failed to serialize state for superstep checkpoint"
                 );
-                return;
+                return Ok(());
             }
         };
 
@@ -2042,6 +2258,7 @@ impl<S: State> PregelLoop<S> {
             writes: HashMap::new(),
             parents: HashMap::new(),
             run_id: self.run_id.clone(),
+            return_value: None,
         };
 
         let cp_config = self.runnable_config.clone();
@@ -2127,14 +2344,20 @@ impl<S: State> PregelLoop<S> {
                             name: "juncture.checkpoint.superstep.save_failed",
                             step = self.step,
                             error = %err,
-                            "Failed to save superstep checkpoint"
+                            "Failed to save superstep checkpoint (Sync/Exit -- propagating)"
                         );
                         // Emit checkpoint error metric
                         self.emit_counter("juncture.checkpoint.errors", 1);
+                        // Sync/Exit guarantee full recovery (design §11.3): a
+                        // failed full-snapshot write must abort the run so the
+                        // caller knows the durability contract was broken,
+                        // rather than silently continuing without a checkpoint.
+                        return Err(err.into());
                     }
                 }
             }
         }
+        Ok(())
     }
 
     /// Save a pending interrupt checkpoint for `interrupt_before` scenarios.
@@ -2153,17 +2376,21 @@ impl<S: State> PregelLoop<S> {
     ///
     /// # Errors
     ///
-    /// Does not return errors -- checkpoint save failures are logged and the
-    /// interrupt is still surfaced to the caller.
-    pub async fn save_pending_interrupt_checkpoint(&mut self)
+    /// Propagates the checkpointer write error in `Sync`/`Exit` durability modes
+    /// (design §11.3 full-recovery guarantee -- an un-persisted interrupt
+    /// checkpoint means HITL resume is impossible). In `Async` mode the write is
+    /// fire-and-forget and this returns `Ok(())` regardless of the background
+    /// write outcome.
+    pub async fn save_pending_interrupt_checkpoint(&mut self) -> Result<(), JunctureError>
     where
         S: serde::Serialize,
     {
         if !self.status.is_interrupted() || self.checkpointer.is_none() {
-            return;
+            return Ok(());
         }
         let node = self.interrupt_node_name().to_string();
-        self.save_interrupt_checkpoint(&node).await;
+        self.save_interrupt_checkpoint(&node).await?;
+        Ok(())
     }
 
     /// Extract the primary interrupt node name from pending interrupts or loop status.
@@ -2223,6 +2450,23 @@ impl<S: State> PregelLoop<S> {
         signals: &[crate::interrupt::InterruptSignal],
         namespace: &[String],
     ) {
+        // Fire on_interrupt lifecycle callbacks (design 09 §5.1, C-09-001) for
+        // each interrupt signal, independent of stream emission so consumers
+        // see interrupts even when no stream_tx is configured.
+        if let Some(ref handler) = self.runnable_config.callback_handler {
+            for signal in signals {
+                let node = signal
+                    .payload
+                    .get("node")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown");
+                if crate::interrupt::is_hidden_node(node, &[]) {
+                    continue;
+                }
+                handler.on_interrupt(node, &signal.payload);
+            }
+        }
+
         let Some(ref tx) = self.stream_tx else {
             return;
         };
@@ -2433,6 +2677,7 @@ impl<S: State> PregelLoop<S> {
             writes: HashMap::new(),
             parents: HashMap::new(),
             run_id: self.run_id.clone(),
+            return_value: None,
         };
 
         let metadata_for_event = metadata.clone();
@@ -2611,6 +2856,10 @@ impl<S: State> PregelLoop<S> {
     }
 
     /// Emit `CheckpointSaved` event to stream if a stream sender is configured.
+    ///
+    /// Also emits the [`DebugEvent::CheckpointSaved`] envelope (design
+    /// `09-observability` §5.1) so Debug-mode consumers observe every
+    /// checkpoint persistence (superstep/interrupt/exit, Sync/Async).
     #[inline]
     async fn emit_checkpoint_saved_event(
         stream_tx: Option<&mpsc::Sender<StreamEvent<S>>>,
@@ -2619,9 +2868,23 @@ impl<S: State> PregelLoop<S> {
         step: usize,
     ) {
         if let Some(tx) = stream_tx {
+            let source = match &metadata.source {
+                crate::checkpoint::CheckpointSource::Input => "Input".to_string(),
+                crate::checkpoint::CheckpointSource::Loop => "Loop".to_string(),
+                crate::checkpoint::CheckpointSource::Update => "Update".to_string(),
+                crate::checkpoint::CheckpointSource::Interrupt { .. } => "Interrupt".to_string(),
+                crate::checkpoint::CheckpointSource::Fork => "Fork".to_string(),
+            };
             // Bounded send: backpressure when the stream consumer is slow; the
             // `let _ =` swallows SendError if the receiver was dropped (consumer
             // disconnected — design 05-streaming §3.4: engine continues).
+            let _ = tx
+                .send(StreamEvent::Debug(DebugEvent::CheckpointSaved {
+                    checkpoint_id: checkpoint_id.clone(),
+                    step,
+                    source,
+                }))
+                .await;
             let _ = tx
                 .send(StreamEvent::CheckpointSaved {
                     checkpoint_id,
@@ -2629,6 +2892,17 @@ impl<S: State> PregelLoop<S> {
                     step,
                 })
                 .await;
+        }
+    }
+
+    /// Emit a [`DebugEvent`] to the stream (design `09-observability` §5.1:
+    /// "图执行过程中的所有内部事件通过 stream 输出"). No-op when no stream is
+    /// configured or the receiver disconnected; the `let _ =` swallows
+    /// `SendError` in the disconnect case (engine continues, §3.4).
+    #[inline]
+    async fn emit_debug_event(&self, event: DebugEvent) {
+        if let Some(ref tx) = self.stream_tx {
+            let _ = tx.send(StreamEvent::Debug(event)).await;
         }
     }
 }
@@ -3635,6 +3909,137 @@ mod tests {
         }
     }
 
+    /// A checkpointer whose `put` always fails, used to verify that
+    /// `Sync`/`Exit` durability modes propagate checkpoint write failures
+    /// (design `03-pregel-engine` §11.3 full-recovery guarantee) instead of
+    /// silently log-and-continue.
+    struct FailingCheckpointer;
+
+    #[async_trait::async_trait]
+    impl crate::checkpoint::CheckpointSaver for FailingCheckpointer {
+        async fn get_tuple(
+            &self,
+            _: &crate::config::RunnableConfig,
+        ) -> Result<Option<crate::checkpoint::CheckpointTuple>, crate::checkpoint::CheckpointError>
+        {
+            Ok(None)
+        }
+
+        async fn list(
+            &self,
+            _: &crate::config::RunnableConfig,
+            _: Option<crate::checkpoint::CheckpointFilter>,
+        ) -> Result<Vec<crate::checkpoint::CheckpointTuple>, crate::checkpoint::CheckpointError>
+        {
+            Ok(Vec::new())
+        }
+
+        async fn put(
+            &self,
+            _: &crate::config::RunnableConfig,
+            _checkpoint: crate::checkpoint::Checkpoint,
+            _metadata: crate::checkpoint::CheckpointMetadata,
+        ) -> Result<crate::config::RunnableConfig, crate::checkpoint::CheckpointError> {
+            Err(crate::checkpoint::CheckpointError::Other(
+                "injected put failure".to_string(),
+            ))
+        }
+
+        async fn put_writes(
+            &self,
+            _: &crate::config::RunnableConfig,
+            _: Vec<crate::checkpoint::PendingWrite>,
+            _: &str,
+        ) -> Result<(), crate::checkpoint::CheckpointError> {
+            Err(crate::checkpoint::CheckpointError::Other(
+                "injected put_writes failure".to_string(),
+            ))
+        }
+    }
+
+    /// `Sync` mode (the default) must propagate an interrupt checkpoint write
+    /// failure as `Err(JunctureError::Checkpoint(...))` rather than silently
+    /// dropping it (audit re-audit 2026-07-28: Sync-mode checkpoint failure
+    /// was log-and-continue, eroding the full-recovery guarantee).
+    #[tokio::test]
+    async fn test_sync_interrupt_checkpoint_write_failure_propagates() {
+        let state = TestState;
+        let mut nodes = IndexMap::new();
+        nodes.insert(
+            "test_node".to_string(),
+            NodeFnCommand(
+                |_s: &TestState| -> std::pin::Pin<
+                    Box<
+                        dyn std::future::Future<
+                                Output = Result<crate::Command<TestState>, crate::JunctureError>,
+                            > + Send,
+                    >,
+                > { Box::pin(async move { Ok(crate::Command::end()) }) },
+            )
+            .into_node("test_node"),
+        );
+        let mut config = crate::config::RunnableConfig::new();
+        config.thread_id = Some("test-thread".to_string());
+        // durability left as None -> effective Sync (default).
+        let mut loop_ = PregelLoop::new(state, nodes, TriggerTable::new(), config, 0).unwrap();
+        loop_.set_checkpointer(Arc::new(FailingCheckpointer));
+        loop_.pending_interrupts = vec![crate::interrupt::InterruptSignal {
+            index: 0,
+            id: Some("fail-sync".to_string()),
+            payload: serde_json::json!({"node": "test_node"}),
+            timestamp: Utc::now(),
+        }];
+
+        let result = loop_.save_interrupt_checkpoint("test_node").await;
+        assert!(
+            result.is_err(),
+            "Sync mode must propagate checkpoint write failure"
+        );
+        assert!(
+            result.unwrap_err().is_checkpoint(),
+            "propagated error must be a Checkpoint error"
+        );
+    }
+
+    /// `Async` mode is fire-and-forget by design (§11.3): a background `put`
+    /// failure is logged + counted but must NOT propagate -- the caller
+    /// accepted "may lose the last checkpoint on crash" for lower latency.
+    #[tokio::test]
+    async fn test_async_interrupt_checkpoint_write_failure_does_not_propagate() {
+        let state = TestState;
+        let mut nodes = IndexMap::new();
+        nodes.insert(
+            "test_node".to_string(),
+            NodeFnCommand(
+                |_s: &TestState| -> std::pin::Pin<
+                    Box<
+                        dyn std::future::Future<
+                                Output = Result<crate::Command<TestState>, crate::JunctureError>,
+                            > + Send,
+                    >,
+                > { Box::pin(async move { Ok(crate::Command::end()) }) },
+            )
+            .into_node("test_node"),
+        );
+        let mut config = crate::config::RunnableConfig::new();
+        config.thread_id = Some("test-thread".to_string());
+        config.durability = Some(Durability::Async);
+        let mut loop_ = PregelLoop::new(state, nodes, TriggerTable::new(), config, 0).unwrap();
+        loop_.set_checkpointer(Arc::new(FailingCheckpointer));
+        loop_.pending_interrupts = vec![crate::interrupt::InterruptSignal {
+            index: 0,
+            id: Some("fail-async".to_string()),
+            payload: serde_json::json!({"node": "test_node"}),
+            timestamp: Utc::now(),
+        }];
+
+        let result = loop_.save_interrupt_checkpoint("test_node").await;
+        assert!(
+            result.is_ok(),
+            "Async mode must not propagate background checkpoint write failure"
+        );
+    }
+
     /// Verify that `after_tick` saves a checkpoint with `CheckpointSource::Loop`
     /// after a normal (non-interrupt) superstep completes (B-04-002).
     #[tokio::test]
@@ -4303,7 +4708,13 @@ mod tests {
             payload: serde_json::json!({"node": "test_node"}),
             timestamp: Utc::now(),
         }];
-        loop_.save_interrupt_checkpoint("test_node").await;
+        // Sync/Exit interrupt checkpoint propagation (design §11.3): the save
+        // must succeed and persist an interrupt checkpoint; a failure would now
+        // surface as Err rather than being silently dropped.
+        assert!(
+            loop_.save_interrupt_checkpoint("test_node").await.is_ok(),
+            "interrupt checkpoint save should succeed under a non-failing checkpointer"
+        );
 
         let has_interrupt_checkpoint = {
             let calls = observed

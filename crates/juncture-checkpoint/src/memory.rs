@@ -489,6 +489,7 @@ mod tests {
             writes: HashMap::new(),
             parents: HashMap::new(),
             run_id: "test-run".to_string(),
+            return_value: None,
         }
     }
 

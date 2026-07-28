@@ -799,6 +799,49 @@ pub async fn call_llm_streaming<S: State, M: crate::llm::ChatModel>(
     })
 }
 
+/// Node-side continuous output channel for custom stream data (design
+/// `05-streaming` §2.5, referencing `langgraph/stream/stream_channel.py`).
+///
+/// A `StreamChannel` lets a node continuously push arbitrary
+/// [`serde_json::Value`] payloads to a named channel during execution,
+/// distinct from [`StreamWriter`] which emits typed [`StreamEvent`]s for graph
+/// execution lifecycle. Custom application data (progress, partial results,
+/// domain events) flows through `StreamChannel`; structured graph events flow
+/// through `StreamWriter`/`EventEmitter`.
+#[derive(Debug)]
+pub struct StreamChannel {
+    /// Channel name (identifies which logical channel the data belongs to).
+    pub name: String,
+
+    /// Data sender (bounded; backpressure applies on `send().await`).
+    tx: tokio::sync::mpsc::Sender<serde_json::Value>,
+}
+
+impl StreamChannel {
+    /// Create a new channel with the given name backed by `tx`.
+    #[must_use]
+    pub const fn new(name: String, tx: tokio::sync::mpsc::Sender<serde_json::Value>) -> Self {
+        Self { name, tx }
+    }
+
+    /// Send a data payload to the channel.
+    ///
+    /// Awaits when the bounded channel is full, applying backpressure to the
+    /// producing node (design `05-streaming` §3.4). Returns `SendError` if the
+    /// receiving end was dropped.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`tokio::sync::mpsc::error::SendError`] wrapping the unsent data
+    /// if the receiver has been dropped.
+    pub async fn send(
+        &self,
+        data: serde_json::Value,
+    ) -> Result<(), tokio::sync::mpsc::error::SendError<serde_json::Value>> {
+        self.tx.send(data).await
+    }
+}
+
 /// Configuration for batching LLM streaming chunks.
 ///
 /// Controls how token chunks are accumulated before forwarding to stream

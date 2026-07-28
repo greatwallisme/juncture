@@ -193,3 +193,67 @@ The finding is accurate for the **automated test suite**, but `.env` IS configur
 - `juncture-telemetry` crate: Langfuse-compatible (batch_writer, collector, langfuse, otlp, sqlite_store, trace_store, web UI).
 - Pregel runner properly instrumented: `info_span!` with `juncture.step` attribute, `.instrument(span)`, output-type + duration recorded in span, `tracing::warn!` on errors. 15 tracing refs in runner.rs, 33 in loop_.rs, 11 in tracing_wasm.rs.
 - This is a production strength — observability is first-class.
+## Session 2026-07-28: Re-audit — production-ready? design-deviation / code-simplification sweep
+
+### Quality gates — ALL GREEN (re-verified 2026-07-28)
+| Gate | Result |
+|---|---|
+| `cargo fmt --all -- --check` | exit 0 |
+| `cargo clippy --workspace --all-targets --all-features -- -D warnings` | exit 0 |
+| `cargo test --workspace --all-targets --all-features` | exit 0 |
+| `cargo test --workspace --doc --all-features` | exit 0 (49 passed, 11 ignored) |
+| `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps` | exit 0 |
+| Design coverage | 209/214 (97.7%) |
+
+### Prior-audit fix verification (spot-checked in source) — CONFIRMED IN PLACE
+- M-1 semaphore: `acquire_permit` helper with `match` (runner.rs:187-191), called at :424 — no `expect`.
+- M-5 put_writes: propagates via `?` (runner.rs:164) + explicit Err arm (:694) — no `let _ =`.
+- B-1 state restore on error/cancel: loop_.rs:1057 `Arc::try_unwrap` restore path — present.
+- M-3 stream channel bounding: FIXED in commit 746d486 (was claimed "design-accepted" in plan but actually fixed later). `stream_capacity(mode)` (compiled.rs:49) → bounded `mpsc::channel(capacity)`. Messages=256, else=32, Multi-w-Messages=256. Matches design 05-streaming §3.4 / §7.3.
+- M-4 interrupt channel unbounded: DESIGN-CONFORMANT — design 06-hitl.md:72 explicitly specifies `mpsc::UnboundedSender<InterruptSignal>`. Not a deviation.
+- B-2 Async fire-and-forget checkpoint: DESIGN-CONFORMANT — design 03-pregel §11.3 explicitly defines `Durability::Async` as "后台任务写入 / 进程崩溃可能丢失最近 checkpoint". Not a deviation.
+
+### NEW findings (this re-audit)
+1. **MAJOR — Sync-mode checkpoint write failure is silently log-and-continue (erodes the Sync durability guarantee)**: `save_superstep_checkpoint` (loop_.rs:1954+) and `save_interrupt_checkpoint` (loop_.rs:1792+) for `Durability::Sync | Exit` `await` the `checkpointer.put()` but on `Err` only `tracing::warn!` + increment `juncture.checkpoint.errors` metric — they do NOT propagate the error. Doc comment at loop_.rs:1946-1948 states "superstep checkpointing is best-effort and must not prevent the graph from continuing execution." But design 03-pregel §11.3 defines `Durability::Sync` as "每 superstep 后 / 完整恢复 / 关键业务工作流". A user who selects Sync explicitly for full-recovery durability gets no signal that the guarantee was broken — the next crash will NOT recover fully, silently. This is the same hazard the prior audit flagged for Async put_writes (M-5, which WAS fixed to propagate), but applied to the Sync full-checkpoint path it was NOT fixed. The "best-effort" policy is correct for Async (design says may lose) but incorrect for Sync (design says full recovery). Suggested fix: in Sync/Exit arms, propagate the checkpoint error (return / `?`) so the run aborts and the caller knows durability was violated; keep log-and-continue only for Async.
+2. **MINOR — Debug stream-mode capacity deviates from design §3.4**: design 05-streaming §3.4 capacity formula is `StreamMode::Messages | StreamMode::Debug => 256; _ => 32`. Implementation `stream_capacity` (compiled.rs:49-57) gives `Messages => 256; _ => 32`, so `Debug` falls into the `_` arm → 32, not 256. Note: design §7.3 only mentions Messages=256, so the design doc is internally inconsistent between §3.4 and §7.3; the implementation followed §7.3. Either fix impl to give Debug=256 per §3.4, or update §3.4 to drop Debug.
+3. **INFO — 3 design features still unimplemented (unchanged from prior audit)**: `StateGraph::with_context_schema`, `DebugEvent::RouteStatus`/`BudgetStatus` variants, `StreamChannel` struct (214-coverage gap). These are genuine missing features, not simplifications of implemented ones.
+4. **INFO — M-6 partial-mutation on try_apply failure**: still a documented known-limitation (no undo-log). Design 03-pregel does NOT explicitly mandate atomic apply, so this is a defensible limitation rather than a deviation, but it remains a correctness edge case (a `try_apply` Err mid-`apply_writes` leaves state half-merged). Not re-flagged as a deviation.
+
+### Verdict (preliminary, pending sync-reviewer deep conformance sweep)
+Quality gates are fully green and the prior audit's blocker/major fixes are verified in place. The implementation is at a strong preview/evaluation level. The one newly-identified production concern is the Sync-mode silent checkpoint-failure path (finding #1) — a real durability-contract gap in the mode users select specifically for durability. The Debug-capacity item (#2) is trivial. Awaiting the independent conformance sweep for any additional deviations/simplifications not covered by the mechanical 214-item check.
+
+### sync-reviewer deep conformance sweep — 13 NEW findings (all independently verified)
+Top-3 re-verified directly in source this session (B-001/B-002/B-003/B-005 confirmed):
+- **B-001 BLOCKER — `bulk_update_state` unconditional stub** (compiled.rs:1702): always returns `Err("not yet implemented: requires checkpoint state recovery")`, `let _ = (checkpointer, updates);` discards args, comment "will be completed in Phase 6". Documented public API (design 02 §CompiledGraph API, index.md:277, checklist 02-142) that is a no-op. Signature drift too (Vec vs single). verify-design-coverage passes because it greps the method NAME only — this is the core blind spot: mechanical 97.7% hides behavioral stubs.
+- **B-002 MAJOR — `RemoteGraph` hollow shell** (remote.rs:1-77): only `new`/`graph_id`/`endpoint`/`Clone`. No `invoke`/`stream`/`get_state`/`update_state` — the underlying `GraphClient` has them but `RemoteGraph` doesn't wire them. Design presents it as the cross-process composition primitive (index.md:83,316; 03-pregel §11.6). Zero tests. Documented API that cannot actually invoke a remote graph.
+- **B-003 MAJOR — `PregelProtocol` trait has zero implementors** (protocol.rs:28-99): `invoke`/`stream`/`get_state`/`update_state` defined; `impl PregelProtocol` returns nothing. Dead abstraction. Combined with B-002, the entire remote/cross-process subsystem is scaffolding.
+- **B-004 MAJOR — `#[entrypoint]`/`#[task]` attribute macros do not exist** (func/mod.rs): only `compile_entrypoint*` functions. Design 03 §13.3 + index.md:309 show `#[task(cache=...)]`/`#[entrypoint]` as the functional-API surface — not realizable. No proc-macro registered.
+- **B-005 MAJOR — `CachePolicy`/`llm_cache_policy` dead config (caching unwired)** (observability.rs:135-160, config.rs:100,358,483): type + builder + `generate_key` exist; NO provider reads `llm_cache_policy`, NO path calls `generate_key`. LLM response caching feature is accepted-and-ignored config.
+- **B-006 MAJOR — "Previous Result Injection" not implemented** (func/mod.rs:124,202): `Runtime.previous` field + `with_previous()` exist; grep `__return__` = zero production matches. No code writes/loads the entrypoint return value to/from checkpoint. `previous` always `None` in production. Design 03 §14.
+- **B-007 MAJOR — `DebugEvent` variants mostly never emitted** (stream.rs:277-340): 13 variants defined; only 3 emitted (`SuperstepStart`/`SuperstepEnd`/`EdgeTraversed`). The other 10 (`GraphStart`/`NodeStart`/`NodeEnd`/`NodeError`/`ChannelWrite`/`ChannelUpdate`/`Merge`/`CheckpointSaved`/`BudgetCheck`/`GraphEnd`) are dead enum arms. Design 09 §5.1.
+- **B-008 MAJOR — `reserved_keys` module + checkpoint-persisted error markers absent** (scheduler.rs:920-967): error-handler recovery uses in-memory `TaskOutput.error`; design 03 §11.5 specifies `reserved_keys {INPUT,INTERRUPT,RESUME,ERROR,ERROR_SOURCE_NODE}` + persisted `ERROR`/`ERROR_SOURCE_NODE` markers for crash-recovery of error handlers. grep = zero. Durability gap for the error-recovery subsystem (in-memory clean runs fine; diverges on crash recovery).
+- **B-009 MINOR — `on_interrupt`/`on_resume` callbacks never invoked** (observability.rs:217-252, tracing/callback.rs:47,59): trait methods with no callers in engine. Design 09 §5.1 (C-09-001) promises them.
+- **B-010 MINOR — Ollama tool calling unimplemented** (ollama.rs:415-419): `bind_tools` is a no-op `self.clone()`; `OllamaRequest` has no `tools` field. Tool-capable Ollama models never receive tools.
+- **B-011 MINOR — `get_graph(xray)` ignores xray** (compiled.rs:1731-1737): `let _ = xray;` — documented subgraph-expansion-depth API with no behavior.
+- **B-012 MINOR — `compile_entrypoint_with_config` silently drops `cache_policy` + `timeout`** (func/mod.rs:351-388): reads only `retry_policy` + `name`. Concrete mechanism behind B-005.
+- **B-013 MINOR — Ollama doesn't report token usage to budget tracker** (ollama.rs): `usage_delta: None`; no `report_usage`/`BUDGET_TRACKER`. Budget tracking silently inactive for Ollama (Anthropic/OpenAI do report).
+
+### Prior-audit re-characterization (corrections)
+- `with_context_schema` is NOT a missing feature — design 02 §"context_schema" explicitly removed it in favor of `RunnableConfig` + `Runtime<C>`. Stale CHECKLIST item 02-009 (doc was updated, checklist wasn't). Doc-maintenance only.
+- `DebugEvent::RouteDecision`/`BudgetStatus` (prior "missing variants") — code follows design 09's RICHER set with renames (`RouteDecision`→`EdgeTraversed`, `BudgetStatus`→`BudgetCheck`). Stale design 05 §2.3, not missing. (But B-007 shows most of those richer variants are dead arms.)
+
+### Code-quality / project-rule violations
+- `scheduler.rs:982-992` `get_error_handler_node` carries `#[allow(dead_code, reason="...public API awaiting external consumers")]` — explicitly forbidden by the project memory directive "No dead code excuses — never accept #[allow(dead_code)] as 'reserved API'".
+- `chat.rs` is NOT "thin re-exports" as the crate CLAUDE.md claims — it's a full parallel implementation of ChatAnthropic/ChatOpenAI/ChatOllama duplicating `crates/juncture/src/llm/*.rs`. Two `ChatOpenAI` types existed (now partly unified).
+
+### Verified-production-quality subsystems (sync-reviewer confirmed)
+Pregel engine core (JoinSet+Semaphore, B-1/M-1/M-2/M-5 fixed, circuit breakers, real jitter); checkpoint persistence (Memory/Sqlite/Postgres + MessagePack/JsonPlus/AES-256-GCM + recover_from_deltas); streaming (bounded per §3.4); state/channel (all 7 channel types real); subgraph (12+ tests); HITL (interrupt! no longer panics); store (Memory/Sqlite/Postgres + FilterExpr + vectors + TTL); tracing/observability (OTel + Langfuse); WASM (cfg-gated, sound unsafe).
+
+## FINAL VERDICT (2026-07-28 re-audit)
+**Not yet production-ready.** Quality gates are fully green (fmt/clippy/test/test --doc/rustdoc/build all exit 0) and the prior audit's data-loss/panic BLOCKERs are verified fixed, so the LOCAL EXECUTION happy path is solid and preview/evaluation-quality. However, the deep conformance sweep found **13 design deviations**, of which:
+- 1 BLOCKER (B-001 `bulk_update_state` stub) and 5 MAJOR (B-002..B-006) are documented public APIs that are stubs, hollow shells, dead config, or missing abstractions — the mechanical 97.7% coverage hid them because `verify-design-coverage.py` checks symbol NAMES not behavior.
+- 3 MAJOR (B-007/B-008 + my Sync-mode finding #1) are silent durability/observability gaps.
+- 4 MINOR (B-009..B-013) + 1 MINOR (Debug capacity) are ergonomic/feature gaps.
+Plus 2 prior-audit items that were wrongly characterized as "missing features" but are actually stale-doc/checklist (with_context_schema, DebugEvent variants) — and 1 genuine remaining gap (StreamChannel struct).
+
+Gaps cluster in: (1) remote/cross-process execution (B-002,B-003), (2) functional-API ergonomics + caching (B-004,B-005,B-006,B-012), (3) debug-stream completeness + error-marker durability (B-007,B-008), (4) my Sync-mode checkpoint-failure path. The engine core, checkpoint backends, streaming, state, subgraph, HITL, store, tracing, and WASM subsystems ARE production-quality.

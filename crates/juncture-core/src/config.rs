@@ -5,6 +5,7 @@
 //! cancellation.
 
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -45,6 +46,14 @@ pub struct RunnableConfig {
     /// Callers may set this explicitly to correlate multiple operations with
     /// the same run ID (e.g., for stream resumption or distributed tracing).
     pub run_id: Option<String>,
+
+    /// Previous entrypoint return value for accumulation patterns (design
+    /// `03-pregel-engine` §14). The execution layer loads this from the latest
+    /// checkpoint's `metadata.return_value` (`__return__`) at run start and
+    /// exposes it to entrypoint nodes via the task-local `PREVIOUS` context so
+    /// `func::Runtime::previous` reflects the prior run's output. `None` on
+    /// first execution and for non-entrypoint graphs.
+    pub previous: Option<serde_json::Value>,
 
     /// Checkpoint namespace (for subgraph isolation)
     pub checkpoint_ns: Option<crate::checkpoint::CheckpointNamespace>,
@@ -127,6 +136,7 @@ impl std::fmt::Debug for RunnableConfig {
             .field("run_name", &self.run_name)
             .field("graph_name", &self.graph_name)
             .field("run_id", &self.run_id)
+            .field("previous", &self.previous)
             .field("checkpoint_ns", &self.checkpoint_ns)
             .field("cache", &self.cache)
             .field("tags", &self.tags)
@@ -417,6 +427,14 @@ pub struct CachePolicy {
 
     /// Optional maximum number of cache entries
     pub max_entries: Option<usize>,
+
+    /// Shared node-result store: cache key -> (serialized result state, insertion
+    /// time). `Arc`-backed so `Clone`d policies share one store (cross-run reuse).
+    store: Arc<
+        std::sync::Mutex<
+            std::collections::HashMap<String, (serde_json::Value, std::time::Instant)>,
+        >,
+    >,
 }
 
 impl std::fmt::Debug for CachePolicy {
@@ -425,6 +443,7 @@ impl std::fmt::Debug for CachePolicy {
             .field("key_func", &self.key_func.as_ref().map(|_| "<fn>"))
             .field("ttl", &self.ttl)
             .field("max_entries", &self.max_entries)
+            .field("store", &"<store>")
             .finish()
     }
 }
@@ -443,6 +462,7 @@ impl CachePolicy {
             key_func: None,
             ttl: None,
             max_entries: None,
+            store: Self::new_store(),
         }
     }
 
@@ -455,6 +475,7 @@ impl CachePolicy {
             key_func: None,
             ttl: Some(duration),
             max_entries: None,
+            store: Self::new_store(),
         }
     }
 
@@ -470,7 +491,70 @@ impl CachePolicy {
             key_func: Some(Arc::new(key_func)),
             ttl: None,
             max_entries: None,
+            store: Self::new_store(),
         }
+    }
+
+    fn new_store() -> Arc<
+        std::sync::Mutex<
+            std::collections::HashMap<String, (serde_json::Value, std::time::Instant)>,
+        >,
+    > {
+        Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()))
+    }
+
+    /// Generate the cache key for a serialized state value.
+    ///
+    /// Uses the custom `key_func` when set; otherwise a stable hash of the
+    /// serialized state (state-hash-based default per the type's doc).
+    #[must_use]
+    pub fn generate_key(&self, state: &serde_json::Value, config: &RunnableConfig) -> String {
+        if let Some(ref f) = self.key_func {
+            return f(state, config);
+        }
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        serde_json::to_string(state)
+            .unwrap_or_default()
+            .hash(&mut hasher);
+        config.thread_id.hash(&mut hasher);
+        format!("{:x}", hasher.finish())
+    }
+
+    /// Look up a cached result for `key`, honoring TTL. Lock poisoning recovered.
+    #[must_use]
+    pub fn get(&self, key: &str) -> Option<serde_json::Value> {
+        let store = self
+            .store
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (value, inserted) = store.get(key)?;
+        if let Some(ttl) = self.ttl {
+            if inserted.elapsed() > ttl {
+                drop(store);
+                self.store
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .remove(key);
+                return None;
+            }
+        }
+        Some(value.clone())
+    }
+
+    /// Store a result under `key`, honoring `max_entries` (evicts all when the
+    /// limit is reached -- a simple, deterministic bound; finer LRU eviction can
+    /// be layered on later). Lock poisoning recovered.
+    pub fn put(&self, key: String, value: serde_json::Value) {
+        let mut store = self
+            .store
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(max) = self.max_entries {
+            if store.len() >= max && !store.contains_key(&key) {
+                store.clear();
+            }
+        }
+        store.insert(key, (value, std::time::Instant::now()));
     }
 }
 

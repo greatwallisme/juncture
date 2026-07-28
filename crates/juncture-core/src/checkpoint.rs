@@ -432,6 +432,15 @@ pub struct CheckpointMetadata {
 
     /// Unique identifier for this execution run
     pub run_id: String,
+
+    /// Previous entrypoint return value (`__return__`, design `03-pregel-engine`
+    /// §14). Set on the final checkpoint of an entrypoint run so the next
+    /// invocation can load it into `Runtime::previous` for accumulation /
+    /// incremental-processing patterns. `None` on non-entrypoint checkpoints
+    /// and on the first run. `#[serde(default)]` keeps older checkpoints
+    /// deserializable.
+    #[serde(default)]
+    pub return_value: Option<serde_json::Value>,
 }
 
 /// Source of checkpoint creation
@@ -634,6 +643,37 @@ pub fn generate_checkpoint_id() -> String {
     // combined with the timestamp and monotonic counter.
     let node_id: [u8; 6] = rand::random();
     uuid::Uuid::now_v6(&node_id).to_string()
+}
+
+/// Reserved write-key constants (parity with `LangGraph`).
+///
+/// Per design `03-pregel-engine` §11.5: when a task fails and has a registered
+/// error handler, the runner writes `ERROR` and `ERROR_SOURCE_NODE` markers
+/// into the checkpoint's `pending_writes` for that task. This makes the
+/// failure crash-durable -- on resume, the engine scans `pending_writes` for
+/// `ERROR_SOURCE_NODE` markers and schedules the corresponding error-handler
+/// recovery tasks, instead of relying on the in-memory `TaskOutput::error`
+/// field which is lost when the process restarts.
+///
+/// The remaining constants (`INPUT`, `INTERRUPT`, `RESUME`) are reserved for
+/// the other LangGraph-compatible control channels and are declared here so
+/// the full reserved-key set is centralized and documented.
+pub mod reserved_keys {
+    /// Reserved channel carrying the original graph input.
+    pub const INPUT: &str = "__input__";
+
+    /// Reserved channel carrying interrupt payloads (HITL).
+    pub const INTERRUPT: &str = "__interrupt__";
+
+    /// Reserved channel carrying resume values supplied by the caller.
+    pub const RESUME: &str = "__resume__";
+
+    /// Reserved channel carrying the serialized error from a failed task.
+    pub const ERROR: &str = "__error__";
+
+    /// Reserved channel carrying the name of the node that failed, enabling
+    /// error-handler recovery scheduling from persisted `pending_writes`.
+    pub const ERROR_SOURCE_NODE: &str = "__error_source_node__";
 }
 
 // Rust guideline compliant 2026-05-21

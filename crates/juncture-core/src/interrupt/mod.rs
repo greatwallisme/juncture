@@ -67,6 +67,23 @@ pub enum ResumeValue {
     ByNamespace(std::collections::HashMap<String, serde_json::Value>),
 }
 
+impl ResumeValue {
+    /// Serialize this resume value into a plain [`serde_json::Value`].
+    ///
+    /// Used to surface the resume value to `GraphLifecycleCallback::on_resume`
+    /// (design `09-observability` §5.1). `Single` yields its value verbatim;
+    /// `ById`/`ByNamespace` yield a JSON object keyed by id/namespace.
+    #[must_use]
+    pub fn to_json_value(&self) -> serde_json::Value {
+        match self {
+            Self::Single(v) => v.clone(),
+            Self::ById(m) | Self::ByNamespace(m) => {
+                serde_json::Value::Object(m.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+            }
+        }
+    }
+}
+
 /// Convenience wrapper: `Vec<Value>` can still be used for index-based matching
 #[allow(
     clippy::fallible_impl_from,

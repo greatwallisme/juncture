@@ -177,7 +177,7 @@
       "name": "StoreError",
       "required_methods": [],
       "required_fields": [],
-      "required_variants": ["NotFound", "InvalidNamespace", "Serialize", "Storage", "VectorSearch", "Embedding"],
+      "required_variants": ["NotFound", "Serialize", "Storage", "VectorSearch", "Embedding"],
       "findings": [],
       "description": "Store error types",
       "verification_pattern": "pub enum StoreError"

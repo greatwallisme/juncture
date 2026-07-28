@@ -219,6 +219,28 @@ impl juncture_core::observability::GraphLifecycleCallback for CallbackHandlerAda
     fn on_checkpoint_saved(&self, checkpoint_id: &str, step: usize) {
         self.inner.on_checkpoint_saved(checkpoint_id, step);
     }
+
+    fn on_interrupt(&self, node: &str, payload: &serde_json::Value) {
+        // Map the core trait's (node, payload) onto the richer
+        // GraphInterruptEvent the tracing handler expects. The core engine
+        // does not carry interrupt_id/namespace/resumable at the callback
+        // site, so those are filled with sensible defaults.
+        self.inner.on_interrupt(&GraphInterruptEvent {
+            node: node.to_string(),
+            payload: payload.clone(),
+            interrupt_id: None,
+            namespace: Vec::new(),
+            resumable: true,
+        });
+    }
+
+    fn on_resume(&self, node: &str, resume_value: &serde_json::Value) {
+        self.inner.on_resume(&GraphResumeEvent {
+            node: node.to_string(),
+            resume_value: resume_value.clone(),
+            namespace: Vec::new(),
+        });
+    }
 }
 
 /// Event payload for graph interruptions

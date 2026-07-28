@@ -348,8 +348,12 @@ impl ChatOllama {
 **特殊处理**：
 - 无 API key（本地服务）
 - 流式默认开启（`"stream": true`）
-- 工具支持取决于模型能力，部分模型不支持 function calling
-- TokenUsage 可能不可用（取决于 Ollama 版本）
+- 工具支持取决于模型能力：实现对工具能力模型（llama3.1+、qwen2.5+ 等）发送
+  OpenAI 兼容的 `tools` 数组并解析 `message.tool_calls`；不支持 function calling
+  的模型会忽略该字段（实现见 `crates/juncture/src/llm/ollama.rs`，已对齐本节的
+  `tools: Vec<ToolDefinition>` 字段）
+- TokenUsage 通过 `prompt_eval_count`/`eval_count` 上报（缓存 prompt 时
+  `prompt_eval_count` 缺省按 0 计）；老版本 Ollama 可能不返回这些字段
 
 ---
 

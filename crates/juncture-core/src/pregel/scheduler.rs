@@ -826,9 +826,9 @@ pub fn consume_triggered_channels<S: State>(state: &mut S, triggered_channels: &
     clippy::implicit_hasher,
     reason = "public API accepts std HashMap; callers typically construct from builder metadata"
 )]
-#[expect(
+#[allow(
     clippy::cognitive_complexity,
-    reason = "function has multiple early-return guards (circuit_blocked, error, fallback_map, missing node, self-reference) that are individually simple but add up"
+    reason = "function has multiple early-return guards (circuit_blocked, error, fallback_map, missing node, self-reference) that are individually simple but add up. Uses #[allow] not #[expect] because feature-gated line-count variance changes whether the lint fires (audit: facade-vs-workspace feature sets)"
 )]
 pub fn schedule_fallback_tasks<S: State>(
     task_outputs: &[TaskOutput<S>],
@@ -941,12 +941,13 @@ pub fn schedule_error_handlers_filtered<S: State>(
             continue;
         }
 
-        let Some(handler_name) = error_handler_map.get(&output.node_name) else {
+        let Some(handler_name) = get_error_handler_node(&output.node_name, error_handler_map)
+        else {
             continue;
         };
 
         // Verify the handler node actually exists in the graph
-        if !nodes.contains_key(handler_name) {
+        if !nodes.contains_key(&handler_name) {
             tracing::warn!(
                 name: "juncture.error_handler.missing_node",
                 node_name = %output.node_name,
@@ -959,7 +960,78 @@ pub fn schedule_error_handlers_filtered<S: State>(
 
         recovery_tasks.push(PendingTask::pull(
             uuid::Uuid::new_v4().to_string(),
-            handler_name.clone(),
+            handler_name,
+        ));
+    }
+
+    recovery_tasks
+}
+
+/// Schedule error-handler recovery tasks from persisted `pending_writes`.
+///
+/// Crash-durable companion to [`schedule_error_handlers_filtered`] (design
+/// `03-pregel-engine` §11.5 two-phase recovery). When a task fails, the runner
+/// writes `ERROR_SOURCE_NODE` / `ERROR` markers into the checkpoint's
+/// `pending_writes`. This function scans those persisted markers and creates a
+/// recovery task for each failed node that has a registered error handler,
+/// enabling recovery to be scheduled after a crash resume even though the
+/// in-memory `TaskOutput::error` field is gone.
+///
+/// # Arguments
+///
+/// * `pending_writes` - Persisted writes to scan for `ERROR_SOURCE_NODE`
+///   markers.
+/// * `nodes` - Graph nodes, used to verify the handler node still exists.
+/// * `error_handler_map` - Maps failed-node names to their handler node names.
+/// * `already_handled` - Failed-node names already scheduled for recovery this
+///   superstep (e.g. via the in-memory path); excluded to avoid duplicates.
+///
+/// # Returns
+///
+/// One [`PendingTask`] per failed node with a registered, present handler node
+/// that is not in `already_handled`.
+#[expect(
+    clippy::implicit_hasher,
+    reason = "public API accepts std HashMap; callers typically construct from builder metadata"
+)]
+pub fn schedule_error_handlers_from_writes<S: State>(
+    pending_writes: &[crate::checkpoint::PendingWrite],
+    nodes: &indexmap::IndexMap<String, std::sync::Arc<dyn crate::Node<S>>>,
+    error_handler_map: &std::collections::HashMap<String, String>,
+    already_handled: &std::collections::HashSet<String>,
+) -> Vec<PendingTask<S>> {
+    // Phase 1: collect failed node names from ERROR_SOURCE_NODE markers.
+    let failed_nodes: Vec<String> = pending_writes
+        .iter()
+        .filter(|w| w.channel == crate::checkpoint::reserved_keys::ERROR_SOURCE_NODE)
+        .filter_map(|w| w.value.as_str().map(std::string::ToString::to_string))
+        .collect();
+
+    // Phase 2: create a recovery task for each failed node with a registered,
+    // present handler, excluding nodes already handled this superstep.
+    let mut recovery_tasks = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for node_name in failed_nodes {
+        // De-duplicate markers for the same node (multiple failed tasks of the
+        // same node) and skip nodes already handled by the in-memory path.
+        if !seen.insert(node_name.clone()) || already_handled.contains(&node_name) {
+            continue;
+        }
+        let Some(handler_name) = get_error_handler_node(&node_name, error_handler_map) else {
+            continue;
+        };
+        if !nodes.contains_key(&handler_name) {
+            tracing::warn!(
+                name: "juncture.error_handler.missing_node",
+                node_name = %node_name,
+                handler_name = %handler_name,
+                "Error handler node not found in graph, skipping persisted-marker recovery"
+            );
+            continue;
+        }
+        recovery_tasks.push(PendingTask::pull(
+            uuid::Uuid::new_v4().to_string(),
+            handler_name,
         ));
     }
 
@@ -980,10 +1052,6 @@ pub fn schedule_error_handlers_filtered<S: State>(
 ///
 /// `Some(error_handler_name)` if an error handler is registered, `None` otherwise
 #[must_use]
-#[allow(
-    dead_code,
-    reason = "tested via unit tests; public API awaiting external consumers"
-)]
 pub fn get_error_handler_node(
     node_name: &str,
     error_handler_map: &std::collections::HashMap<String, String>,
@@ -1260,6 +1328,103 @@ mod scheduler_tests {
             &error_handler_map,
             &std::collections::HashSet::new(),
         );
+        assert_eq!(recovery_tasks.len(), 1);
+        assert_eq!(recovery_tasks[0].node_name, "error_handler_a");
+    }
+
+    #[test]
+    fn test_schedule_error_handlers_from_writes_schedules_recovery() {
+        use crate::Command;
+        use crate::checkpoint::{PendingWrite, reserved_keys};
+
+        let mut nodes: indexmap::IndexMap<String, std::sync::Arc<dyn crate::Node<TestState>>> =
+            indexmap::IndexMap::new();
+        nodes.insert(
+            "error_handler_a".to_string(),
+            crate::node::NodeFnCommand(|_s: &TestState| async move { Ok(Command::end()) })
+                .into_node("error_handler_a"),
+        );
+
+        // Persisted markers: a failed task wrote ERROR_SOURCE_NODE + ERROR.
+        let pending_writes = vec![
+            PendingWrite {
+                task_id: "failed-task".to_string(),
+                channel: reserved_keys::ERROR_SOURCE_NODE.to_string(),
+                value: serde_json::Value::String("failing_node".to_string()),
+            },
+            PendingWrite {
+                task_id: "failed-task".to_string(),
+                channel: reserved_keys::ERROR.to_string(),
+                value: serde_json::Value::String("boom".to_string()),
+            },
+            // An unrelated normal write must be ignored.
+            PendingWrite {
+                task_id: "ok-task".to_string(),
+                channel: "some_field".to_string(),
+                value: serde_json::Value::Null,
+            },
+        ];
+
+        let mut error_handler_map = std::collections::HashMap::new();
+        error_handler_map.insert("failing_node".to_string(), "error_handler_a".to_string());
+
+        let recovery_tasks = schedule_error_handlers_from_writes(
+            &pending_writes,
+            &nodes,
+            &error_handler_map,
+            &std::collections::HashSet::new(),
+        );
+        assert_eq!(recovery_tasks.len(), 1);
+        assert_eq!(recovery_tasks[0].node_name, "error_handler_a");
+    }
+
+    #[test]
+    fn test_schedule_error_handlers_from_writes_excludes_already_handled_and_dedupes() {
+        use crate::Command;
+        use crate::checkpoint::{PendingWrite, reserved_keys};
+
+        let mut nodes: indexmap::IndexMap<String, std::sync::Arc<dyn crate::Node<TestState>>> =
+            indexmap::IndexMap::new();
+        nodes.insert(
+            "error_handler_a".to_string(),
+            crate::node::NodeFnCommand(|_s: &TestState| async move { Ok(Command::end()) })
+                .into_node("error_handler_a"),
+        );
+
+        // Two markers for the SAME failed node (two failed tasks of one node)
+        // plus a marker for a node already handled in-memory this superstep.
+        let pending_writes = vec![
+            PendingWrite {
+                task_id: "t1".to_string(),
+                channel: reserved_keys::ERROR_SOURCE_NODE.to_string(),
+                value: serde_json::Value::String("failing_node".to_string()),
+            },
+            PendingWrite {
+                task_id: "t2".to_string(),
+                channel: reserved_keys::ERROR_SOURCE_NODE.to_string(),
+                value: serde_json::Value::String("failing_node".to_string()),
+            },
+            PendingWrite {
+                task_id: "t3".to_string(),
+                channel: reserved_keys::ERROR_SOURCE_NODE.to_string(),
+                value: serde_json::Value::String("already_done".to_string()),
+            },
+        ];
+
+        let mut error_handler_map = std::collections::HashMap::new();
+        error_handler_map.insert("failing_node".to_string(), "error_handler_a".to_string());
+        error_handler_map.insert("already_done".to_string(), "error_handler_a".to_string());
+
+        let mut already_handled = std::collections::HashSet::new();
+        already_handled.insert("already_done".to_string());
+
+        let recovery_tasks = schedule_error_handlers_from_writes(
+            &pending_writes,
+            &nodes,
+            &error_handler_map,
+            &already_handled,
+        );
+        // One recovery task: failing_node (de-duplicated); already_done excluded.
         assert_eq!(recovery_tasks.len(), 1);
         assert_eq!(recovery_tasks[0].node_name, "error_handler_a");
     }

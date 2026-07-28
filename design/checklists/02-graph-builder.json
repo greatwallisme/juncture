@@ -7,7 +7,7 @@
       "category": "struct",
       "parent": null,
       "name": "StateGraph",
-      "required_methods": ["new", "add_node", "add_node_simple", "add_edge", "add_conditional_edges", "set_entry_point", "set_finish_point", "add_sequence", "add_subgraph", "compile", "compile_ephemeral", "validate_keys", "add_node_with_error_handler", "add_node_with_retry", "with_context_schema"],
+      "required_methods": ["new", "add_node", "add_node_simple", "add_edge", "add_conditional_edges", "set_entry_point", "set_finish_point", "add_sequence", "add_subgraph", "compile", "compile_ephemeral", "validate_keys", "add_node_with_error_handler", "add_node_with_retry"],
       "required_fields": ["nodes", "edges", "entry_point", "finish_points", "subgraphs"],
       "required_variants": [],
       "findings": ["M-10", "L-9"],

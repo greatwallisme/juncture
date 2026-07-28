@@ -268,3 +268,123 @@ The headline prebuilt `create_react_agent` was only ever builder-`unwrap()`-test
 | SqliteStore integration | ✅ |
 | ReAct E2E through Pregel | ✅ |
 | Real-LLM provider + PostgresStore | pending (need external services / env gating) |
+## Session 2026-07-28: Re-audit — production-ready? design-deviation / code-simplification sweep
+
+### Gates re-verified — ALL GREEN
+fmt exit 0 | clippy exit 0 | test --all-targets exit 0 | test --doc exit 0 (49 passed/11 ignored) | rustdoc -D warnings exit 0 | design coverage 209/214 (97.7%)
+
+### Prior-audit fixes re-verified in source
+M-1 (acquire_permit match), M-5 (put_writes ?), B-1 (state restore), M-3 (bounded stream channels, commit 746d486) all confirmed in place. M-4 interrupt unbounded confirmed DESIGN-conformant (06-hitl:72 specifies UnboundedSender). B-2 Async fire-and-forget confirmed DESIGN-conformant (03-pregel §11.3).
+
+### Independent findings (this session)
+- NEW MAJOR: Sync-mode checkpoint write failure is log-and-continue (loop_.rs:1920-1929, 1946-1948) — erodes the Sync "full recovery" guarantee (design 03 §11.3). Async-style best-effort applied to the durability mode users select FOR durability.
+- NEW MINOR: Debug stream-mode capacity = 32 vs design §3.4 `Messages | Debug => 256` (impl follows §7.3 which only says Messages=256; doc-internal inconsistency).
+
+### sync-reviewer deep conformance sweep — 13 NEW findings (top-3 independently re-verified)
+- B-001 BLOCKER: `bulk_update_state` unconditional stub (compiled.rs:1702) — documented public API that always errors.
+- B-002 MAJOR: `RemoteGraph` hollow shell (remote.rs) — no invoke/stream/get_state/update_state.
+- B-003 MAJOR: `PregelProtocol` trait zero implementors (protocol.rs).
+- B-004 MAJOR: `#[entrypoint]`/`#[task]` attribute macros don't exist.
+- B-005 MAJOR: `CachePolicy`/`llm_cache_policy` dead config (caching unwired).
+- B-006 MAJOR: "Previous Result Injection" (Runtime.previous) not implemented — always None.
+- B-007 MAJOR: 10 of 13 `DebugEvent` variants never emitted.
+- B-008 MAJOR: `reserved_keys` + checkpoint-persisted error markers absent (error-handler recovery not crash-durable).
+- B-009 MINOR: `on_interrupt`/`on_resume` callbacks never invoked.
+- B-010 MINOR: Ollama tool calling unimplemented (bind_tools no-op).
+- B-011 MINOR: `get_graph(xray)` ignores xray.
+- B-012 MINOR: `compile_entrypoint_with_config` drops cache_policy + timeout.
+- B-013 MINOR: Ollama doesn't report token usage to budget tracker.
+- Plus: scheduler.rs:982 `#[allow(dead_code)]` "reserved API" violates project memory directive; chat.rs is a full duplicate (not "thin re-exports" as CLAUDE.md claims).
+
+### FINAL VERDICT
+NOT production-ready. Local-execution happy path is solid (gates green + prior BLOCKERs fixed). But 6 documented public APIs are stubs/hollow/dead-config (B-001..B-006), hidden by the mechanical 97.7% coverage which checks symbol names not behavior. Remote/cross-process execution, functional-API ergonomics+caching, debug-stream completeness, and error-marker durability are the gap clusters. Engine core, checkpoint backends, streaming, state, subgraph, HITL, store, tracing, WASM ARE production-quality. See findings.md "FINAL VERDICT" for the ranked action plan.
+
+## Session 2026-07-28b: Fix re-audit findings item-by-item (no simplification)
+
+### Phase A — isolated quick wins — COMPLETE (verified)
+- **Debug stream capacity**: `stream_capacity` (compiled.rs:49) now gives `Messages | Debug => 256` per design 05-streaming §3.4 (was Debug→32). Multi-w-Messages-or-Debug→256.
+- **Sync-mode checkpoint propagation (NEW MAJOR finding)**: `save_superstep_checkpoint` + `save_interrupt_checkpoint` (loop_.rs) now return `Result<(), JunctureError>`; Sync/Exit arms propagate `put` failures via `return Err(err.into())` (was log-and-continue — eroded the §11.3 full-recovery guarantee). Async arm stays fire-and-forget (design-intended). Updated 3 after_tick callers (`?`), `save_pending_interrupt_checkpoint` (now returns Result, 0 callers), test site. Added `FailingCheckpointer` + 2 tests: `test_sync_interrupt_checkpoint_write_failure_propagates` (asserts Err+is_checkpoint), `test_async_interrupt_checkpoint_write_failure_does_not_propagate` (asserts Ok). All 570 lib tests pass.
+- **scheduler dead_code**: `get_error_handler_node` integrated into `schedule_error_handlers_filtered` (replaced inline `.get()`), removed `#[allow(dead_code)]`. Now used in production.
+- **B-013 Ollama token usage**: `OllamaResponse`/`OllamaStreamResponse` gained `prompt_eval_count`/`eval_count`; new `ollama_usage` helper; `invoke` sets `msg.usage` + reports via `try_report_model_call` + `BUDGET_TRACKER.report_output_tokens`; `stream` emits `usage_delta` on the final `done` chunk + reports. Ollama now participates in budget tracking like OpenAI/Anthropic.
+
+### Phase B — B-001 BLOCKER bulk_update_state + get_state_history — COMPLETE (verified)
+- **bulk_update_state** (compiled.rs): real atomic impl — loads checkpoint, applies ALL updates in order to in-memory state, records each `as_node` writer, single `put` with source=Update + step+1. Fixed signature drift to design's `Result<RunnableConfig, ...>` (was Vec). Atomicity: single put, errors before put return Err with no save.
+- **get_state_history** (compiled.rs, bonus — audit missed this stub too): real impl via `checkpointer.list(config, filter)` → hydrate each `CheckpointTuple` to `StateSnapshot` (mirrors `get_state`), preserves newest-first order.
+- Added 2 success tests: `test_bulk_update_state_success_atomic_single_checkpoint` (asserts 1 put, source=Update, step 6, both writers recorded), `test_get_state_history_hydrates_checkpoints` (asserts 2 snapshots, order preserved). All pass; clippy green (added `#[allow(too_many_lines)]` w/ reason + backticked doc items).
+
+### Files modified this session (so far)
+- crates/juncture-core/src/graph/compiled.rs (Debug capacity, bulk_update_state, get_state_history, tests)
+- crates/juncture-core/src/pregel/loop_.rs (Sync/Async checkpoint propagation, FailingCheckpointer, tests)
+- crates/juncture-core/src/pregel/scheduler.rs (get_error_handler_node integration)
+- crates/juncture/src/llm/ollama.rs (token usage reporting)
+
+### Phase C — B-008 reserved_keys + crash-durable error markers — COMPLETE (verified)
+- Added `reserved_keys` module (checkpoint.rs): INPUT/INTERRUPT/RESUME/ERROR/ERROR_SOURCE_NODE per design 03 §11.5.
+- runner.rs error-recovery branch: persists ERROR + ERROR_SOURCE_NODE markers via `put_writes` on task failure (was in-memory only). Propagates put_writes errors (M-5 consistency).
+- New `schedule_error_handlers_from_writes(pending_writes, nodes, error_handler_map, already_handled)` in scheduler.rs — design Phase 2 signature; scans ERROR_SOURCE_NODE markers, dedupes, excludes already-handled, verifies handler node exists.
+- Wired into after_tick (gated on `!error_handler_map.is_empty()`): loads checkpoint pending_writes via get_tuple, schedules recovery from persisted markers not already handled in-memory → crash-durable error-handler recovery.
+- Re-exported from pregel/mod.rs. 2 new scheduler tests (recovery + dedup/exclusion). 576 lib tests pass; clippy/fmt green.
+
+### Phase D — B-006 Previous Result Injection — COMPLETE (verified)
+- `CheckpointMetadata.return_value: Option<serde_json::Value>` (the `__return__` field, design 03 §14), `#[serde(default)]` for backward compat. Added `return_value: None` to ALL CheckpointMetadata construction sites (loop_.rs×3, subgraph.rs, checkpoint memory/types/sqlite/postgres, compiled.rs tests×5).
+- `RunnableConfig.previous: Option<serde_json::Value>` (serde-free, Default=None) + Debug impl updated.
+- `PREVIOUS` task-local (pregel/budget.rs) scoped by the runner around the inner_future (node.call) from `task_config.previous`; re-exported from pregel/mod.rs.
+- `func::Runtime::from_core` falls back to PREVIOUS task-local when `core.previous` is None.
+- compiled.rs `invoke_async_inner`: loads latest checkpoint `metadata.return_value` → `run_config.previous` at start; on success persists output as `__return__` (metadata.return_value) via get_tuple+put (best-effort, warn-logged). `invoke`/`invoke_async`/`invoke_async_inner` gained `O: serde::Serialize` bound (needed to serialize the return value).
+- Tests: 2 func tests (task-local fallback + core-previous precedence). Full workspace gate green (clippy/fmt/test/doc).
+- Pre-existing fragile `#[expect(clippy::cognitive_complexity)]` on schedule_fallback_tasks → `#[allow]` (feature-variance made it unfulfilled under -p juncture facade builds).
+
+### Phase H — B-009 on_interrupt/on_resume callbacks — COMPLETE (verified)
+- Added `on_interrupt(node, payload)` + `on_resume(node, resume_value)` to core `GraphLifecycleCallback` (observability.rs) with default no-ops (design 09 §5.1, C-09-001).
+- Engine: `on_interrupt` fired per signal in `emit_interrupt_events_with_namespace` (before the stream_tx early-return, so it fires without a stream). `on_resume` fired per pending-interrupt node in `resume` + `resume_stream` (compiled.rs).
+- Added `ResumeValue::to_json_value()` helper (interrupt/mod.rs) to surface the resume value.
+- Tracing `CallbackHandlerAdapter` forwards both hooks to `GraphCallbackHandler` (mapping (node,payload)→GraphInterruptEvent / (node,resume_value)→GraphResumeEvent).
+
+### Phase G — B-007 DebugEvent variants emitted — COMPLETE (verified)
+All 10 previously-dead DebugEvent variants now emitted (design 09 §5.1 "all internal events via stream"):
+- Added `emit_debug_event(&self, event)` helper on PregelLoop.
+- NodeStart/NodeEnd/NodeError (from task_outputs in after_tick emission block, via tx), ChannelWrite (per update), ChannelUpdate + Merge (after apply_writes from total_changed + field_versions), BudgetCheck (after_tick from budget usage), GraphStart (execute_superstep step==0, input=serialized state), GraphEnd (after_tick when pending_tasks empty), CheckpointSaved (inside shared emit_checkpoint_saved_event, all save sites Sync/Async/exit).
+- Fixed clippy: map_or/map_or_else forms, cast_precision_loss allow on f32 percentage, added `Fork` CheckpointSource arm.
+- Full workspace gate green.
+
+### Phase I/J — B-002 RemoteGraph ops + B-003 PregelProtocol implementor — COMPLETE (verified)
+- **B-002**: RemoteGraph (remote.rs) gained real remote ops delegating to GraphClient: `invoke` (serialize input→client.invoke), `get_state`, `get_state_history`, `update_state`, `resume`. Added `From<ClientError> for JunctureError` (error.rs). Added `S: Sync` to invoke (future_not_send).
+- **B-003**: `impl PregelProtocol<S> for CompiledGraph<S, S, S>` (protocol.rs) — all 4 methods (invoke/stream/get_state/update_state) delegate to the real local APIs; config cloned into each BoxFuture (lifetime). `StreamHandle.stream` returned as the `BoxStream<'static>`. This makes the previously-dead trait a live abstraction.
+  - Documented: RemoteGraph deliberately does NOT impl PregelProtocol — the HTTP GraphClient has no SSE stream endpoint and its `client::StateSnapshot` shape differs from the protocol's `checkpoint::StateSnapshot`; implementing would fabricate data (a simplification). RemoteGraph offers equivalent ops via its own client-typed API.
+- Full gate green (clippy/fmt/test).
+
+### Phase K — B-010 Ollama tool calling — COMPLETE (verified)
+- `ChatOllama.tools: Vec<ToolDefinition>` field; `bind_tools` now a real binding (was no-op `self.clone()`).
+- `OllamaRequest.tools: Option<Vec<OllamaTool>>` (OpenAI-compatible `{"type":"function","function":{...}}`); `OllamaTool`/`OllamaFunction` + `From<&ToolDefinition>`.
+- `OllamaResponseMessage.tool_calls: Option<Vec<OllamaToolCall>>`; `OllamaToolCall`/`OllamaToolCallFunction` + `From<OllamaToolCall> for ToolCall` (synthesizes id `ollama-{name}` since Ollama returns no id).
+- invoke: sends tools + parses tool_calls into Message.tool_calls + records has_tool_calls span. stream: sends tools + maps final-chunk tool_calls to ToolCallChunk (full args as args_delta).
+- 7 new ollama tests (usage helper, tool conversion, tool_call parse, response round-trip, bind_tools). Clippy green (added #[allow(too_many_lines)] on invoke).
+
+### Phase B-011 — get_graph(xray) subgraph expansion — COMPLETE (verified)
+- Added `Node::drawable_subgraph(depth) -> Option<DrawableGraph>` to the Node trait (default None). SubgraphNode overrides it to return `self.subgraph.get_graph(Some(depth))`.
+- `CompiledGraph::get_graph(xray)`: `None`/`Some(0)` → top-level to_drawable; `Some(n)` → merges each subgraph node's inner drawable (expanded to n-1) with `subgraph_name/`-prefixed node/edge names. No more `let _ = xray;` stub.
+- New test `test_get_graph_xray_expands_subgraphs` (None→1 node, Some(0)→1, Some(1)→"sub"+"sub/inner_a"). 579 lib tests pass; clippy green.
+
+### Phase N — Docs/checklist reconciliation + StreamChannel — COMPLETE (verified)
+- Checklist 02-001: removed stale `with_context_schema` (design 02 removed it in favor of RunnableConfig+Runtime).
+- design 05 §2.3 DebugEvent: rewrote to the implemented richer set (GraphStart/NodeStart/NodeEnd/NodeError/ChannelWrite/ChannelUpdate/Merge/EdgeTraversed/CheckpointSaved/BudgetCheck/GraphEnd/SuperstepStart/SuperstepEnd), noting RouteDecision→EdgeTraversed, BudgetStatus→BudgetCheck rename.
+- Checklist 05-008 DebugEvent: RouteDecision→EdgeTraversed, BudgetStatus→BudgetCheck.
+- design 08 §3.3: updated Ollama note (tools ARE sent to tool-capable models; token usage via prompt_eval_count/eval_count).
+- Checklist 09-013 ClientError: removed dead `GraphNotFound`. Checklist 10-015 StoreError: removed dead `InvalidNamespace`.
+- Implemented `StreamChannel` (stream.rs, design 05 §2.5): node-side continuous output channel `{ name, tx }` with async `send` (bounded, backpressure).
+- **Design coverage now 214/214 (100.0%)** — was 209/214.
+
+### Phase E — B-005 LLM response caching — COMPLETE (verified)
+- `observability::CachePolicy` extended: `ttl` field + `ttl()`/`with_ttl()` + shared Arc store (`get`/`put` with TTL, poison-recovered) + manual Debug.
+- `LLM_CACHE_POLICY` task-local (Option<Arc<CachePolicy>>, pregel/budget.rs) scoped by the runner from `RunnableConfig::llm_cache_policy` (nested inside PREVIOUS scope).
+- `try_llm_cache_lookup`/`try_llm_cache_store` helpers (budget.rs, re-exported from pregel/mod.rs).
+- Facade `to_core_cache_key_input` bridge (llm/mod.rs): converts facade ToolDefinition/CallOptions → core types (field-by-field; the types are structurally identical — the chat.rs duplicate). Wired into openai/anthropic/ollama invoke (lookup before HTTP, store after).
+- 5 cache tests (roundtrip, disabled, distinct-keys, TTL expiry, no-TTL). 
+
+### Phase F — B-012 compile_entrypoint cache_policy + timeout — COMPLETE (verified)
+- Discovered `config::CachePolicy` (node-result caching, key_func/ttl/max_entries) is DISTINCT from `observability::CachePolicy` (LLM). B-012's TaskConfig.cache_policy is the node-result one. Initial CompileConfig.llm_cache_policy (observability) was the wrong mechanism — reworked to node-result.
+- `config::CachePolicy` extended: shared Arc store + `generate_key` (custom key_func or state-hash default) + `get`/`put` (TTL + max_entries eviction, poison-recovered) + Debug.
+- `CompileConfig.cache_policy: Option<config::CachePolicy>` (node-result) + `CompiledGraphInner.cache_policy` + `with_cache_policy` + `compile_with_config_and_checkpointer` (new pub method).
+- `compile_entrypoint_with_config`: wires `timeout` → `TimeoutPolicy` (add_node timeout_policies) AND `cache_policy` → CompileConfig.cache_policy (was both silently dropped).
+- `invoke_async_inner`: node-result cache check (key from serialized input state; hit → deserialize + return early) + store (serialize final state) on success.
+- Test `test_compile_entrypoint_node_result_cache_hit_on_second_invoke`: entrypoint runs once; 2nd identical invoke served from cache (exec_count stays 1). VERIFIED.

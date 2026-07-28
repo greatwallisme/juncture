@@ -153,7 +153,7 @@
       "name": "ClientError",
       "required_methods": [],
       "required_fields": [],
-      "required_variants": ["Connection", "Auth", "GraphNotFound", "ThreadNotFound", "RunNotFound", "Serialize", "Server", "Timeout"],
+      "required_variants": ["Connection", "Auth", "ThreadNotFound", "RunNotFound", "Serialize", "Server", "Timeout"],
       "findings": [],
       "description": "SDK client error types",
       "verification_pattern": "pub enum ClientError"

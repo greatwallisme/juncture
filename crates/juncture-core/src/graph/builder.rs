@@ -46,6 +46,13 @@ pub struct CompileConfig {
     /// returns control to the caller. Runtime `interrupt_after` in
     /// `RunnableConfig` takes precedence over this list.
     pub interrupt_after: Vec<String>,
+
+    /// Default node-result cache policy for this graph (design `03-pregel-engine`
+    /// §13.3 `#[task(cache = ...)]`). Stored on the compiled graph so the
+    /// entrypoint's result is cached: `invoke` checks the node-result cache
+    /// before execution and stores the fresh result after (wired in
+    /// `compile_entrypoint_with_config` from `TaskConfig::cache_policy`).
+    pub cache_policy: Option<crate::config::CachePolicy>,
 }
 
 /// Metadata stored for each node during graph construction
@@ -1744,6 +1751,23 @@ impl<S: State, I: IntoState<S>, O: FromState<S>> StateGraph<S, I, O> {
         self.compile_inner(CompileConfig::default(), checkpointer)
     }
 
+    /// Compile the graph with both a [`CompileConfig`] (interrupts, default LLM
+    /// cache policy) and a checkpointer for persistence.
+    ///
+    /// Used by `compile_entrypoint_with_config` to wire a `TaskConfig`'s
+    /// `cache_policy` into the compiled graph (design `09-observability` §4.4).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TopologyError`] if validation fails.
+    pub fn compile_with_config_and_checkpointer(
+        &self,
+        config: CompileConfig,
+        checkpointer: Option<Arc<dyn crate::checkpoint::CheckpointSaver>>,
+    ) -> Result<CompiledGraph<S, I, O>, TopologyError> {
+        self.compile_inner(config, checkpointer)
+    }
+
     /// Internal compilation shared by all public compile methods.
     ///
     /// Validates topology, builds the trigger table, and constructs the
@@ -1784,7 +1808,8 @@ impl<S: State, I: IntoState<S>, O: FromState<S>> StateGraph<S, I, O> {
             config.interrupt_after,
             checkpointer,
             subgraph_info,
-        ))
+        )
+        .with_cache_policy(config.cache_policy))
     }
 
     /// Build the trigger table from edges

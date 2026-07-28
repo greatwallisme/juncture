@@ -470,8 +470,12 @@ where
                         // exec_node_name is moved into the inner_future closure.
                         let timeout_node_name = exec_node_name.clone();
 
+                        let __previous = task_config.previous.clone();
+                        let __cache_policy = task_config.llm_cache_policy.clone().map(Arc::new);
                         let inner_future = async {
-                            if let Some(ref policy) = retry_policy {
+                            crate::pregel::PREVIOUS.scope(__previous, async {
+                                crate::pregel::LLM_CACHE_POLICY.scope(__cache_policy, async {
+                                if let Some(ref policy) = retry_policy {
                                 // Retry-enabled execution: each attempt runs inside
                                 // the interrupt context so interrupt!() works across
                                 // retries. State is cloned per-attempt by execute_with_retry.
@@ -513,6 +517,8 @@ where
                                     }
                                 }).await
                             }
+                            }).await
+                            }).await
                         };
 
                         // Wrap with timeout when a timeout policy is configured.
@@ -721,6 +727,40 @@ where
                         error = %error,
                         "Node failed with recovery registered, scheduling recovery"
                     );
+
+                    // Persist crash-durable error markers (design 03 §11.5):
+                    // write ERROR and ERROR_SOURCE_NODE into the checkpoint's
+                    // pending_writes for this failure. The in-memory
+                    // `TaskOutput::error` pushed below handles within-run
+                    // recovery; these persisted markers let a resumed run
+                    // (after a crash before the handler executed) scan
+                    // pending_writes and schedule the error handler, instead
+                    // of silently losing the failure. Propagate put_writes
+                    // errors (audit M-5) so a storage failure fails the
+                    // superstep rather than silently dropping the marker.
+                    if let Some(cp) = checkpointer {
+                        let marker_task_id = uuid::Uuid::new_v4().to_string();
+                        let error_markers = vec![
+                            crate::checkpoint::PendingWrite {
+                                task_id: marker_task_id.clone(),
+                                channel: crate::checkpoint::reserved_keys::ERROR_SOURCE_NODE
+                                    .to_string(),
+                                value: serde_json::Value::String(failed_node_name.clone()),
+                            },
+                            crate::checkpoint::PendingWrite {
+                                task_id: marker_task_id.clone(),
+                                channel: crate::checkpoint::reserved_keys::ERROR.to_string(),
+                                value: serde_json::Value::String(error.to_string()),
+                            },
+                        ];
+                        if let Err(err) =
+                            cp.put_writes(config, error_markers, &marker_task_id).await
+                        {
+                            cancellation_token.cancel();
+                            join_set.shutdown().await;
+                            return Err(JunctureError::from(err));
+                        }
+                    }
 
                     task_outputs.push(TaskOutput {
                         task_id: uuid::Uuid::new_v4().to_string(),

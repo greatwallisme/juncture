@@ -550,6 +550,14 @@ impl From<crate::checkpoint::CheckpointError> for JunctureError {
     }
 }
 
+impl From<crate::client::ClientError> for JunctureError {
+    fn from(err: crate::client::ClientError) -> Self {
+        // Remote-graph HTTP failures surface as execution errors so callers see
+        // a normal `JunctureError` rather than a client-specific type.
+        Self::execution(err.to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

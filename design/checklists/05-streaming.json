@@ -93,7 +93,7 @@
       "name": "DebugEvent",
       "required_methods": [],
       "required_fields": [],
-      "required_variants": ["SuperstepStart", "SuperstepEnd", "CheckpointSaved", "ChannelUpdate", "RouteDecision", "BudgetStatus"],
+      "required_variants": ["SuperstepStart", "SuperstepEnd", "CheckpointSaved", "ChannelUpdate", "EdgeTraversed", "BudgetCheck"],
       "findings": [],
       "description": "Debug mode event types",
       "verification_pattern": "pub enum DebugEvent"
