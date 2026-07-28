@@ -216,9 +216,14 @@ impl RunnableConfig {
     }
 
     /// Set the maximum number of parallel tasks
+    ///
+    /// The value is clamped to a minimum of 1. A value of 0 would create a
+    /// semaphore with zero permits, causing every spawned task to block
+    /// forever on permit acquisition and the superstep to hang indefinitely
+    /// with no timeout or recovery (audit M-2).
     #[must_use]
     pub const fn with_max_parallel_tasks(mut self, max: usize) -> Self {
-        self.max_parallel_tasks = max;
+        self.max_parallel_tasks = if max < 1 { 1 } else { max };
         self
     }
 

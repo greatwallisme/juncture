@@ -79,7 +79,12 @@ impl ChatAnthropic {
     ///
     /// # Panics
     ///
-    /// This function does not panic.
+    /// Panics if the `reqwest` TLS backend fails to initialize (e.g., a broken
+    /// system OpenSSL/rustls install). A functioning TLS stack is a hard
+    /// environment requirement for any HTTP LLM client, so this surfaces at
+    /// construction. `new()` is intentionally infallible by signature; a
+    /// fallible `new() -> Result` would be a breaking API change and is
+    /// tracked as a known, accepted limitation (audit #7).
     ///
     /// # Example
     ///
@@ -97,7 +102,7 @@ impl ChatAnthropic {
                     Client::builder()
                         .timeout(Duration::from_secs(120))
                         .build()
-                        .expect("Failed to create HTTP client")
+                        .expect("Failed to create HTTP client: reqwest TLS backend initialization failed (audit #7: accepted environment-level fault)")
                 }
                 #[cfg(target_family = "wasm")]
                 {

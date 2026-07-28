@@ -22,7 +22,7 @@
 //!
 //! ```ignore
 //! use juncture::llm::{ChatModel, MockChatModel, MiddlewareModel};
-//! use juncture::llm::middleware::{LoggingMiddleware, MetricsMiddleware};
+//! use juncture::llm::{LoggingMiddleware, MetricsMiddleware};
 //! use juncture::Message;
 //!
 //! # #[tokio::main]
@@ -78,7 +78,7 @@ thread_local! {
 /// # Example
 ///
 /// ```
-/// use juncture::llm::middleware::LlmMiddleware;
+/// use juncture::llm::LlmMiddleware;
 /// use juncture::llm::{CallOptions, LlmError, Message};
 /// use async_trait::async_trait;
 ///
@@ -161,7 +161,7 @@ pub trait LlmMiddleware: Send + Sync + 'static {
 ///
 /// ```ignore
 /// use juncture::llm::{ChatModel, MockChatModel, MiddlewareModel};
-/// use juncture::llm::middleware::LoggingMiddleware;
+/// use juncture::llm::LoggingMiddleware;
 /// use juncture::Message;
 ///
 /// # #[tokio::main]
@@ -230,7 +230,7 @@ impl<M: ChatModel> MiddlewareModel<M> {
     ///
     /// ```rust
     /// use juncture::llm::{MockChatModel, MiddlewareModel};
-    /// use juncture::llm::middleware::LoggingMiddleware;
+    /// use juncture::llm::LoggingMiddleware;
     /// use std::sync::Arc;
     ///
     /// let base_model = MockChatModel::new("gpt-4");
@@ -255,14 +255,14 @@ impl<M: ChatModel> MiddlewareModel<M> {
     ///
     /// ```rust
     /// use juncture::llm::{MockChatModel, MiddlewareModel};
-    /// use juncture::llm::middleware::{LoggingMiddleware, MetricsMiddleware};
+    /// use juncture::llm::{LoggingMiddleware, MetricsMiddleware};
     /// use std::sync::Arc;
     ///
     /// let base_model = MockChatModel::new("gpt-4");
     /// let model = MiddlewareModel::new(base_model)
     ///     .with_middlewares(&[
-    ///         LoggingMiddleware::new(),
-    ///         MetricsMiddleware::new(),
+    ///         Arc::new(LoggingMiddleware::new()),
+    ///         Arc::new(MetricsMiddleware::new()),
     ///     ]);
     /// ```
     #[must_use]
@@ -339,7 +339,7 @@ impl<M: ChatModel> ChatModel for MiddlewareModel<M> {
 ///
 /// ```ignore
 /// use juncture::llm::{ChatModel, MockChatModel, MiddlewareModel};
-/// use juncture::llm::middleware::LoggingMiddleware;
+/// use juncture::llm::LoggingMiddleware;
 /// use juncture::Message;
 ///
 /// # #[tokio::main]
@@ -365,7 +365,7 @@ impl LoggingMiddleware {
     /// # Example
     ///
     /// ```rust
-    /// use juncture::llm::middleware::LoggingMiddleware;
+    /// use juncture::llm::LoggingMiddleware;
     ///
     /// let middleware = LoggingMiddleware::new();
     /// ```
@@ -385,7 +385,7 @@ impl LoggingMiddleware {
     /// # Example
     ///
     /// ```rust
-    /// use juncture::llm::middleware::LoggingMiddleware;
+    /// use juncture::llm::LoggingMiddleware;
     ///
     /// let middleware = LoggingMiddleware::new().with_model_name("gpt-4");
     /// ```
@@ -466,7 +466,7 @@ pub struct LlmMetrics {
 ///
 /// ```ignore
 /// use juncture::llm::{ChatModel, MockChatModel, MiddlewareModel};
-/// use juncture::llm::middleware::MetricsMiddleware;
+/// use juncture::llm::MetricsMiddleware;
 /// use juncture::Message;
 ///
 /// # #[tokio::main]
@@ -503,7 +503,7 @@ impl MetricsMiddleware {
     /// # Example
     ///
     /// ```rust
-    /// use juncture::llm::middleware::MetricsMiddleware;
+    /// use juncture::llm::MetricsMiddleware;
     ///
     /// let middleware = MetricsMiddleware::new();
     /// ```
@@ -523,7 +523,7 @@ impl MetricsMiddleware {
     /// # Example
     ///
     /// ```rust
-    /// use juncture::llm::middleware::MetricsMiddleware;
+    /// use juncture::llm::MetricsMiddleware;
     ///
     /// let middleware = MetricsMiddleware::new();
     /// let metrics = middleware.metrics();
@@ -550,7 +550,7 @@ impl MetricsMiddleware {
     /// # Example
     ///
     /// ```rust
-    /// use juncture::llm::middleware::MetricsMiddleware;
+    /// use juncture::llm::MetricsMiddleware;
     ///
     /// let middleware = MetricsMiddleware::new();
     /// middleware.reset();

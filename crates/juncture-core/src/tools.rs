@@ -194,7 +194,7 @@ impl<S: State> ToolRuntime<S> {
 
     /// Emit tool started lifecycle event
     ///
-    /// Sends a [`ToolsEvent::ToolStarted`] through the tools event channel
+    /// Sends a `ToolsEvent::ToolStarted` through the tools event channel
     /// when one is configured. If no channel is available, this is a no-op.
     ///
     /// # Arguments
@@ -217,7 +217,7 @@ impl<S: State> ToolRuntime<S> {
 
     /// Emit tool finished lifecycle event
     ///
-    /// Sends a [`ToolsEvent::ToolFinished`] through the tools event channel
+    /// Sends a `ToolsEvent::ToolFinished` through the tools event channel
     /// when one is configured. If no channel is available, this is a no-op.
     ///
     /// # Arguments

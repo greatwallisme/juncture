@@ -57,7 +57,7 @@ impl ProfileResult {
             .fold(f64::NEG_INFINITY, f64::max)
     }
 
-    /// Alias for [`mean_ms`] -- kept for backward compatibility with `compare.py`.
+    /// Alias for `mean_ms` -- kept for backward compatibility with `compare.py`.
     #[must_use]
     pub fn wall_ms(&self) -> f64 {
         self.mean_ms()

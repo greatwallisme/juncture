@@ -1056,13 +1056,15 @@ impl BatchTransformer {
     ///
     /// Returns `None` if the buffer is empty.
     ///
-    /// # Panics
-    ///
-    /// Panics if the internal mutex is poisoned (i.e., another thread
-    /// panicked while holding the lock).
+    /// Recovers the guard from a poisoned mutex instead of panicking, so a
+    /// prior thread panic does not crash the stream pipeline (audit
+    /// lock-poisoning).
     #[must_use]
     pub fn flush(&self) -> Option<serde_json::Value> {
-        let mut buffer = self.buffer.lock().expect("BatchTransformer buffer lock");
+        let mut buffer = self
+            .buffer
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if buffer.is_empty() {
             return None;
         }
@@ -1084,7 +1086,10 @@ impl Clone for BatchTransformer {
 
 impl StreamTransformer for BatchTransformer {
     fn transform(&self, data: serde_json::Value) -> Option<serde_json::Value> {
-        let mut buffer = self.buffer.lock().expect("BatchTransformer buffer lock");
+        let mut buffer = self
+            .buffer
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         buffer.push(data);
         let items = (buffer.len() >= self.size).then(|| std::mem::take(&mut *buffer));
         drop(buffer);

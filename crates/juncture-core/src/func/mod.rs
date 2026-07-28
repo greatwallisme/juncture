@@ -1,7 +1,7 @@
 //! Functional API for defining workflows with plain functions
 //!
 //! This module provides the functional entrypoint/task API as an alternative
-//! to [`StateGraph`](crate::graph::StateGraph). Users can define workflows
+//! to [`StateGraph`]. Users can define workflows
 //! using ordinary async functions with runtime context instead of manually
 //! building graphs.
 //!

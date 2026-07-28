@@ -6,7 +6,7 @@ mod state_derive;
 /// Derive macro for State trait
 ///
 /// Generates:
-/// - Update struct (each field becomes Option<T>)
+/// - Update struct (each field becomes `Option<T>`)
 /// - Field index constants
 /// - State trait implementation
 #[proc_macro_derive(State, attributes(reducer, state_version, migrate_from, subset_of))]

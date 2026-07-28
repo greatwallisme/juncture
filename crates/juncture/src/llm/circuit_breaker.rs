@@ -18,7 +18,7 @@
 //! ```ignore
 //! use juncture::llm::{ChatModel, MockChatModel, MiddlewareModel};
 //! use juncture::llm::middleware::CircuitBreaker;
-//! use juncture::llm::circuit_breaker::{CircuitBreakerConfig, CircuitState};
+//! use juncture::llm::{CircuitBreakerConfig, CircuitState};
 //! use std::time::Duration;
 //!
 //! # #[tokio::main]
@@ -173,7 +173,7 @@ pub struct CircuitBreakerOpenError;
 /// # Example
 ///
 /// ```rust
-/// use juncture::llm::circuit_breaker::{CircuitBreaker, CircuitBreakerConfig};
+/// use juncture::llm::{CircuitBreaker, CircuitBreakerConfig};
 /// use std::time::Duration;
 ///
 /// let config = CircuitBreakerConfig {
@@ -228,7 +228,7 @@ impl CircuitBreaker {
     /// # Example
     ///
     /// ```rust
-    /// use juncture::llm::circuit_breaker::{CircuitBreaker, CircuitBreakerConfig};
+    /// use juncture::llm::{CircuitBreaker, CircuitBreakerConfig};
     /// use std::time::Duration;
     ///
     /// let config = CircuitBreakerConfig {
@@ -259,7 +259,7 @@ impl CircuitBreaker {
     /// # Example
     ///
     /// ```rust
-    /// use juncture::llm::circuit_breaker::{CircuitBreaker, CircuitBreakerConfig, CircuitState};
+    /// use juncture::llm::{CircuitBreaker, CircuitBreakerConfig, CircuitState};
     ///
     /// let breaker = CircuitBreaker::new(CircuitBreakerConfig::default());
     /// assert_eq!(breaker.state(), CircuitState::Closed);
@@ -309,7 +309,7 @@ impl CircuitBreaker {
     /// # Example
     ///
     /// ```rust
-    /// use juncture::llm::circuit_breaker::{CircuitBreaker, CircuitBreakerConfig};
+    /// use juncture::llm::{CircuitBreaker, CircuitBreakerConfig};
     ///
     /// let breaker = CircuitBreaker::new(CircuitBreakerConfig::default());
     /// assert_eq!(breaker.failure_count(), 0);
@@ -328,7 +328,7 @@ impl CircuitBreaker {
     /// # Example
     ///
     /// ```rust
-    /// use juncture::llm::circuit_breaker::{CircuitBreaker, CircuitBreakerConfig, CircuitState};
+    /// use juncture::llm::{CircuitBreaker, CircuitBreakerConfig, CircuitState};
     ///
     /// let breaker = CircuitBreaker::new(CircuitBreakerConfig::default());
     /// breaker.reset();
@@ -355,7 +355,7 @@ impl CircuitBreaker {
     /// # Example
     ///
     /// ```rust
-    /// use juncture::llm::circuit_breaker::{CircuitBreaker, CircuitBreakerConfig};
+    /// use juncture::llm::{CircuitBreaker, CircuitBreakerConfig};
     ///
     /// let breaker = CircuitBreaker::new(CircuitBreakerConfig::default());
     /// breaker.set_last_failure_time(0); // Set to epoch

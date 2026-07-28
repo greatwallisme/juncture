@@ -141,9 +141,9 @@ fn continue_to_jokes_node(state: &OverallState) -> Result<Command<OverallState>,
                     subject: subject.clone(),
                 },
             }
-            .into()
+            .try_into()
         })
-        .collect();
+        .collect::<Result<Vec<_>, _>>()?;
 
     Ok(Command::send(sends))
 }

@@ -64,10 +64,10 @@ type WritesMap = HashMap<(String, String, String), Vec<PendingWrite>>;
 /// Data is lost when the process exits. Suitable for development and testing.
 #[derive(Clone, Debug)]
 pub struct MemorySaver {
-    /// `thread_id` -> `checkpoint_ns` -> Vec<CheckpointTuple> (sorted by `created_at` DESC)
+    /// `thread_id` -> `checkpoint_ns` -> `Vec<CheckpointTuple>` (sorted by `created_at` DESC)
     storage: Arc<RwLock<StorageMap>>,
 
-    /// (`thread_id`, `checkpoint_id`, `checkpoint_ns`) -> Vec<PendingWrite>
+    /// (`thread_id`, `checkpoint_id`, `checkpoint_ns`) -> `Vec<PendingWrite>`
     writes: Arc<RwLock<WritesMap>>,
 
     /// TTL configuration for checkpoint expiration (M04-001)
@@ -100,13 +100,15 @@ impl MemorySaver {
     ///
     /// Returns a clone of the current TTL configuration.
     ///
-    /// # Panics
-    ///
-    /// Panics if the internal `RwLock` is poisoned (indicating a writer thread
-    /// panicked while holding the write lock).
+    /// Recovers the guard from a poisoned `RwLock` instead of panicking, so a
+    /// prior writer panic does not render the checkpointer unusable for the
+    /// rest of the process (audit lock-poisoning).
     #[must_use]
     pub fn ttl_config(&self) -> crate::types::TtlConfig {
-        self.ttl_config.read().unwrap().clone()
+        self.ttl_config
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     /// Update the TTL configuration (M04-001)
@@ -115,12 +117,14 @@ impl MemorySaver {
     ///
     /// * `ttl_config` - New TTL configuration
     ///
-    /// # Panics
-    ///
-    /// Panics if the internal `RwLock` is poisoned (indicating a writer thread
-    /// panicked while holding the write lock).
+    /// Recovers the guard from a poisoned `RwLock` instead of panicking, so a
+    /// prior writer panic does not render the checkpointer unusable for the
+    /// rest of the process (audit lock-poisoning).
     pub fn set_ttl_config(&self, ttl_config: crate::types::TtlConfig) {
-        *self.ttl_config.write().unwrap() = ttl_config;
+        *self
+            .ttl_config
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = ttl_config;
     }
 
     /// Perform lazy cleanup of expired checkpoints (M04-001)
@@ -137,7 +141,11 @@ impl MemorySaver {
         thread_id: &str,
         checkpoint_ns: &str,
     ) -> Result<(), CheckpointError> {
-        let ttl_config = self.ttl_config.read().unwrap().clone();
+        let ttl_config = self
+            .ttl_config
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
 
         // Reduce lock contention by limiting write lock scope
         let (checkpoint_ids, expired_count) = {

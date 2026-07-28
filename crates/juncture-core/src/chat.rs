@@ -52,14 +52,14 @@ impl ChatAnthropic {
     ///
     /// Reads `ANTHROPIC_API_KEY` from environment.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics if `ANTHROPIC_API_KEY` environment variable is not set.
-    #[must_use]
-    pub fn from_env() -> Self {
-        Self::new("claude-sonnet-4-20250514").with_api_key(
-            std::env::var("ANTHROPIC_API_KEY").expect("ANTHROPIC_API_KEY must be set"),
-        )
+    /// Returns [`LlmError::AuthError`] if `ANTHROPIC_API_KEY` is not set, rather
+    /// than panicking at construction (audit #5 / no-panic rule).
+    pub fn from_env() -> Result<Self, LlmError> {
+        let api_key = std::env::var("ANTHROPIC_API_KEY")
+            .map_err(|_err| LlmError::AuthError("ANTHROPIC_API_KEY not set".to_string()))?;
+        Ok(Self::new("claude-sonnet-4-20250514").with_api_key(api_key))
     }
 
     /// Set API key
@@ -483,10 +483,27 @@ impl ChatOpenAI {
 
     /// Create from environment variables
     ///
-    /// Reads `OPENAI_API_KEY` from environment.
-    #[must_use]
-    pub fn from_env() -> Self {
-        Self::new("gpt-4o").with_api_key(std::env::var("OPENAI_API_KEY").unwrap_or_default())
+    /// Reads `OPENAI_API_KEY` (required), and optionally `OPENAI_BASE_URL`
+    /// (for OpenAI-compatible endpoints; defaults to `https://api.openai.com/v1`)
+    /// and `OPENAI_MODEL` (defaults to `gpt-4o`). This matches the variables
+    /// documented in `.env.example` so a configured `.env` yields a working
+    /// compatible client without manual chaining.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LlmError::AuthError`] if `OPENAI_API_KEY` is not set. This
+    /// fails at construction rather than silently producing a client with an
+    /// empty API key that would only surface as a confusing 401 on the first
+    /// request (audit #5).
+    pub fn from_env() -> Result<Self, LlmError> {
+        let api_key = std::env::var("OPENAI_API_KEY")
+            .map_err(|_err| LlmError::AuthError("OPENAI_API_KEY not set".to_string()))?;
+        let model = std::env::var("OPENAI_MODEL").unwrap_or_else(|_| "gpt-4o".to_string());
+        let base_url = std::env::var("OPENAI_BASE_URL")
+            .unwrap_or_else(|_| "https://api.openai.com/v1".to_string());
+        Ok(Self::new(model)
+            .with_api_key(api_key)
+            .with_base_url(base_url))
     }
 
     /// Set API key

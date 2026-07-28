@@ -401,31 +401,38 @@ impl RunControl {
     ///
     /// * `reason` - Reason for the drain request
     ///
-    /// # Panics
-    ///
-    /// Panics if the internal mutex is poisoned (indicates a programming error).
+    /// Rather than panicking on a poisoned mutex (which would crash the entire
+    /// run), the guard is recovered so drain control remains usable after a
+    /// prior thread panic (audit lock-poisoning).
     pub fn request_drain(&self, reason: &str) {
-        *self.drain_reason.lock().unwrap() = Some(reason.to_string());
+        *self
+            .drain_reason
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(reason.to_string());
     }
 
     /// Check if drain has been requested
     ///
-    /// # Panics
-    ///
-    /// Panics if the internal mutex is poisoned (indicates a programming error).
+    /// Recovers the guard from a poisoned mutex instead of panicking (audit
+    /// lock-poisoning).
     #[must_use]
     pub fn drain_requested(&self) -> bool {
-        self.drain_reason.lock().unwrap().is_some()
+        self.drain_reason
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_some()
     }
 
     /// Get the drain reason if set
     ///
-    /// # Panics
-    ///
-    /// Panics if the internal mutex is poisoned (indicates a programming error).
+    /// Recovers the guard from a poisoned mutex instead of panicking (audit
+    /// lock-poisoning).
     #[must_use]
     pub fn drain_reason(&self) -> Option<String> {
-        self.drain_reason.lock().unwrap().clone()
+        self.drain_reason
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 }
 

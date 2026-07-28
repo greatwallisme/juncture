@@ -3368,3 +3368,147 @@ mod tests {
         assert_eq!(total_items, 0, "all items should be removed");
     }
 }
+
+/// Real-backend integration tests for `SqliteStore` (audit HIGH gap: store
+/// backends had no integration coverage -- only `MemoryStore` + SQL-string
+/// helpers were tested). Each test opens a private in-memory database via
+/// `sqlite::memory:` (sqlx isolates one in-memory DB per pool, so parallel
+/// tests do not collide and no temp files are left behind).
+#[cfg(all(test, feature = "sqlite"))]
+mod sqlite_tests {
+    use super::*;
+
+    /// Open a `SqliteStore` against a fresh private in-memory database.
+    async fn open_store() -> SqliteStore {
+        SqliteStore::new("sqlite::memory:")
+            .await
+            .expect("SqliteStore::new against an in-memory database should succeed")
+    }
+
+    #[tokio::test]
+    async fn test_sqlite_store_put_get_roundtrip() {
+        let store = open_store().await;
+        let value = serde_json::json!({"answer": 42});
+        store
+            .put("docs", "q1", value.clone(), None)
+            .await
+            .expect("put should succeed");
+        let item = store
+            .get("docs", "q1")
+            .await
+            .expect("get should not error")
+            .expect("item should exist after put");
+        assert_eq!(item.value, value, "round-tripped value must match");
+        assert_eq!(item.key, "q1");
+        assert_eq!(item.namespace, "docs");
+    }
+
+    #[tokio::test]
+    async fn test_sqlite_store_get_missing_returns_none() {
+        let store = open_store().await;
+        let got = store
+            .get("docs", "missing")
+            .await
+            .expect("get on a missing key must not error");
+        assert!(
+            got.is_none(),
+            "a missing key must return None, not an error"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_sqlite_store_delete_removes_item() {
+        let store = open_store().await;
+        store
+            .put("docs", "k1", serde_json::json!(1), None)
+            .await
+            .expect("put");
+        assert!(store.get("docs", "k1").await.unwrap().is_some());
+        store
+            .delete("docs", "k1")
+            .await
+            .expect("delete should succeed");
+        assert!(
+            store.get("docs", "k1").await.unwrap().is_none(),
+            "deleted key must be gone"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_sqlite_store_put_overwrites_existing_key() {
+        let store = open_store().await;
+        store
+            .put("docs", "k1", serde_json::json!(1), None)
+            .await
+            .unwrap();
+        store
+            .put("docs", "k1", serde_json::json!(2), None)
+            .await
+            .unwrap();
+        let item = store.get("docs", "k1").await.unwrap().unwrap();
+        assert_eq!(
+            item.value,
+            serde_json::json!(2),
+            "second put must overwrite"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_sqlite_store_list_namespaces() {
+        let store = open_store().await;
+        store
+            .put("alpha/sub", "k", serde_json::json!(1), None)
+            .await
+            .unwrap();
+        store
+            .put("beta/sub", "k", serde_json::json!(2), None)
+            .await
+            .unwrap();
+        let namespaces = store
+            .list_namespaces(None, None, None, None, None)
+            .await
+            .expect("list_namespaces should succeed");
+        assert!(
+            namespaces.iter().any(|n| n.contains("alpha")),
+            "alpha namespace should be listed: {namespaces:?}"
+        );
+        assert!(
+            namespaces.iter().any(|n| n.contains("beta")),
+            "beta namespace should be listed: {namespaces:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_sqlite_store_batch_put_and_get() {
+        let store = open_store().await;
+        let ops = vec![
+            StoreOp::Put {
+                namespace: "ns".to_string(),
+                key: "a".to_string(),
+                value: serde_json::json!(1),
+                index: None,
+            },
+            StoreOp::Put {
+                namespace: "ns".to_string(),
+                key: "b".to_string(),
+                value: serde_json::json!(2),
+                index: None,
+            },
+            StoreOp::Get {
+                namespace: "ns".to_string(),
+                key: "a".to_string(),
+            },
+        ];
+        let results = store.batch(ops).await.expect("batch should succeed");
+        assert_eq!(results.len(), 3, "one result per op");
+        match &results[2] {
+            StoreResult::Item(Some(item)) => assert_eq!(item.value, serde_json::json!(1)),
+            other => panic!("batch Get result should be Item(Some), got {other:?}"),
+        }
+        // Both puts must be persisted (visible to a follow-up get).
+        assert_eq!(
+            store.get("ns", "b").await.unwrap().unwrap().value,
+            serde_json::json!(2)
+        );
+    }
+}

@@ -43,3 +43,6 @@ wasm = ["juncture-core/wasm"]
 
 [lints]
 workspace = true
+
+[package.metadata.docs.rs]
+all-features = true

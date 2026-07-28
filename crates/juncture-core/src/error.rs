@@ -533,6 +533,23 @@ impl std::fmt::Display for JunctureError {
 
 impl std::error::Error for JunctureError {}
 
+/// Converts a [`CheckpointError`](crate::checkpoint::CheckpointError) into a
+/// [`JunctureError`] so checkpoint persistence failures can be propagated with
+/// `?` instead of being silently dropped.
+///
+/// This conversion is critical for engine correctness: previously the Pregel
+/// runner discarded `put_writes`/`put` errors with `let _ =`, which meant a
+/// storage failure (DB connection lost, disk full, serialization error) left
+/// the in-memory state updated while the checkpoint was missing those writes.
+/// On crash recovery, non-deterministic nodes (LLM calls, tool invocations)
+/// would re-execute and silently diverge from the original run. Propagating
+/// the error fails the superstep instead, preserving the durability contract.
+impl From<crate::checkpoint::CheckpointError> for JunctureError {
+    fn from(err: crate::checkpoint::CheckpointError) -> Self {
+        Self::checkpoint(err.to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

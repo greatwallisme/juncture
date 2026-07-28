@@ -8,6 +8,7 @@ readme.workspace = true
 keywords.workspace = true
 categories.workspace = true
 description = "Multi-agent research assistant built with Juncture"
+publish = false
 
 [dependencies]
 juncture = { path = "../../crates/juncture", features = ["openai"] }

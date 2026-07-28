@@ -633,9 +633,9 @@ fn create_fanout_graph() -> StateGraph<OverallState> {
                                 node: "generate_joke".to_string(),
                                 state: JokeInput { subject: s.clone() },
                             }
-                            .into()
+                            .try_into()
                         })
-                        .collect();
+                        .collect::<Result<Vec<_>, _>>()?;
                     Ok(Command::send(sends))
                 })
             }),

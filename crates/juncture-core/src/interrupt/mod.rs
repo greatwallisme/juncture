@@ -63,11 +63,11 @@ pub enum ResumeValue {
 
     /// Resume within a specific namespace
     /// Key = namespace (e.g., `node_name:uuid`), value = resume value
-    /// Also used for Vec<Value> convenience wrapper (index-based matching)
+    /// Also used for `Vec<Value>` convenience wrapper (index-based matching)
     ByNamespace(std::collections::HashMap<String, serde_json::Value>),
 }
 
-/// Convenience wrapper: Vec<Value> can still be used for index-based matching
+/// Convenience wrapper: `Vec<Value>` can still be used for index-based matching
 #[allow(
     clippy::fallible_impl_from,
     reason = "empty Vec is converted to Null, which is a valid value"

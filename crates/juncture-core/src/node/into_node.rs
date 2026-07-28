@@ -45,7 +45,7 @@ use std::{marker::PhantomData, sync::Arc};
 /// }
 /// ```
 ///
-/// ## Forms E-F (new, with Runtime<C> for dependency injection)
+/// ## Forms E-F (new, with `Runtime<C>` for dependency injection)
 ///
 /// ```ignore
 /// use juncture_core::{IntoNode, State, Runtime};
@@ -174,7 +174,7 @@ where
     ///
     /// # Arguments
     ///
-    /// * `func` - Async function accepting (state, Runtime<C>)
+    /// * `func` - Async function accepting (state, `Runtime<C>`)
     /// * `runtime` - Runtime context to inject
     #[must_use]
     pub const fn new(func: F, runtime: Runtime<C>) -> Self {
@@ -223,7 +223,7 @@ where
     ///
     /// # Arguments
     ///
-    /// * `func` - Async function accepting (state, config, Runtime<C>)
+    /// * `func` - Async function accepting (state, config, `Runtime<C>`)
     /// * `runtime` - Runtime context to inject
     #[must_use]
     pub const fn new(func: F, runtime: Runtime<C>) -> Self {
@@ -272,7 +272,7 @@ where
     ///
     /// # Arguments
     ///
-    /// * `func` - Async function accepting (state, Runtime<C>)
+    /// * `func` - Async function accepting (state, `Runtime<C>`)
     /// * `runtime` - Runtime context to inject
     #[must_use]
     pub const fn new(func: F, runtime: Runtime<C>) -> Self {
@@ -321,7 +321,7 @@ where
     ///
     /// # Arguments
     ///
-    /// * `func` - Async function accepting (state, config, Runtime<C>)
+    /// * `func` - Async function accepting (state, config, `Runtime<C>`)
     /// * `runtime` - Runtime context to inject
     #[must_use]
     pub const fn new(func: F, runtime: Runtime<C>) -> Self {

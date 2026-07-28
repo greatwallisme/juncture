@@ -204,7 +204,7 @@ impl<S: State> SubgraphMount<S> {
 /// each invocation receives a unique checkpoint namespace (`|name:uuid`)
 /// ensuring proper state isolation between concurrent subgraph executions.
 /// This uniqueness is guaranteed by [`SubgraphPersistence::Inherit`] mode,
-/// which generates a fresh UUID on every call to [`compute_child_namespace`].
+/// which generates a fresh UUID on every call to `compute_child_namespace`.
 pub struct SubgraphNode<S: State, Sub: State> {
     /// Compiled subgraph to execute
     pub subgraph: Arc<crate::graph::CompiledGraph<Sub>>,
@@ -321,11 +321,13 @@ where
             // the subgraph node. But the subgraph may have saved its own interrupt
             // checkpoint. Detect this and resume the subgraph instead of re-invoking.
             let should_resume = if let Some(checkpointer) = subgraph.checkpointer() {
+                // Propagate storage errors instead of silently treating them as
+                // "no checkpoint" (audit #7). A DB failure here must surface as
+                // an error; otherwise the subgraph would be re-invoked from
+                // scratch, silently discarding any prior HITL interrupt state.
                 checkpointer
                     .get_tuple(&child_config)
-                    .await
-                    .ok()
-                    .flatten()
+                    .await?
                     .is_some_and(|tuple| {
                         matches!(
                             tuple.metadata.source,
@@ -1562,7 +1564,7 @@ impl SubgraphTransformer {
     /// transformer's namespace chain applied.
     ///
     /// Each namespace segment in `self.ns` and `self.subgraph_name` is applied
-    /// via [`EventEmitter::with_subgraph_ns`] so that events emitted through
+    /// via `EventEmitter::with_subgraph_ns` so that events emitted through
     /// the returned emitter carry the full subgraph nesting path.
     ///
     /// # Arguments
@@ -1577,7 +1579,7 @@ impl SubgraphTransformer {
     /// use juncture_core::state::FieldVersions;
     /// use tokio::sync::mpsc;
     ///
-    /// #[derive(Clone, Debug)]
+    /// #[derive(Clone, Debug, Default)]
     /// struct MyState;
     /// impl juncture_core::State for MyState {
     ///     type Update = MyUpdate;

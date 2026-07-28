@@ -83,8 +83,8 @@ pub struct CallOptions {
 
     /// Tags for streaming metadata and filtering.
     ///
-    /// Tags are propagated into stream events as [`MessageStreamMetadata::tags`].
-    /// The `"nostream"` tag causes [`EventEmitter::should_emit`] to suppress
+    /// Tags are propagated into stream events as `MessageStreamMetadata::tags`.
+    /// The `"nostream"` tag causes `EventEmitter::should_emit` to suppress
     /// streaming events for this call.
     pub tags: Vec<String>,
 }

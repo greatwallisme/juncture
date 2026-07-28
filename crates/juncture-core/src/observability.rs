@@ -168,7 +168,7 @@ impl CachePolicy {
 /// Trait for collecting metrics during graph execution.
 ///
 /// Implementations can forward to OpenTelemetry, in-memory stores, or any
-/// other metrics backend. Injected via [`RunnableConfig::with_metrics_collector`].
+/// other metrics backend. Injected via `RunnableConfig::with_metrics_collector`.
 ///
 /// The trait lives in `juncture-core` so the Pregel engine can emit metrics
 /// without depending on `juncture-tracing`. The `juncture-tracing` crate
@@ -208,11 +208,10 @@ pub trait MetricsCollector: Send + Sync + 'static {
 ///
 /// The trait lives in `juncture-core` so the Pregel engine can emit callbacks
 /// without depending on `juncture-tracing`. The `juncture-tracing` crate
-/// provides a blanket impl that forwards [`GraphCallbackHandler`] to this
-/// trait, so any type implementing [`GraphCallbackHandler`] can be passed
+/// provides a blanket impl that forwards `GraphCallbackHandler` to this
+/// trait, so any type implementing `GraphCallbackHandler` can be passed
 /// to [`RunnableConfig::with_callback_handler`] directly.
 ///
-/// [`GraphCallbackHandler`]: juncture_tracing::callback::GraphCallbackHandler
 /// [`RunnableConfig::with_callback_handler`]: crate::config::RunnableConfig::with_callback_handler
 ///
 /// # Examples

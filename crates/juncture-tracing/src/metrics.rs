@@ -167,10 +167,9 @@ impl CounterHandle {
     ///
     /// * `value` - Amount to increment by
     ///
-    /// # Panics
-    ///
-    /// Panics if the internal mutex is poisoned (which indicates another
-    /// thread panicked while holding the lock).
+    /// Recovers the guard from a poisoned mutex instead of panicking, so a
+    /// prior thread panic does not disable the metrics subsystem for the rest
+    /// of the process (audit lock-poisoning).
     #[allow(
         clippy::significant_drop_tightening,
         reason = "MutexGuard is needed for entry API; tightening would complicate the code"
@@ -181,7 +180,11 @@ impl CounterHandle {
             return;
         }
         let name = self.name.clone();
-        let mut counters = self.registry.counters.lock().unwrap();
+        let mut counters = self
+            .registry
+            .counters
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let entry = counters.entry(name).or_default();
         *entry = entry.saturating_add(value);
     }
@@ -191,14 +194,17 @@ impl CounterHandle {
     /// Always reads from the in-memory `HashMap`, even when an `OTel` counter
     /// is configured. Intended for testing and local read-back.
     ///
-    /// # Panics
-    ///
-    /// Panics if the internal mutex is poisoned (which indicates another
-    /// thread panicked while holding the lock).
+    /// Recovers the guard from a poisoned mutex instead of panicking, so a
+    /// prior thread panic does not disable the metrics subsystem for the rest
+    /// of the process (audit lock-poisoning).
     #[must_use]
     pub fn get(&self) -> u64 {
         let name = self.name.clone();
-        let counters = self.registry.counters.lock().unwrap();
+        let counters = self
+            .registry
+            .counters
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         counters.get(&name).copied().unwrap_or(0)
     }
 }
@@ -224,10 +230,9 @@ impl HistogramHandle {
     ///
     /// * `value` - Value to record
     ///
-    /// # Panics
-    ///
-    /// Panics if the internal mutex is poisoned (which indicates another
-    /// thread panicked while holding the lock).
+    /// Recovers the guard from a poisoned mutex instead of panicking, so a
+    /// prior thread panic does not disable the metrics subsystem for the rest
+    /// of the process (audit lock-poisoning).
     #[allow(
         clippy::significant_drop_tightening,
         reason = "MutexGuard is needed for entry API; tightening would complicate the code"
@@ -238,7 +243,11 @@ impl HistogramHandle {
             return;
         }
         let name = self.name.clone();
-        let mut histograms = self.registry.histograms.lock().unwrap();
+        let mut histograms = self
+            .registry
+            .histograms
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let entry = histograms.entry(name).or_default();
         entry.push(value);
     }
@@ -248,14 +257,17 @@ impl HistogramHandle {
     /// Always reads from the in-memory `HashMap`, even when an `OTel` histogram
     /// is configured. Intended for testing and local read-back.
     ///
-    /// # Panics
-    ///
-    /// Panics if the internal mutex is poisoned (which indicates another
-    /// thread panicked while holding the lock).
+    /// Recovers the guard from a poisoned mutex instead of panicking, so a
+    /// prior thread panic does not disable the metrics subsystem for the rest
+    /// of the process (audit lock-poisoning).
     #[must_use]
     pub fn get_values(&self) -> Vec<f64> {
         let name = self.name.clone();
-        let histograms = self.registry.histograms.lock().unwrap();
+        let histograms = self
+            .registry
+            .histograms
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         histograms.get(&name).cloned().unwrap_or_default()
     }
 }
@@ -676,7 +688,11 @@ impl MetricsRegistry {
         boundaries: Option<&[f64]>,
     ) {
         if description.is_some() || unit.is_some() || boundaries.is_some() {
-            let mut metadata = self.inner.metadata.lock().unwrap();
+            let mut metadata = self
+                .inner
+                .metadata
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             metadata.insert(
                 name.to_string(),
                 MetricMetadata {
@@ -696,7 +712,7 @@ impl Default for MetricsRegistry {
     }
 }
 
-/// Adapter that implements [`MetricsCollector`] using a [`MetricsRegistry`].
+/// Adapter that implements `MetricsCollector` using a [`MetricsRegistry`].
 ///
 /// Use this to wire a `MetricsRegistry` into `RunnableConfig::with_metrics_collector`
 /// so the Pregel engine can emit `OTel` metrics through the registry.

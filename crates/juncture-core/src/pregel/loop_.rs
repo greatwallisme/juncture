@@ -212,7 +212,7 @@ pub struct PregelLoop<S: State> {
     /// Per-node retry policies extracted from builder metadata.
     ///
     /// When a node has an entry here, its execution in `execute_superstep` is
-    /// wrapped with [`crate::graph::builder::execute_with_retry`] for automatic
+    /// wrapped with `crate::graph::builder::execute_with_retry` for automatic
     /// retries with exponential backoff and jitter.
     retry_policies: HashMap<String, crate::graph::RetryPolicy>,
 
@@ -479,9 +479,9 @@ impl<S: State> PregelLoop<S> {
 
     /// Set per-node retry policies
     ///
-    /// Each entry maps a node name to its [`RetryPolicy`]. During superstep
+    /// Each entry maps a node name to its `RetryPolicy`. During superstep
     /// execution, nodes with a configured policy are wrapped with
-    /// [`crate::graph::builder::execute_with_retry`] for automatic retries
+    /// `crate::graph::builder::execute_with_retry` for automatic retries
     /// with exponential backoff and jitter.
     pub fn set_retry_policies(&mut self, policies: HashMap<String, crate::graph::RetryPolicy>) {
         self.retry_policies = policies;
@@ -945,7 +945,7 @@ impl<S: State> PregelLoop<S> {
 
     /// Execute one superstep
     ///
-    /// Delegates to [`runner::execute_superstep`] with the current [`step`](Self::step)
+    /// Delegates to `runner::execute_superstep` with the current [`step`](Self::step)
     /// number for observability span attributes.
     ///
     /// # Errors
@@ -959,6 +959,14 @@ impl<S: State> PregelLoop<S> {
     /// ```ignore
     /// let result = loop.execute_superstep().await?;
     /// ```
+    #[allow(
+        clippy::too_many_lines,
+        reason = "state resolution, circuit-breaker check, Arc state sharing, span setup, \
+                  superstep execution with error-path state restoration, and state recovery \
+                  share coupled locals (arc_state, span, start, result); splitting would \
+                  either duplicate the state-restore logic or thread many locals through a \
+                  helper, reducing clarity without simplifying the responsibility"
+    )]
     pub async fn execute_superstep(&mut self) -> Result<SuperstepResult<S>, JunctureError>
     where
         S: serde::de::DeserializeOwned,
@@ -1014,7 +1022,7 @@ impl<S: State> PregelLoop<S> {
         let num_tasks = u64::try_from(self.pending_tasks.len()).unwrap_or(u64::MAX);
         self.emit_counter("juncture.superstep.tasks", num_tasks);
 
-        let (result, interrupt_rx) = execute_superstep(
+        let (result, interrupt_rx) = match execute_superstep(
             &self.pending_tasks,
             &arc_state,
             &self.nodes,
@@ -1029,7 +1037,33 @@ impl<S: State> PregelLoop<S> {
             &self.fallback_map,
             self.step,
         )
-        .await?;
+        .await
+        {
+            Ok(value) => value,
+            Err(err) => {
+                // Restore the pre-superstep state before propagating the error.
+                // `std::mem::take` above left `self.state` as `Default` and moved
+                // the accumulated state into `arc_state`. Spawned tasks only read
+                // `arc_state` (they return `Update`s that are merged later in
+                // `after_tick`), so on any error or user-initiated cancellation
+                // the Arc still holds the intact pre-superstep state. Without
+                // this restore, a node failure without an error handler, a task
+                // panic, or a cancellation would drop ALL state accumulated
+                // since the last checkpoint -- a data-loss bug (audit B-1).
+                self.state = match Arc::try_unwrap(arc_state) {
+                    Ok(state) => state,
+                    Err(arc) => {
+                        tracing::warn!(
+                            name: "juncture.state.restore_after_error",
+                            step = self.step,
+                            "Arc refcount > 1 on error path, falling back to clone"
+                        );
+                        S::clone(&*arc)
+                    }
+                };
+                return Err(err);
+            }
+        };
 
         // Recover state from Arc. All spawned tasks completed and dropped their
         // Arc clones, so refcount is 1 and Arc::try_unwrap succeeds without cloning.
@@ -1233,7 +1267,7 @@ impl<S: State> PregelLoop<S> {
                     task_id: task_output.task_id.clone(),
                     step: self.step,
                     duration_ms: u64::try_from(task_output.duration.as_millis())
-                        .expect("duration should fit in u64"),
+                        .unwrap_or(u64::MAX),
                 };
                 let _ = tx.send(end_event);
 

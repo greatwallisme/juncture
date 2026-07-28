@@ -1,0 +1,79 @@
+name: CI
+
+# Runs the full quality gate (the same one enforced locally):
+#   cargo fmt --all -- --check
+#   cargo clippy --workspace --all-targets --all-features -- -D warnings
+#   cargo build --workspace --all-features
+#   cargo test --workspace --all-targets --all-features
+#   cargo test --workspace --doc --all-features
+#   RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps
+# Plus a separate MSRV (1.87) build job.
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+env:
+  CARGO_TERM_COLOR: always
+  # Avoid fetching/building optional network-dependent tools spuriously.
+  CARGO_NET_RETRY: 5
+
+jobs:
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Format check
+        run: cargo fmt --all -- --check
+
+  clippy:
+    name: clippy (deny warnings)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Install SQLite development libraries
+        run: sudo apt-get update && sudo apt-get install -y libsqlite3-dev
+      - uses: Swatinem/rust-cache@v2
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+  build-test-doc:
+    name: build + test + doc
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install SQLite development libraries
+        run: sudo apt-get update && sudo apt-get install -y libsqlite3-dev
+      - uses: Swatinem/rust-cache@v2
+      - name: Build (all features)
+        run: cargo build --workspace --all-features --locked
+      - name: Test (all targets)
+        run: cargo test --workspace --all-targets --all-features
+      - name: Doctests
+        run: cargo test --workspace --doc --all-features
+      - name: Doc build (deny warnings)
+        env:
+          RUSTDOCFLAGS: "-D warnings"
+        run: cargo doc --workspace --all-features --no-deps
+
+  msrv:
+    name: MSRV (1.87) build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.87
+      - name: Install SQLite development libraries
+        run: sudo apt-get update && sudo apt-get install -y libsqlite3-dev
+      - uses: Swatinem/rust-cache@v2
+      - name: Build on MSRV
+        run: cargo build --workspace --all-features

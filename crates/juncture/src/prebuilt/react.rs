@@ -747,6 +747,137 @@ mod tests {
         }
     }
 
+    /// Scripted `ChatModel` that returns pre-configured turns in sequence
+    /// (model call N → `turns[N]`). Lets the E2E test drive a real
+    /// model→tool→model `ReAct` loop through the `Pregel` engine without external
+    /// API calls. Turns and the position counter are shared via `Arc`, so
+    /// `bind_tools` (which clones) preserves position across the agent loop.
+    #[derive(Clone)]
+    struct ScriptedModel {
+        name: String,
+        turns: std::sync::Arc<Vec<(String, Vec<ToolCall>)>>,
+        index: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl ScriptedModel {
+        fn new(name: &str, turns: Vec<(String, Vec<ToolCall>)>) -> Self {
+            Self {
+                name: name.to_string(),
+                turns: std::sync::Arc::new(turns),
+                index: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            }
+        }
+
+        /// Advance to and return the next scripted turn (clamps to the last turn
+        /// if the model is invoked more times than scripted).
+        fn next_turn(&self) -> (String, Vec<ToolCall>) {
+            use std::sync::atomic::Ordering;
+            let i = self.index.fetch_add(1, Ordering::Relaxed);
+            self.turns
+                .get(i)
+                .or_else(|| self.turns.last())
+                .cloned()
+                .unwrap_or_default()
+        }
+    }
+
+    #[cfg_attr(target_family = "wasm", async_trait(?Send))]
+    #[cfg_attr(not(target_family = "wasm"), async_trait)]
+    impl crate::llm::ChatModel for ScriptedModel {
+        async fn invoke(
+            &self,
+            _messages: &[crate::llm::Message],
+            _options: Option<&crate::llm::CallOptions>,
+        ) -> Result<crate::llm::Message, crate::llm::LlmError> {
+            let (content, calls) = self.next_turn();
+            Ok(Message::ai_with_tool_calls(content, calls))
+        }
+
+        fn stream(
+            &self,
+            _messages: &[crate::llm::Message],
+            _options: Option<&crate::llm::CallOptions>,
+        ) -> crate::llm::BoxStream<'_, Result<crate::llm::MessageChunk, crate::llm::LlmError>>
+        {
+            // The ReAct agent drives the loop via invoke(); streaming is not
+            // exercised here. Emit one chunk to satisfy the trait contract.
+            let (content, _calls) = self.next_turn();
+            let chunk = crate::llm::MessageChunk {
+                content,
+                tool_call_chunks: Vec::new(),
+                usage_delta: None,
+            };
+            Box::pin(futures::stream::once(async move { Ok(chunk) }))
+        }
+
+        fn bind_tools(&self, _tools: Vec<crate::llm::ToolDefinition>) -> Self {
+            self.clone()
+        }
+
+        fn model_name(&self) -> &str {
+            &self.name
+        }
+    }
+
+    /// E2E through Pregel (audit HIGH gap): `create_react_agent` was only ever
+    /// builder-`unwrap()`-tested and never run through the engine (the
+    /// `13_react_agent` example builds the loop manually without this prebuilt).
+    /// Drives a full model→tool→model loop: scripted turn 1 emits an `echo`
+    /// tool call, the `EchoTool` runs inside the graph, then scripted turn 2
+    /// returns a tool-call-free message that terminates the loop.
+    #[tokio::test]
+    async fn test_react_agent_e2e_tool_loop_through_pregel() {
+        let model = ScriptedModel::new(
+            "mock",
+            vec![
+                (
+                    String::new(),
+                    vec![ToolCall {
+                        id: "call_1".to_string(),
+                        name: "echo".to_string(),
+                        arguments: json!({"message": "world"}),
+                    }],
+                ),
+                ("done".to_string(), Vec::new()),
+            ],
+        );
+
+        let graph = create_react_agent(model, vec![Box::new(EchoTool)])
+            .expect("create_react_agent should compile the graph");
+
+        let input = MessagesState {
+            messages: vec![Message::human("please echo world")],
+        };
+        let output = graph
+            .invoke_async(input, &RunnableConfig::new())
+            .await
+            .expect("agent should complete the tool loop through Pregel");
+
+        let messages = &output.value.messages;
+        // The tool must have executed: a Tool-role message carrying the echo result.
+        let tool_msg = messages
+            .iter()
+            .find(|m| matches!(m.role, crate::llm::Role::Tool))
+            .expect("a Tool-role message (echo result) must be present after the loop");
+        // The echo tool returns the echoed "world" string.
+        let tool_text = if let Content::Text(t) = &tool_msg.content {
+            t.clone()
+        } else {
+            String::new()
+        };
+        assert!(
+            tool_text.contains("world"),
+            "tool result should contain the echoed message, got: {tool_text}"
+        );
+        // The final AI message must have no pending tool calls (loop terminated).
+        let final_ai = messages
+            .iter()
+            .rev()
+            .find(|m| matches!(m.role, crate::llm::Role::Ai) && m.tool_calls.is_empty())
+            .expect("a final AI message with no tool calls must be present (loop terminated)");
+        let _ = final_ai;
+    }
+
     #[test]
     fn test_react_agent_config_default() {
         let config = ReactAgentConfig::default();

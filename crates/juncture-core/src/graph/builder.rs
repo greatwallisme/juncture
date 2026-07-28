@@ -37,14 +37,14 @@ pub struct CompileConfig {
     ///
     /// When a node listed here is about to execute, the graph pauses and
     /// returns control to the caller. Runtime `interrupt_before` in
-    /// [`RunnableConfig`] takes precedence over this list.
+    /// `RunnableConfig` takes precedence over this list.
     pub interrupt_before: Vec<String>,
 
     /// Nodes that should interrupt after execution (HITL)
     ///
     /// After a node listed here finishes executing, the graph pauses and
     /// returns control to the caller. Runtime `interrupt_after` in
-    /// [`RunnableConfig`] takes precedence over this list.
+    /// `RunnableConfig` takes precedence over this list.
     pub interrupt_after: Vec<String>,
 }
 
@@ -71,7 +71,7 @@ pub struct NodeMetadata {
     /// When a task executing this node fails, the Pregel engine checks this
     /// field. If set, the engine creates a recovery task targeting the named
     /// handler node instead of canceling all remaining tasks. The error
-    /// handler node receives a [`NodeError`] and returns a [`Command`] whose
+    /// handler node receives a [`NodeError`] and returns a `Command` whose
     /// update is applied normally.
     pub error_handler: Option<String>,
 
@@ -738,7 +738,7 @@ impl RetryPolicy {
 ///
 /// Wraps an inner node and enforces a maximum execution duration.
 /// If the inner node does not complete within `run_timeout`, the
-/// execution is cancelled and a [`JunctureError::node_timeout`] is returned.
+/// execution is cancelled and a `JunctureError::node_timeout` is returned.
 pub struct TimeoutNode<S: State> {
     /// The inner node being wrapped
     inner: Arc<dyn crate::Node<S>>,
@@ -816,7 +816,7 @@ impl<S: State + Clone> crate::Node<S> for TimeoutNode<S> {
 /// Execute an async operation with a timeout.
 ///
 /// Wraps the provided operation in a [`tokio::time::timeout`] and returns
-/// a [`JunctureError::node_timeout`] if the operation does not complete within
+/// a `JunctureError::node_timeout` if the operation does not complete within
 /// `run_timeout`. Inner node errors are passed through unchanged.
 ///
 /// # Arguments
@@ -829,7 +829,7 @@ impl<S: State + Clone> crate::Node<S> for TimeoutNode<S> {
 ///
 /// # Errors
 ///
-/// Returns [`JunctureError::node_timeout`] if the operation exceeds `run_timeout`.
+/// Returns `JunctureError::node_timeout` if the operation exceeds `run_timeout`.
 /// Returns the inner error if the operation fails before the timeout.
 ///
 /// # Examples
@@ -1693,7 +1693,7 @@ impl<S: State, I: IntoState<S>, O: FromState<S>> StateGraph<S, I, O> {
     ///
     /// Like [`compile`](Self::compile) but accepts a [`CompileConfig`] that
     /// sets compile-time defaults for interrupt behavior. Runtime
-    /// [`RunnableConfig`] values override these when present.
+    /// `RunnableConfig` values override these when present.
     ///
     /// # Errors
     ///

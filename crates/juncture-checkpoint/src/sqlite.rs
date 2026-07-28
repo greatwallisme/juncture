@@ -433,7 +433,8 @@ impl SqliteSaver {
             .map_err(|e| CoreCheckpointError::Storage(Box::new(e)))?;
 
         // Apply schema migration (M04-002)
-        let schema_version_u32 = u32::try_from(schema_version).expect("schema_version fits in u32");
+        let schema_version_u32 =
+            u32::try_from(schema_version).map_err(|e| CoreCheckpointError::Storage(Box::new(e)))?;
         let channel_values = Self::migrate_checkpoint_schema(
             raw_channel_values,
             schema_version_u32,
@@ -735,7 +736,7 @@ impl juncture_core::checkpoint::CheckpointSaver for SqliteSaver {
             .map_err(|e| CoreCheckpointError::Storage(Box::new(e)))?
         } else {
             let limit = i64::try_from(filter.as_ref().and_then(|f| f.limit).unwrap_or(10))
-                .expect("limit value fits in i64");
+                .map_err(|e| CoreCheckpointError::Storage(Box::new(e)))?;
             sqlx::query(
                 "SELECT channel_values, channel_versions, versions_seen,
                         pending_tasks, pending_sends, pending_interrupts,
@@ -912,6 +913,8 @@ impl juncture_core::checkpoint::CheckpointSaver for SqliteSaver {
         for (idx, write) in writes.into_iter().enumerate() {
             let value_str = serde_json::to_string(&write.value)
                 .map_err(|e| CoreCheckpointError::Storage(Box::new(e)))?;
+            let idx_i64 =
+                i64::try_from(idx).map_err(|e| CoreCheckpointError::Storage(Box::new(e)))?;
 
             sqlx::query(
                 "INSERT INTO checkpoint_writes
@@ -928,7 +931,7 @@ impl juncture_core::checkpoint::CheckpointSaver for SqliteSaver {
             .bind(task_id)
             .bind(&write.channel)
             .bind(&value_str)
-            .bind(i64::try_from(idx).expect("idx fits in i64"))
+            .bind(idx_i64)
             .execute(&mut *tx)
             .await
             .map_err(|e| CoreCheckpointError::Storage(Box::new(e)))?;

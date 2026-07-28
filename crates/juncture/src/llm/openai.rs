@@ -78,7 +78,12 @@ impl ChatOpenAI {
     ///
     /// # Panics
     ///
-    /// This function does not panic.
+    /// Panics if the `reqwest` TLS backend fails to initialize (e.g., a broken
+    /// system OpenSSL/rustls install). A functioning TLS stack is a hard
+    /// environment requirement for any HTTP LLM client, so this surfaces at
+    /// construction. `new()` is intentionally infallible by signature; a
+    /// fallible `new() -> Result` would be a breaking API change and is
+    /// tracked as a known, accepted limitation (audit #7).
     ///
     /// # Example
     ///
@@ -96,7 +101,7 @@ impl ChatOpenAI {
                     Client::builder()
                         .timeout(Duration::from_secs(120))
                         .build()
-                        .expect("Failed to create HTTP client")
+                        .expect("Failed to create HTTP client: reqwest TLS backend initialization failed (audit #7: accepted environment-level fault)")
                 }
                 #[cfg(target_family = "wasm")]
                 {
@@ -115,11 +120,16 @@ impl ChatOpenAI {
 
     /// Create a new `OpenAI` client from environment variables.
     ///
-    /// Reads the `OPENAI_API_KEY` environment variable.
+    /// Reads `OPENAI_API_KEY` (required), and optionally `OPENAI_BASE_URL`
+    /// (for OpenAI-compatible endpoints such as `vLLM`, `Together AI`, `Groq`,
+    /// or `Azure OpenAI`; defaults to `https://api.openai.com/v1`) and `OPENAI_MODEL`
+    /// (defaults to `gpt-4o`). This matches the variables documented in
+    /// `.env.example` and read by `examples/src/common.rs`, so a configured
+    /// `.env` yields a working compatible client without manual chaining.
     ///
     /// # Errors
     ///
-    /// Returns [`LlmError::AuthError`] if the environment variable is not set.
+    /// Returns [`LlmError::AuthError`] if `OPENAI_API_KEY` is not set.
     ///
     /// # Example
     ///
@@ -136,7 +146,10 @@ impl ChatOpenAI {
     pub fn from_env() -> Result<Self, LlmError> {
         let api_key = std::env::var("OPENAI_API_KEY")
             .map_err(|_| LlmError::AuthError("OPENAI_API_KEY not set".to_string()))?;
-        Ok(Self::new(api_key))
+        let model = std::env::var("OPENAI_MODEL").unwrap_or_else(|_| "gpt-4o".to_string());
+        let base_url =
+            std::env::var("OPENAI_BASE_URL").unwrap_or_else(|_| OPENAI_BASE_URL.to_string());
+        Ok(Self::new(api_key).with_model(model).with_base_url(base_url))
     }
 
     /// Set a custom API base URL.

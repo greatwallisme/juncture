@@ -156,7 +156,12 @@ where
     {
         let writes = serialize_pending_writes(&output.task_id, update);
         if !writes.is_empty() {
-            let _ = cp.put_writes(config, writes, &output.task_id).await;
+            // Propagate persistence errors instead of silently dropping them.
+            // A storage failure here would leave the in-memory state updated
+            // while the checkpoint is missing these writes; on crash recovery,
+            // non-deterministic nodes (LLM calls, tool invocations) would
+            // re-execute and silently diverge from the original run (audit M-5).
+            cp.put_writes(config, writes, &output.task_id).await?;
         }
     }
 
@@ -164,6 +169,32 @@ where
         task_outputs: vec![output],
         bubble_ups: Vec::new(),
     }))
+}
+
+/// Acquire a concurrency permit, converting a closed-semaphore error into a
+/// [`JunctureError::execution`] instead of panicking (audit M-1).
+///
+/// The semaphore owned by [`execute_superstep`] is never closed during normal
+/// operation, so the error path is unreachable from the public API. Extracting
+/// the acquire into a helper makes the defensive contract directly unit-testable
+/// with a closed semaphore (see `test_acquire_permit_closed_semaphore`).
+///
+/// # Errors
+///
+/// Returns `(node_name, JunctureError)` if the semaphore has been closed and
+/// permits can no longer be acquired; the failing node name is preserved so the
+/// engine's error-handling path can attribute the failure correctly.
+async fn acquire_permit(
+    semaphore: Arc<tokio::sync::Semaphore>,
+    node_name: &str,
+) -> Result<tokio::sync::OwnedSemaphorePermit, (String, JunctureError)> {
+    match semaphore.acquire_owned().await {
+        Ok(permit) => Ok(permit),
+        Err(err) => Err((
+            node_name.to_string(),
+            JunctureError::execution(format!("Semaphore closed during task execution: {err}")),
+        )),
+    }
 }
 
 /// Execute a single superstep in parallel
@@ -202,11 +233,8 @@ where
 /// - A node execution fails
 /// - Cancellation is requested
 /// - A task's node is not found in the graph
-///
-/// # Panics
-///
-/// Panics if the semaphore permit acquisition fails (should never happen
-/// in normal operation as the semaphore is created with the correct permit count).
+/// - The concurrency semaphore is closed mid-superstep (surfaces as a task
+///   error via `acquire_permit`, never a panic -- audit M-1)
 ///
 /// # Examples
 ///
@@ -317,7 +345,12 @@ where
         return Ok((result, interrupt_rx));
     }
 
-    let semaphore = Arc::new(tokio::sync::Semaphore::new(config.max_parallel_tasks));
+    // Defense in depth: clamp the permit count to at least 1. `with_max_parallel_tasks`
+    // already clamps, but `max_parallel_tasks` is a public field that can be set
+    // directly. A zero-permit semaphore would deadlock every spawned task
+    // permanently (audit M-2).
+    let permit_count = config.max_parallel_tasks.max(1);
+    let semaphore = Arc::new(tokio::sync::Semaphore::new(permit_count));
     let mut join_set = JoinSet::new();
 
     // Spawn all tasks
@@ -381,13 +414,14 @@ where
 
         join_set.spawn(
             async move {
-                // Acquire semaphore permit
-                // The semaphore is created with max_parallel_tasks permits and
-                // we never close it, so acquisition should always succeed
-                let _permit = permit.acquire_owned().await.expect(
-                    "Semaphore acquisition failed: semaphore should never be closed \
-                     as it is owned by the PregelLoop and never dropped during execution",
-                );
+                // Acquire a concurrency permit. The semaphore is owned by the
+                // caller and should never be closed mid-superstep, but a future
+                // refactor or an early drop could close it. `acquire_permit`
+                // converts a closed-semaphore error into a `JunctureError`
+                // instead of panicking, keeping JoinSet fault isolation intact
+                // and surfacing the failure as a normal error rather than a
+                // cascading panic storm (audit M-1).
+                let _permit = acquire_permit(permit, &node_name).await?;
 
                 // Notify callback handler: node starting
                 if let Some(ref handler) = callback_handler {
@@ -650,7 +684,18 @@ where
                 {
                     let writes = serialize_pending_writes(&output.task_id, update);
                     if !writes.is_empty() {
-                        let _ = cp.put_writes(config, writes, &output.task_id).await;
+                        // Propagate persistence errors instead of silently
+                        // dropping them (audit M-5). A storage failure must fail
+                        // the superstep; otherwise the in-memory state would be
+                        // updated while the checkpoint lacks these writes,
+                        // causing non-deterministic re-execution on recovery.
+                        // Cancel remaining tasks and drain the JoinSet for clean
+                        // teardown, matching the existing error-path pattern.
+                        if let Err(err) = cp.put_writes(config, writes, &output.task_id).await {
+                            cancellation_token.cancel();
+                            join_set.shutdown().await;
+                            return Err(JunctureError::from(err));
+                        }
                     }
                 }
 
@@ -1026,6 +1071,105 @@ mod tests {
 
         assert!(result.is_err());
         assert!(result.unwrap_err().is_execution());
+    }
+
+    /// Verify the M-1 defensive path: a closed semaphore must surface as a
+    /// `JunctureError::execution` (carrying the failing node name) rather than
+    /// a panic. The semaphore owned by `execute_superstep` is never closed in
+    /// normal operation, so the path is unreachable from the public API; this
+    /// test exercises the extracted `acquire_permit` helper directly with a
+    /// closed semaphore.
+    #[tokio::test]
+    async fn test_acquire_permit_closed_semaphore() {
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(1));
+        semaphore.close();
+
+        let (failed_node, err) = acquire_permit(Arc::clone(&semaphore), "test_node")
+            .await
+            .expect_err("a closed semaphore must yield an error, not a permit");
+        assert_eq!(failed_node, "test_node");
+        assert!(
+            err.is_execution(),
+            "expected a JunctureError::execution from a closed semaphore, got {:?}",
+            err.code()
+        );
+    }
+
+    /// Verify the normal hot path: an open semaphore yields a permit.
+    #[tokio::test]
+    async fn test_acquire_permit_open_semaphore() {
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(2));
+        let permit = acquire_permit(Arc::clone(&semaphore), "test_node")
+            .await
+            .expect("an open semaphore must yield a permit");
+        // Holding one permit leaves one available; a second acquire still works.
+        let permit2 = acquire_permit(Arc::clone(&semaphore), "test_node2")
+            .await
+            .expect("a second permit must be available");
+        // A third would block (not tested -- it would hang); drop both to
+        // release the slots.
+        drop(permit);
+        drop(permit2);
+    }
+
+    /// Verify the engine's primary fault-isolation path (audit HIGH gap #3): a
+    /// task that panics inside the `JoinSet` must surface as a
+    /// `JunctureError::execution` rather than crashing the runtime or hanging.
+    /// The panic is caught by `JoinSet::join_next` as a `JoinError` and
+    /// converted in the `Err(join_error)` arm. Two tasks are used so the
+    /// single-task inline fast-path (which does not catch panics) is bypassed
+    /// and the `JoinSet` path runs.
+    #[tokio::test]
+    async fn test_execute_superstep_task_panic_propagates_as_error() {
+        let state = TestState;
+
+        let mut nodes = indexmap::IndexMap::new();
+        nodes.insert(
+            "ok_node".to_string(),
+            NodeFnCommand(|_s: &TestState| async move { Ok(crate::Command::end()) })
+                .into_node("ok_node"),
+        );
+        nodes.insert(
+            "panic_node".to_string(),
+            NodeFnCommand(|_s: &TestState| async move {
+                panic!("intentional test panic in spawned task");
+            })
+            .into_node("panic_node"),
+        );
+
+        let config = RunnableConfig::new();
+        let token = CancellationToken::new();
+        let pending_interrupts: Vec<crate::interrupt::InterruptSignal> = vec![];
+        let scratchpad = Scratchpad::new();
+        let tasks = vec![
+            PendingTask::pull(uuid::Uuid::new_v4().to_string(), "ok_node".to_string()),
+            PendingTask::pull(uuid::Uuid::new_v4().to_string(), "panic_node".to_string()),
+        ];
+
+        let result = execute_superstep(
+            &tasks,
+            &Arc::new(state.clone()),
+            &nodes,
+            &config,
+            &token,
+            None,
+            &pending_interrupts,
+            &scratchpad,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            0,
+        )
+        .await;
+
+        let err =
+            result.expect_err("a panicked task must surface as an error, not hang or return Ok");
+        assert!(
+            err.is_execution(),
+            "expected a JunctureError::execution from a panicked task, got {:?}",
+            err.code()
+        );
     }
 
     #[tokio::test]

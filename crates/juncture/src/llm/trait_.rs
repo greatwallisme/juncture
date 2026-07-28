@@ -179,7 +179,7 @@ pub struct CallOptions {
 
     /// Tags for streaming metadata and filtering.
     ///
-    /// Tags are propagated into stream events as [`MessageStreamMetadata::tags`].
+    /// Tags are propagated into stream events as `MessageStreamMetadata::tags`.
     /// The `"nostream"` tag causes streaming events to be suppressed for this call.
     pub tags: Vec<String>,
 }
@@ -309,7 +309,7 @@ pub trait ChatModel: Send + Sync + Clone + 'static {
 
     /// Wrap this model to extract structured output.
     ///
-    /// Returns a [`StructuredOutputModel`] that forces the LLM to output
+    /// Returns a `StructuredOutputModel` that forces the LLM to output
     /// JSON matching the schema of type `T`, which is then deserialized
     /// into the target type.
     ///
@@ -317,7 +317,7 @@ pub trait ChatModel: Send + Sync + Clone + 'static {
     ///
     /// # Type Parameters
     ///
-    /// * `T` - The target type for structured output (must implement [`DeserializeOwned`], [`JsonSchema`], [`Clone`], [`Send`], and [`Sync`])
+    /// * `T` - The target type for structured output (must implement `DeserializeOwned`, `JsonSchema`, [`Clone`], [`Send`], and [`Sync`])
     ///
     /// # Example
     ///

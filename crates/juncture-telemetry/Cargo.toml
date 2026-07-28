@@ -50,3 +50,6 @@ reqwest = { version = "0.12", features = ["json"] }
 
 [lints]
 workspace = true
+
+[package.metadata.docs.rs]
+all-features = true

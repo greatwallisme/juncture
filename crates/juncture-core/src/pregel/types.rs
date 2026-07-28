@@ -500,7 +500,7 @@ impl<T> SyncAsyncFuture<T> {
     /// Create an empty ready result indicating no value is available.
     ///
     /// Calling [`result()`](Self::result) on this will return
-    /// [`JunctureError::empty_channel()`].
+    /// `JunctureError::empty_channel()`.
     #[must_use]
     pub const fn empty() -> Self {
         Self::Ready(None)
@@ -521,7 +521,7 @@ impl<T> SyncAsyncFuture<T> {
     ///
     /// # Errors
     ///
-    /// - Returns [`JunctureError::empty_channel()`] if the variant is
+    /// - Returns `JunctureError::empty_channel()` if the variant is
     ///   `Ready(None)` (no value available).
     /// - Returns the error from the inner future for the `Future` variant.
     pub async fn result(self) -> Result<T, crate::JunctureError> {

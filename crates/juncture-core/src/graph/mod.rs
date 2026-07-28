@@ -4,7 +4,7 @@
 //! It includes:
 //! - [`StateGraph`]: Builder for constructing executable graphs
 //! - [`CompiledGraph`]: Optimized, validated graph for execution
-//! - [`TopologyValidator`]: Ensures graph structure is valid
+//! - `TopologyValidator`: Ensures graph structure is valid
 //! - [`TopologyError`]: Validation failure details
 //!
 //! # Examples

@@ -794,7 +794,7 @@ pub fn consume_triggered_channels<S: State>(state: &mut S, triggered_channels: &
 /// error handler. The error handler map is consulted to find the handler node
 /// name for each failed node.
 ///
-/// The recovery tasks use [`TaskTrigger::Pull`] and are appended to the next
+/// The recovery tasks use `TaskTrigger::Pull` and are appended to the next
 /// superstep's pending task list by the caller (`PregelLoop::after_tick`).
 ///
 /// # Arguments
@@ -1071,6 +1071,97 @@ mod scheduler_tests {
         let changed =
             apply_writes(&mut state, &outputs, &mut tracker).expect("empty outputs should succeed");
         assert_eq!(changed.0, 0);
+    }
+
+    /// A state with a single append-reducer field, used to verify that
+    /// concurrent writes to the same field merge deterministically regardless
+    /// of the order task outputs arrive in (the Pregel invariant documented at
+    /// `loop_.rs:1145`: "concurrent writes to the same field produce a
+    /// deterministic result").
+    #[derive(Clone, Debug, Default, PartialEq)]
+    struct AppendState {
+        items: Vec<String>,
+    }
+
+    #[derive(Clone, Debug, Default, serde::Serialize)]
+    struct AppendUpdate {
+        items: Option<Vec<String>>,
+    }
+
+    impl State for AppendState {
+        type Update = AppendUpdate;
+        type FieldVersions = FieldVersions;
+
+        fn apply(&mut self, update: Self::Update) -> FieldsChanged {
+            if let Some(new_items) = update.items {
+                self.items.extend(new_items);
+                FieldsChanged(1)
+            } else {
+                FieldsChanged(0)
+            }
+        }
+
+        fn reset_ephemeral(&mut self) {}
+    }
+
+    /// Build a PULL `TaskOutput` where `node` appends `letter` to `items`.
+    fn append_output(node: &str, letter: &str) -> crate::pregel::types::TaskOutput<AppendState> {
+        crate::pregel::types::TaskOutput {
+            task_id: format!("task_{node}"),
+            node_name: node.to_string(),
+            command: crate::Command::update(AppendUpdate {
+                items: Some(vec![letter.to_string()]),
+            }),
+            duration: std::time::Duration::ZERO,
+            trigger: crate::pregel::types::TaskTrigger::Pull,
+            triggered_fields: Vec::new(),
+            error: None,
+            circuit_blocked: false,
+        }
+    }
+
+    /// Verify the Pregel same-field-write determinism invariant: `apply_writes`
+    /// re-sorts PULL tasks alphabetically by node name before applying updates,
+    /// so the merged result is independent of the order task outputs arrive in
+    /// (they may complete in any order under the parallel `JoinSet`). Feeding the
+    /// same three writers in `[a, b, c]` vs `[c, b, a]` order must yield the
+    /// identical merged `items` (audit HIGH gap: concurrent-write determinism).
+    #[test]
+    fn test_apply_writes_concurrent_same_field_is_order_independent() {
+        let outputs_abc = vec![
+            append_output("node_a", "a"),
+            append_output("node_b", "b"),
+            append_output("node_c", "c"),
+        ];
+        let outputs_cba = vec![
+            append_output("node_c", "c"),
+            append_output("node_b", "b"),
+            append_output("node_a", "a"),
+        ];
+
+        let mut state_abc = AppendState::default();
+        let mut tracker_abc = FieldVersionTracker::new(1);
+        apply_writes(&mut state_abc, &outputs_abc, &mut tracker_abc)
+            .expect("abc order should merge cleanly");
+
+        let mut state_cba = AppendState::default();
+        let mut tracker_cba = FieldVersionTracker::new(1);
+        apply_writes(&mut state_cba, &outputs_cba, &mut tracker_cba)
+            .expect("cba order should merge cleanly");
+
+        let expected = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        assert_eq!(
+            state_abc.items, expected,
+            "abc input order should merge to alphabetical [a, b, c]"
+        );
+        assert_eq!(
+            state_cba.items, expected,
+            "cba input order must also merge to alphabetical [a, b, c] (determinism)"
+        );
+        assert_eq!(
+            state_abc.items, state_cba.items,
+            "concurrent same-field writes must be order-independent"
+        );
     }
 
     #[test]

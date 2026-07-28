@@ -1,6 +1,6 @@
 //! Compiled graph for efficient execution
 //!
-//! Provides the optimized execution structure produced by [`StateGraph::compile`].
+//! Provides the optimized execution structure produced by `StateGraph::compile`.
 //! The compiled graph includes validated topology, trigger tables, and metadata
 //! for execution by the Pregel engine.
 
@@ -118,7 +118,7 @@ impl<S: State> StreamHandle<S> {
 
 /// Compiled and validated graph ready for execution
 ///
-/// This is the output of [`StateGraph::compile`] and contains all information
+/// This is the output of `StateGraph::compile` and contains all information
 /// needed for graph execution by the Pregel engine.
 ///
 /// # Examples
@@ -550,7 +550,7 @@ impl<S: State, I: IntoState<S>, O: FromState<S>> CompiledGraph<S, I, O> {
     /// as each superstep completes, enabling real-time monitoring of execution progress.
     ///
     /// This is a convenience wrapper around [`stream_with_config`](Self::stream_with_config)
-    /// that uses a default [`StreamConfig`] with no output key filtering.
+    /// that uses a default `StreamConfig` with no output key filtering.
     ///
     /// # Arguments
     ///
@@ -605,13 +605,13 @@ impl<S: State, I: IntoState<S>, O: FromState<S>> CompiledGraph<S, I, O> {
             .await
     }
 
-    /// Stream graph execution with full [`StreamConfig`] control.
+    /// Stream graph execution with full `StreamConfig` control.
     ///
-    /// Like [`stream`](Self::stream) but accepts a [`StreamConfig`] instead
+    /// Like [`stream`](Self::stream) but accepts a `StreamConfig` instead
     /// of a bare [`StreamMode`], enabling output key filtering, subgraph
     /// inclusion, and message batch tuning.
     ///
-    /// When [`StreamConfig::output_keys`] is set, [`StreamEvent::Values`]
+    /// When `StreamConfig::output_keys` is set, [`StreamEvent::Values`]
     /// events are replaced by [`StreamEvent::FilteredValues`] containing only
     /// the requested fields as a JSON object.  Similarly, [`StreamEvent::Updates`]
     /// events become [`StreamEvent::FilteredUpdates`].
@@ -1060,7 +1060,7 @@ impl<S: State, I: IntoState<S>, O: FromState<S>> CompiledGraph<S, I, O> {
     ///
     /// # Errors
     ///
-    /// Returns [`JunctureError::Checkpoint`] if no checkpointer is configured
+    /// Returns `JunctureError::Checkpoint` if no checkpointer is configured
     /// or if the checkpoint cannot be found.
     ///
     /// # Notes
@@ -1224,7 +1224,7 @@ impl<S: State, I: IntoState<S>, O: FromState<S>> CompiledGraph<S, I, O> {
     ///
     /// # Errors
     ///
-    /// Returns [`JunctureError::Checkpoint`] if no checkpointer is configured
+    /// Returns `JunctureError::Checkpoint` if no checkpointer is configured
     /// or if the checkpoint cannot be found.
     ///
     /// # Examples
@@ -1273,7 +1273,7 @@ impl<S: State, I: IntoState<S>, O: FromState<S>> CompiledGraph<S, I, O> {
     ///
     /// # Errors
     ///
-    /// Returns [`JunctureError::Checkpoint`] if no checkpointer is configured,
+    /// Returns `JunctureError::Checkpoint` if no checkpointer is configured,
     /// no checkpoint is found, the checkpoint is not from an interrupt state,
     /// or the state cannot be deserialized.
     ///
@@ -1513,7 +1513,7 @@ impl<S: State, I: IntoState<S>, O: FromState<S>> CompiledGraph<S, I, O> {
     ///
     /// # Errors
     ///
-    /// Returns [`JunctureError::Checkpoint`] if no checkpointer is configured,
+    /// Returns `JunctureError::Checkpoint` if no checkpointer is configured,
     /// the checkpoint cannot be retrieved, or the state cannot be deserialized.
     pub async fn get_state(
         &self,
@@ -1572,7 +1572,7 @@ impl<S: State, I: IntoState<S>, O: FromState<S>> CompiledGraph<S, I, O> {
     ///
     /// # Errors
     ///
-    /// Returns [`JunctureError::Checkpoint`] if no checkpointer is configured
+    /// Returns `JunctureError::Checkpoint` if no checkpointer is configured
     /// or if the history cannot be retrieved.
     #[expect(
         clippy::unused_async,
@@ -1610,7 +1610,7 @@ impl<S: State, I: IntoState<S>, O: FromState<S>> CompiledGraph<S, I, O> {
     ///
     /// # Errors
     ///
-    /// Returns [`JunctureError::Checkpoint`] if no checkpointer is configured,
+    /// Returns `JunctureError::Checkpoint` if no checkpointer is configured,
     /// the checkpoint cannot be found, state deserialization/serialization fails,
     /// or the checkpoint cannot be saved.
     ///
@@ -1692,7 +1692,7 @@ impl<S: State, I: IntoState<S>, O: FromState<S>> CompiledGraph<S, I, O> {
     ///
     /// # Errors
     ///
-    /// Returns [`JunctureError::Checkpoint`] if no checkpointer is configured
+    /// Returns `JunctureError::Checkpoint` if no checkpointer is configured
     /// or if any update cannot be applied.
     #[expect(
         clippy::unused_async,

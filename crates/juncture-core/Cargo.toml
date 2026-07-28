@@ -53,3 +53,6 @@ juncture-derive = { version = "0.2.0", path = "../juncture-derive" }
 
 [lints]
 workspace = true
+
+[package.metadata.docs.rs]
+all-features = true

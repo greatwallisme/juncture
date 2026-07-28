@@ -295,7 +295,7 @@ impl TracingConfig {
     /// When enabled and an OTLP endpoint is configured via
     /// [`with_otlp_endpoint`](Self::with_otlp_endpoint), a global
     /// [`SdkMeterProvider`] is created alongside the tracer provider.
-    /// Consumers can then obtain a [`Meter`] via
+    /// Consumers can then obtain a `Meter` via
     /// `opentelemetry::global::meter("juncture")` and pass it to
     /// [`MetricsRegistry::with_meter`].
     ///

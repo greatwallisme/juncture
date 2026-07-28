@@ -25,7 +25,7 @@ pub struct Command<S: State> {
     /// Custom streaming data to emit during execution
     ///
     /// Nodes can attach arbitrary JSON values here that will be emitted as
-    /// [`StreamEvent::Custom`] events during graph execution. Each entry in
+    /// `StreamEvent::Custom` events during graph execution. Each entry in
     /// the vector produces one custom stream event tagged with the emitting
     /// node name. Use [`Command::with_stream_data`] to append items.
     pub stream_data: Vec<serde_json::Value>,
@@ -255,7 +255,7 @@ impl<S: State> Command<S> {
     ///
     /// The given value is appended to the command's streaming data list.
     /// During graph execution, each entry is emitted as a
-    /// [`StreamEvent::Custom`] event, allowing nodes to push custom JSON
+    /// `StreamEvent::Custom` event, allowing nodes to push custom JSON
     /// payloads to the stream consumer alongside state updates and routing.
     ///
     /// # Examples

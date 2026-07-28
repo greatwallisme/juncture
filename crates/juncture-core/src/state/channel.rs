@@ -7,6 +7,28 @@ use serde::de::DeserializeOwned;
 use serde::ser::SerializeStruct;
 use std::collections::HashSet;
 
+/// Serialize a channel value for checkpointing, returning `None` and logging a
+/// warning on failure rather than silently dropping the serialization error.
+///
+/// The `Channel::checkpoint` trait signature returns `Option<Value>` (infallible
+/// by contract), so a non-serializable channel value cannot be surfaced as an
+/// error without a breaking trait change. At minimum, log the failure so a
+/// channel silently excluded from a checkpoint is observable instead of silent
+/// (audit #8).
+fn checkpoint_to_value<T: serde::Serialize>(value: &T) -> Option<serde_json::Value> {
+    match serde_json::to_value(value) {
+        Ok(v) => Some(v),
+        Err(err) => {
+            tracing::warn!(
+                name: "juncture.channel.checkpoint_serialize_failed",
+                error = %err,
+                "Channel checkpoint serialization failed; channel excluded from checkpoint"
+            );
+            None
+        }
+    }
+}
+
 /// Reducer trait defining merge semantics for state fields
 ///
 /// Each field in a State can have its own reducer, defining how multiple
@@ -164,7 +186,7 @@ impl<'de, T: serde::Deserialize<'de>> serde::Deserialize<'de> for Overwrite<T> {
 /// # Examples
 ///
 /// ```
-/// use juncture_core::state::channel::{NamedBarrierChannel, ReplaceReducer};
+/// use juncture_core::state::channel::{Channel, NamedBarrierChannel, ReplaceReducer};
 ///
 /// let mut channel: NamedBarrierChannel<i32, ReplaceReducer> =
 ///     NamedBarrierChannel::new_with_sources(0, ["node_a", "node_b"].into_iter().map(String::from));
@@ -172,12 +194,13 @@ impl<'de, T: serde::Deserialize<'de>> serde::Deserialize<'de> for Overwrite<T> {
 /// // Initially not available
 /// assert!(!channel.is_available());
 ///
-/// // After first write, still not available
-/// channel.update("node_a".to_string(), vec![42]).expect("update should succeed");
+/// // After first write, still not available. `update` returns `bool` (true if
+/// // the channel was modified), so assert on it directly.
+/// assert!(channel.update("node_a".to_string(), vec![42]));
 /// assert!(!channel.is_available());
 ///
 /// // After second write, becomes available
-/// channel.update("node_b".to_string(), vec![100]).expect("update should succeed");
+/// assert!(channel.update("node_b".to_string(), vec![100]));
 /// assert!(channel.is_available());
 /// assert_eq!(*channel.get(), 100); // Last write wins
 /// ```
@@ -297,7 +320,7 @@ where
 
     fn checkpoint(&self) -> Option<serde_json::Value> {
         // Persist the value and seen sources
-        serde_json::to_value(&(self.value.clone(), self.seen_sources.clone())).ok()
+        checkpoint_to_value(&(self.value.clone(), self.seen_sources.clone()))
     }
 
     fn from_checkpoint(value: serde_json::Value) -> Result<Self, String>
@@ -354,13 +377,14 @@ impl<T, R: Reducer<T>> NamedBarrierChannel<T, R> {
 /// # Examples
 ///
 /// ```
-/// use juncture_core::state::channel::TopicChannel;
+/// use juncture_core::state::channel::{Channel, TopicChannel};
 ///
 /// let mut channel: TopicChannel<String> = TopicChannel::new();
 ///
-/// // Publish messages
-/// channel.update(vec!["hello".to_string()]);
-/// channel.update(vec!["world".to_string()]);
+/// // Publish messages. `TopicChannel<T>` implements `Channel<Vec<T>>`, so
+/// // `update` takes `Vec<Vec<T>>` (one batch per publisher).
+/// channel.update(vec![vec!["hello".to_string()]]);
+/// channel.update(vec![vec!["world".to_string()]]);
 ///
 /// // Get all accumulated messages
 /// let messages = channel.get();
@@ -368,9 +392,10 @@ impl<T, R: Reducer<T>> NamedBarrierChannel<T, R> {
 /// assert_eq!(messages[0], "hello");
 /// assert_eq!(messages[1], "world");
 ///
-/// // Reset for next superstep
-/// channel.reset();
-/// assert!(messages.is_empty());
+/// // Consume (clear) for the next superstep
+/// drop(messages);
+/// assert!(channel.consume());
+/// assert!(channel.get().is_empty());
 /// ```
 #[derive(Debug, Clone)]
 pub struct TopicChannel<T> {
@@ -453,7 +478,7 @@ where
     }
 
     fn checkpoint(&self) -> Option<serde_json::Value> {
-        serde_json::to_value(&self.messages).ok()
+        checkpoint_to_value(&self.messages)
     }
 
     fn from_checkpoint(value: serde_json::Value) -> Result<Self, String>
@@ -666,7 +691,7 @@ where
         // Only checkpoint if finished (preserves original semantic)
         // Save both value and is_finished state for complete restoration
         if self.is_finished {
-            serde_json::to_value(&(self.value.clone(), self.is_finished)).ok()
+            checkpoint_to_value(&(self.value.clone(), self.is_finished))
         } else {
             None
         }
@@ -812,7 +837,7 @@ where
     }
 
     fn checkpoint(&self) -> Option<serde_json::Value> {
-        serde_json::to_value(&self.value).ok()
+        checkpoint_to_value(&self.value)
     }
 
     fn from_checkpoint(value: serde_json::Value) -> Result<Self, String> {
@@ -932,11 +957,10 @@ impl<T: Send + Sync + serde::Serialize + serde::de::DeserializeOwned + 'static> 
     }
 
     fn checkpoint(&self) -> Option<serde_json::Value> {
-        serde_json::to_value(serde_json::json!({
+        checkpoint_to_value(&serde_json::json!({
             "values": &self.values,
             "capacity": self.capacity,
         }))
-        .ok()
     }
 
     fn from_checkpoint(value: serde_json::Value) -> Result<Self, String> {

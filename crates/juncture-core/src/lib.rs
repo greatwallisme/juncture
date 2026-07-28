@@ -70,39 +70,46 @@ pub mod wasm_send;
 macro_rules! interrupt {
     // Named interrupt: interrupt!("my_id", json!({...}))
     ($id:expr, $payload:expr) => {{
-        $crate::interrupt::INTERRUPT_CONTEXT
-            .try_with(|ctx| {
-                Box::pin($crate::interrupt::__interrupt_impl(
-                    &**ctx,
-                    ::serde_json::to_value(&$payload)
-                        .expect("interrupt payload must be serializable"),
-                    Some($id),
-                ))
-                .await
-            })
-            .unwrap_or_else(|_| {
-                Err($crate::JunctureError::execution(
-                    "interrupt context not set in task-local",
-                ))
-            })
+        match ::serde_json::to_value(&$payload) {
+            Ok(value) => $crate::interrupt::INTERRUPT_CONTEXT
+                .try_with(|ctx| {
+                    Box::pin($crate::interrupt::__interrupt_impl(
+                        &**ctx,
+                        value,
+                        Some($id),
+                    ))
+                    .await
+                })
+                .unwrap_or_else(|_| {
+                    Err($crate::JunctureError::execution(
+                        "interrupt context not set in task-local",
+                    ))
+                }),
+            // Serialize the payload instead of panicking. A non-serializable
+            // payload (e.g. f64::NAN, or a type that does not impl Serialize)
+            // must surface as a JunctureError the caller can handle, not crash
+            // the worker (audit #4).
+            Err(err) => Err($crate::JunctureError::execution(format!(
+                "interrupt payload serialization failed: {err}"
+            ))),
+        }
     }};
     // Anonymous interrupt: interrupt!(json!({...}))
     ($payload:expr) => {{
-        $crate::interrupt::INTERRUPT_CONTEXT
-            .try_with(|ctx| {
-                Box::pin($crate::interrupt::__interrupt_impl(
-                    &**ctx,
-                    ::serde_json::to_value(&$payload)
-                        .expect("interrupt payload must be serializable"),
-                    None,
-                ))
-                .await
-            })
-            .unwrap_or_else(|_| {
-                Err($crate::JunctureError::execution(
-                    "interrupt context not set in task-local",
-                ))
-            })
+        match ::serde_json::to_value(&$payload) {
+            Ok(value) => $crate::interrupt::INTERRUPT_CONTEXT
+                .try_with(|ctx| {
+                    Box::pin($crate::interrupt::__interrupt_impl(&**ctx, value, None)).await
+                })
+                .unwrap_or_else(|_| {
+                    Err($crate::JunctureError::execution(
+                        "interrupt context not set in task-local",
+                    ))
+                }),
+            Err(err) => Err($crate::JunctureError::execution(format!(
+                "interrupt payload serialization failed: {err}"
+            ))),
+        }
     }};
 }
 
@@ -151,21 +158,21 @@ macro_rules! interrupt {
 macro_rules! interrupt_with_ctx {
     // Named interrupt: interrupt_with_ctx!(ctx, "my_id", json!({...}))
     ($ctx:expr, $id:expr, $payload:expr) => {{
-        $crate::interrupt::__interrupt_impl(
-            $ctx,
-            ::serde_json::to_value(&$payload).expect("interrupt payload must be serializable"),
-            Some($id),
-        )
-        .await
+        match ::serde_json::to_value(&$payload) {
+            Ok(value) => $crate::interrupt::__interrupt_impl($ctx, value, Some($id)).await,
+            Err(err) => Err($crate::JunctureError::execution(format!(
+                "interrupt payload serialization failed: {err}"
+            ))),
+        }
     }};
     // Anonymous interrupt: interrupt_with_ctx!(ctx, json!({...}))
     ($ctx:expr, $payload:expr) => {{
-        $crate::interrupt::__interrupt_impl(
-            $ctx,
-            ::serde_json::to_value(&$payload).expect("interrupt payload must be serializable"),
-            None,
-        )
-        .await
+        match ::serde_json::to_value(&$payload) {
+            Ok(value) => $crate::interrupt::__interrupt_impl($ctx, value, None).await,
+            Err(err) => Err($crate::JunctureError::execution(format!(
+                "interrupt payload serialization failed: {err}"
+            ))),
+        }
     }};
 }
 

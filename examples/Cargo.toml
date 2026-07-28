@@ -8,6 +8,7 @@ readme.workspace = true
 keywords.workspace = true
 categories.workspace = true
 description = "Simple examples demonstrating Juncture graph execution patterns"
+publish = false
 
 [dependencies]
 juncture = { path = "../crates/juncture", features = ["openai"] }
