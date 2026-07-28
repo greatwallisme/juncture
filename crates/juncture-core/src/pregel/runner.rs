@@ -852,10 +852,29 @@ fn match_resume_to_interrupts(
             let mut values = vec![None; size];
 
             for (key, value) in map {
-                if let Ok(index) = key.parse::<usize>()
-                    && index < values.len()
-                {
-                    values[index] = Some(value.clone());
+                // Surface malformed keys instead of silently dropping them
+                // (audit #19): a non-numeric key, or an index outside the
+                // pending-interrupt range, is a caller mistake worth logging.
+                match key.parse::<usize>() {
+                    Ok(index) if index < values.len() => {
+                        values[index] = Some(value.clone());
+                    }
+                    Ok(index) => {
+                        tracing::warn!(
+                            name: "juncture.resume.key_out_of_range",
+                            key = %key,
+                            index,
+                            pending = pending_interrupts.len(),
+                            "Resume key index out of range; ignored"
+                        );
+                    }
+                    Err(_) => {
+                        tracing::warn!(
+                            name: "juncture.resume.key_non_numeric",
+                            key = %key,
+                            "Non-numeric resume key ignored (expected positional index)"
+                        );
+                    }
                 }
             }
 

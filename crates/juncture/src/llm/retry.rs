@@ -232,12 +232,13 @@ impl<M: ChatModel> ChatModel for RetryingModel<M> {
             match result {
                 Ok(response) => return Ok(response),
                 Err(error) if Self::is_retryable(&error) && attempt < self.max_retries => {
-                    last_error = Some(error);
-
-                    // Use suggested retry delay if available, otherwise calculate backoff
+                    // Use suggested retry delay if available, otherwise calculate
+                    // backoff. Inspect `error` by reference before moving it into
+                    // `last_error` (avoids `last_error.as_ref().unwrap()`).
                     let delay = self
-                        .extract_retry_delay(last_error.as_ref().unwrap())
+                        .extract_retry_delay(&error)
                         .unwrap_or_else(|| self.backoff_duration(attempt));
+                    last_error = Some(error);
 
                     tokio::time::sleep(delay).await;
                 }

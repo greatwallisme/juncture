@@ -74,19 +74,27 @@ pub enum ResumeValue {
 )]
 impl From<Vec<serde_json::Value>> for ResumeValue {
     fn from(values: Vec<serde_json::Value>) -> Self {
-        // Convert Vec to ByNamespace or Single
-        if values.is_empty() {
-            Self::Single(serde_json::Value::Null)
-        } else if values.len() == 1 {
-            Self::Single(values.into_iter().next().unwrap())
-        } else {
-            // Use index as key for multiple values
-            let map: std::collections::HashMap<String, serde_json::Value> = values
-                .into_iter()
-                .enumerate()
-                .map(|(i, v)| (i.to_string(), v))
-                .collect();
-            Self::ByNamespace(map)
+        // Convert Vec to Single (0 or 1 element) or ByNamespace (2+ elements).
+        // Match on the first two iterator yields so no indexing/`unwrap` is
+        // needed (the previous form called `.next().unwrap()` after a `len()==1`
+        // check, which panicked if the length check ever drifted).
+        let mut iter = values.into_iter();
+        match (iter.next(), iter.next()) {
+            // Empty: a single Null resume value.
+            (None, _) => Self::Single(serde_json::Value::Null),
+            // Exactly one element.
+            (Some(v), None) => Self::Single(v),
+            // Two or more: index-based ByNamespace map ("0", "1", ...).
+            (Some(first), Some(second)) => {
+                let mut map: std::collections::HashMap<String, serde_json::Value> =
+                    std::collections::HashMap::new();
+                map.insert("0".to_string(), first);
+                map.insert("1".to_string(), second);
+                for (i, v) in iter.enumerate() {
+                    map.insert((i + 2).to_string(), v);
+                }
+                Self::ByNamespace(map)
+            }
         }
     }
 }

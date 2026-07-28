@@ -894,16 +894,18 @@ impl<S: State> ToolNode<S> {
         arguments: &serde_json::Value,
         schema: &serde_json::Value,
     ) -> Result<(), ToolError> {
-        if !arguments.is_object() {
-            return Err(ToolError::validation_failed(vec![format!(
+        // Extract the object once via `ok_or_else` so the two blocks below can
+        // borrow `obj` directly, instead of re-calling `as_object().expect()`
+        // after a manual `is_object()` guard.
+        let obj = arguments.as_object().ok_or_else(|| {
+            ToolError::validation_failed(vec![format!(
                 "Expected object arguments, got '{}'",
                 Self::value_type_name(arguments)
-            )]));
-        }
+            )])
+        })?;
 
         // Check required fields exist
         if let Some(required) = schema.get("required").and_then(|r| r.as_array()) {
-            let obj = arguments.as_object().expect("already checked is_object");
             for field in required {
                 let field_name = field.as_str().ok_or_else(|| {
                     ToolError::validation_failed(vec![
@@ -920,7 +922,6 @@ impl<S: State> ToolNode<S> {
 
         // Validate property types if schema defines them
         if let Some(properties) = schema.get("properties").and_then(|p| p.as_object()) {
-            let obj = arguments.as_object().expect("already checked is_object");
             for (prop_name, prop_schema) in properties {
                 if let Some(arg_val) = obj.get(prop_name) {
                     Self::validate_property_type(arg_val, prop_schema, prop_name)?;

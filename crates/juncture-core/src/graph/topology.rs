@@ -152,8 +152,11 @@ impl TarjanSCC {
 
         if self.lowlink.get(node) == self.indices.get(node) {
             let mut scc = Vec::new();
-            loop {
-                let w = self.stack.pop().expect("stack should not be empty");
+            // Pop the SCC for `node`. Tarjan's invariant guarantees `node` is on
+            // the stack here, so this terminates when `node` is reached; using
+            // `while let` (instead of `pop().expect()`) avoids a panic if the
+            // invariant were ever violated by a future change.
+            while let Some(w) = self.stack.pop() {
                 self.onstack.remove(&w);
                 scc.push(w.clone());
                 if w == node {
@@ -241,7 +244,10 @@ impl TopologyValidator {
         entry_point: Option<&str>,
         builder_metadata: &IndexMap<String, crate::graph::builder::NodeMetadata>,
     ) -> Result<(), TopologyError> {
-        let entry = entry_point.expect("entry point should exist");
+        // `check_entry_point` runs before this and rejects a missing entry
+        // point, but defend against a future call-order change by surfacing a
+        // proper error instead of panicking.
+        let entry = entry_point.ok_or(TopologyError::NoEntryPoint)?;
 
         // Build adjacency list for BFS
         let mut adjacency: HashMap<String, Vec<String>> = HashMap::new();

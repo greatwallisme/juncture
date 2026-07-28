@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use sqlx::sqlite::{SqlitePool, SqlitePoolOptions};
-use tracing::debug;
+use tracing::{debug, warn};
 
 use crate::models::{
     EnrichedSession, Id, ModelStats, Observation, ObservationLevel, ObservationType, Session,
@@ -680,28 +680,155 @@ struct TraceRow {
     total_tokens: Option<i64>,
 }
 
+/// Parse a JSON column, logging (not panicking) on failure and returning the
+/// type's default. Telemetry rows are best-effort observability data: a
+/// corrupted field must be visible in logs, not silently dropped (audit #20).
+fn parse_json_field<T>(s: &str, field: &str, row_id: &str) -> T
+where
+    T: serde::de::DeserializeOwned + Default,
+{
+    serde_json::from_str(s).unwrap_or_else(|err| {
+        warn!(
+            target: "juncture.telemetry.row_parse",
+            field, row_id, error = ?err,
+            "failed to parse JSON telemetry field; using default"
+        );
+        T::default()
+    })
+}
+
+/// Parse an optional JSON column into `Option<T>`, logging on failure (returns
+/// `None` so the field reads as absent rather than a wrong default).
+fn parse_json_field_opt<T>(s: &str, field: &str, row_id: &str) -> Option<T>
+where
+    T: serde::de::DeserializeOwned,
+{
+    match serde_json::from_str::<T>(s) {
+        Ok(v) => Some(v),
+        Err(err) => {
+            warn!(
+                target: "juncture.telemetry.row_parse",
+                field, row_id, error = ?err,
+                "failed to parse JSON telemetry field; treating as absent"
+            );
+            None
+        }
+    }
+}
+
+/// Parse an `Id` column, falling back to `Id::nil()` with a log on failure.
+fn parse_id_field(s: &str, field: &str, row_id: &str) -> Id {
+    Id::parse_str(s).unwrap_or_else(|err| {
+        warn!(
+            target: "juncture.telemetry.row_parse",
+            field, row_id, value = s, error = ?err,
+            "failed to parse Id telemetry field; using nil"
+        );
+        Id::nil()
+    })
+}
+
+/// Parse an optional `Id` column.
+fn parse_id_field_opt(s: &str, field: &str, row_id: &str) -> Option<Id> {
+    match Id::parse_str(s) {
+        Ok(id) => Some(id),
+        Err(err) => {
+            warn!(
+                target: "juncture.telemetry.row_parse",
+                field, row_id, value = s, error = ?err,
+                "failed to parse optional Id telemetry field; treating as absent"
+            );
+            None
+        }
+    }
+}
+
+/// Parse an RFC3339 datetime column, falling back to `Utc::now()` with a log.
+fn parse_dt_field(s: &str, field: &str, row_id: &str) -> DateTime<Utc> {
+    match DateTime::parse_from_rfc3339(s) {
+        Ok(dt) => dt.with_timezone(&Utc),
+        Err(err) => {
+            warn!(
+                target: "juncture.telemetry.row_parse",
+                field, row_id, value = s, error = ?err,
+                "failed to parse datetime telemetry field; using current time"
+            );
+            Utc::now()
+        }
+    }
+}
+
+/// Parse an optional RFC3339 datetime column.
+fn parse_dt_field_opt(s: &str, field: &str, row_id: &str) -> Option<DateTime<Utc>> {
+    match DateTime::parse_from_rfc3339(s) {
+        Ok(dt) => Some(dt.with_timezone(&Utc)),
+        Err(err) => {
+            warn!(
+                target: "juncture.telemetry.row_parse",
+                field, row_id, value = s, error = ?err,
+                "failed to parse optional datetime telemetry field; treating as absent"
+            );
+            None
+        }
+    }
+}
+
+/// Convert an `i64` token count to `u64`, clamping a corrupt negative value to
+/// 0 with a log (rather than silently dropping it via `.ok()`).
+fn token_to_u64(t: i64, field: &str, row_id: &str) -> u64 {
+    u64::try_from(t).unwrap_or_else(|_| {
+        warn!(
+            target: "juncture.telemetry.row_parse",
+            field, row_id, value = t,
+            "negative token count clamped to 0"
+        );
+        0
+    })
+}
+
+/// Convert an optional `i64` token count to `Option<u64>`, logging (and
+/// returning `None`) for a corrupt negative value.
+fn token_to_u64_opt(t: i64, field: &str, row_id: &str) -> Option<u64> {
+    if t < 0 {
+        warn!(
+            target: "juncture.telemetry.row_parse",
+            field, row_id, value = t,
+            "negative token count treated as absent"
+        );
+        None
+    } else {
+        // t >= 0 here (negative handled above); try_from always succeeds, so the
+        // unwrap_or is an unreachable fallback that avoids an `as` cast.
+        Some(u64::try_from(t).unwrap_or(0))
+    }
+}
+
 impl TraceRow {
     fn into_trace(self) -> Trace {
+        let id = &self.id;
         Trace {
-            id: Id::parse_str(&self.id).unwrap_or_else(|_| Id::nil()),
+            id: parse_id_field(&self.id, "id", id),
             name: self.name,
             user_id: self.user_id,
             session_id: self.session_id,
-            tags: serde_json::from_str(&self.tags).unwrap_or_default(),
-            metadata: serde_json::from_str(&self.metadata).unwrap_or(serde_json::Value::Null),
+            tags: parse_json_field(&self.tags, "tags", id),
+            metadata: parse_json_field(&self.metadata, "metadata", id),
             environment: self.environment,
             release: self.release_version,
-            input: self.input.and_then(|s| serde_json::from_str(&s).ok()),
-            output: self.output.and_then(|s| serde_json::from_str(&s).ok()),
-            start_time: DateTime::parse_from_rfc3339(&self.start_time)
-                .map_or_else(|_| Utc::now(), |dt| dt.with_timezone(&Utc)),
-            end_time: self.end_time.and_then(|s| {
-                DateTime::parse_from_rfc3339(&s)
-                    .map(|dt| dt.with_timezone(&Utc))
-                    .ok()
-            }),
+            input: self
+                .input
+                .and_then(|s| parse_json_field_opt(&s, "input", id)),
+            output: self
+                .output
+                .and_then(|s| parse_json_field_opt(&s, "output", id)),
+            start_time: parse_dt_field(&self.start_time, "start_time", id),
+            end_time: self
+                .end_time
+                .and_then(|s| parse_dt_field_opt(&s, "end_time", id)),
             total_cost: self.total_cost,
-            total_tokens: self.total_tokens.and_then(|t| u64::try_from(t).ok()),
+            total_tokens: self
+                .total_tokens
+                .and_then(|t| token_to_u64_opt(t, "total_tokens", id)),
         }
     }
 }
@@ -731,6 +858,9 @@ struct ObservationRow {
 
 impl ObservationRow {
     fn into_observation(self) -> Observation {
+        // Clone the row id once for parse-failure log context (avoids borrowing
+        // `self.id` across the partial moves below).
+        let row_id = self.id.clone();
         let observation_type = match self.observation_type.as_str() {
             "GENERATION" => ObservationType::Generation,
             "TOOL_CALL" => ObservationType::ToolCall,
@@ -751,43 +881,43 @@ impl ObservationRow {
         .then(|| TokenUsage {
             input_tokens: self
                 .usage_input_tokens
-                .and_then(|t| u64::try_from(t).ok())
-                .unwrap_or(0),
+                .map_or(0, |t| token_to_u64(t, "usage_input_tokens", &row_id)),
             output_tokens: self
                 .usage_output_tokens
-                .and_then(|t| u64::try_from(t).ok())
-                .unwrap_or(0),
+                .map_or(0, |t| token_to_u64(t, "usage_output_tokens", &row_id)),
             total_tokens: self
                 .usage_total_tokens
-                .and_then(|t| u64::try_from(t).ok())
-                .unwrap_or(0),
-            cached_tokens: self.usage_cached_tokens.and_then(|t| u64::try_from(t).ok()),
+                .map_or(0, |t| token_to_u64(t, "usage_total_tokens", &row_id)),
+            cached_tokens: self
+                .usage_cached_tokens
+                .and_then(|t| token_to_u64_opt(t, "usage_cached_tokens", &row_id)),
         });
 
         Observation {
-            id: Id::parse_str(&self.id).unwrap_or_else(|_| Id::nil()),
-            trace_id: Id::parse_str(&self.trace_id).unwrap_or_else(|_| Id::nil()),
+            id: parse_id_field(&self.id, "id", &row_id),
+            trace_id: parse_id_field(&self.trace_id, "trace_id", &row_id),
             parent_observation_id: self
                 .parent_observation_id
-                .and_then(|s| Id::parse_str(&s).ok()),
+                .and_then(|s| parse_id_field_opt(&s, "parent_observation_id", &row_id)),
             name: self.name,
             observation_type,
-            start_time: DateTime::parse_from_rfc3339(&self.start_time)
-                .map_or_else(|_| Utc::now(), |dt| dt.with_timezone(&Utc)),
-            end_time: self.end_time.and_then(|s| {
-                DateTime::parse_from_rfc3339(&s)
-                    .map(|dt| dt.with_timezone(&Utc))
-                    .ok()
-            }),
-            input: self.input.and_then(|s| serde_json::from_str(&s).ok()),
-            output: self.output.and_then(|s| serde_json::from_str(&s).ok()),
-            metadata: serde_json::from_str(&self.metadata).unwrap_or(serde_json::Value::Null),
+            start_time: parse_dt_field(&self.start_time, "start_time", &row_id),
+            end_time: self
+                .end_time
+                .and_then(|s| parse_dt_field_opt(&s, "end_time", &row_id)),
+            input: self
+                .input
+                .and_then(|s| parse_json_field_opt(&s, "input", &row_id)),
+            output: self
+                .output
+                .and_then(|s| parse_json_field_opt(&s, "output", &row_id)),
+            metadata: parse_json_field(&self.metadata, "metadata", &row_id),
             level,
             status_message: self.status_message,
             model: self.model,
             model_parameters: self
                 .model_parameters
-                .and_then(|s| serde_json::from_str(&s).ok()),
+                .and_then(|s| parse_json_field_opt(&s, "model_parameters", &row_id)),
             usage,
             cost: self.cost,
         }
