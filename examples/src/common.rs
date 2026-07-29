@@ -27,6 +27,7 @@ pub fn load_llm() -> Result<ChatOpenAI, String> {
     let model = std::env::var("OPENAI_MODEL").unwrap_or_else(|_| "gpt-4o".to_string());
 
     let llm = ChatOpenAI::new(api_key)
+        .map_err(|e| e.to_string())?
         .with_base_url(base_url)
         .with_model(model);
 

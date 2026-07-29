@@ -32,7 +32,7 @@ const OLLAMA_BASE_URL: &str = "http://localhost:11434";
 ///
 /// #[tokio::main]
 /// async fn main() -> Result<(), Box<dyn std::error::Error>> {
-///     let model = ChatOllama::new("llama3.2");
+///     let model = ChatOllama::new("llama3.2")?;
 ///     let messages = vec![Message::human("Hello!")];
 ///
 ///     let response = model.invoke(&messages, None).await?;
@@ -71,45 +71,46 @@ impl ChatOllama {
     ///
     /// * `model` - Model name (e.g., "llama3.2")
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics if the `reqwest` TLS backend fails to initialize (e.g., a broken
-    /// system OpenSSL/rustls install). A functioning TLS stack is a hard
-    /// environment requirement for any HTTP LLM client, so this surfaces at
-    /// construction. `new()` is intentionally infallible by signature; a
-    /// fallible `new() -> Result` would be a breaking API change and is
-    /// tracked as a known, accepted limitation (audit #7).
+    /// Returns [`LlmError::Other`] if the `reqwest` TLS backend fails to
+    /// initialize (e.g., a broken system OpenSSL/rustls install). A functioning
+    /// TLS stack is a hard environment requirement for any HTTP LLM client, so
+    /// this surfaces at construction rather than panicking.
     ///
     /// # Example
     ///
     /// ```rust
     /// use juncture::llm::ChatOllama;
     ///
-    /// let model = ChatOllama::new("llama3.2");
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let model = ChatOllama::new("llama3.2")?;
+    /// # Ok(())
+    /// # }
     /// ```
-    #[must_use]
-    pub fn new(model: impl Into<String>) -> Self {
-        Self {
-            client: {
-                #[cfg(not(target_family = "wasm"))]
-                {
-                    Client::builder()
-                        .timeout(Duration::from_secs(300))
-                        .build()
-                        .expect("Failed to create HTTP client: reqwest TLS backend initialization failed (audit #7: accepted environment-level fault)")
-                }
-                #[cfg(target_family = "wasm")]
-                {
-                    Client::new()
-                }
-            },
+    pub fn new(model: impl Into<String>) -> Result<Self, LlmError> {
+        let client = {
+            #[cfg(not(target_family = "wasm"))]
+            {
+                Client::builder()
+                    .timeout(Duration::from_secs(300))
+                    .build()
+                    .map_err(|e| LlmError::Other(Box::new(e)))?
+            }
+            #[cfg(target_family = "wasm")]
+            {
+                Client::new()
+            }
+        };
+        Ok(Self {
+            client,
             model: model.into(),
             base_url: OLLAMA_BASE_URL.to_string(),
             temperature: None,
             top_p: None,
             tools: Vec::new(),
             stream: false,
-        }
+        })
     }
 
     /// Set a custom API base URL.
@@ -123,8 +124,11 @@ impl ChatOllama {
     /// ```rust
     /// use juncture::llm::ChatOllama;
     ///
-    /// let model = ChatOllama::new("llama3.2")
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let model = ChatOllama::new("llama3.2")?
     ///     .with_base_url("http://localhost:11434");
+    /// # Ok(())
+    /// # }
     /// ```
     #[must_use]
     pub fn with_base_url(mut self, url: impl Into<String>) -> Self {
@@ -143,8 +147,11 @@ impl ChatOllama {
     /// ```rust
     /// use juncture::llm::ChatOllama;
     ///
-    /// let model = ChatOllama::new("llama3.2")
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let model = ChatOllama::new("llama3.2")?
     ///     .with_temperature(0.7);
+    /// # Ok(())
+    /// # }
     /// ```
     #[must_use]
     pub const fn with_temperature(mut self, temperature: f32) -> Self {
@@ -801,7 +808,7 @@ mod tests {
 
     #[test]
     fn test_bind_tools_sets_tools() {
-        let model = ChatOllama::new("llama3.2");
+        let model = ChatOllama::new("llama3.2").expect("test client builds");
         assert!(model.tools.is_empty());
         let bound = model.bind_tools(vec![ToolDefinition {
             name: "echo".to_string(),

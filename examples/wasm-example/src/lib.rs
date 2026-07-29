@@ -129,6 +129,7 @@ pub async fn chat(
     message: &str,
 ) -> Result<JsValue, JsValue> {
     let chat_model = juncture::llm::ChatOpenAI::new(api_key)
+        .map_err(|e| JsValue::from_str(&e.to_string()))?
         .with_model(model)
         .with_base_url(base_url);
 

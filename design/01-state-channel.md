@@ -704,7 +704,7 @@ impl ::juncture_core::State for AgentState {
 在 LangGraph 中，每个 Channel 都有 `consume()` 方法。在 `apply_writes` 完成后（所有写入已合并到 channels），所有被当前 superstep 的 tasks 触发的 channels 会调用 `consume()`。
 
 **语义**：
-- **EphemeralValue**：`consume()` 清除值（恢复为 None/默认），使其只存在于一个 superstep
+- **EphemeralValue**：`consume()` 将值清回 `Default` 并置位 `consumed` 幂等标志，返回调用前的标志状态（首次 `false`、同一 superstep 内重复调用 `true`）。channel 内部持有 `value: T`（而非 `Option<T>`），所谓"清除"即重置为 `T::default()`；值只存活一个 superstep。引擎还在 superstep 末尾调用 `State::reset_ephemeral()` 兜底清除，二者协同保证一次性语义。
 - **其他 Channel 类型**（LastValue、BinaryOperatorAggregate、Topic 等）：`consume()` 是 no-op，但仍然更新版本号以支持版本追踪
 
 **Rust 适配**：
@@ -745,14 +745,20 @@ pub trait Channel<T> {
 }
 
 /// EphemeralChannel 的 consume 实现
-impl<T: Default> Channel<T> for EphemeralChannel<T> {
+///
+/// 内部持有 `value: T` 与 `consumed: bool` 幂等标志。`consume()` 将 value
+/// 重置为 `T::default()`、置位 `consumed`，并返回调用前的 `consumed` 状态
+/// （首次返回 `false`，同一 superstep 内重复调用返回 `true`）。引擎还在
+/// superstep 末尾调用 `State::reset_ephemeral()` 兜底清除，二者协同保证
+/// 值只存活一个 superstep。
+impl<T: Default + Send + Sync + 'static, R: Reducer<T> + Send + Sync + 'static> Channel<T>
+    for EphemeralChannel<T, R>
+{
     fn consume(&mut self) -> bool {
-        if self.value.is_some() {
-            self.value = None;
-            true
-        } else {
-            false
-        }
+        let was_consumed = self.consumed;
+        self.value = T::default();
+        self.consumed = true;
+        was_consumed
     }
 }
 ```

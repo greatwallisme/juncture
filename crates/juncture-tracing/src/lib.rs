@@ -64,6 +64,7 @@
 
 pub mod callback;
 pub mod spans;
+#[cfg(any(test, feature = "test-util"))]
 pub mod test_utils;
 pub mod types;
 
@@ -78,6 +79,7 @@ pub mod propagation;
 pub use callback::{
     CallbackHandlerAdapter, GraphCallbackHandler, GraphInterruptEvent, GraphResumeEvent,
 };
+#[cfg(any(test, feature = "test-util"))]
 pub use test_utils::TestMetricsCollector;
 pub use types::{LlmCacheKeyInput, LlmCachePolicy, ServerInfo};
 

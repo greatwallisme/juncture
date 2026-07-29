@@ -77,38 +77,39 @@ impl ChatAnthropic {
     ///
     /// * `api_key` - Anthropic API key
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics if the `reqwest` TLS backend fails to initialize (e.g., a broken
-    /// system OpenSSL/rustls install). A functioning TLS stack is a hard
-    /// environment requirement for any HTTP LLM client, so this surfaces at
-    /// construction. `new()` is intentionally infallible by signature; a
-    /// fallible `new() -> Result` would be a breaking API change and is
-    /// tracked as a known, accepted limitation (audit #7).
+    /// Returns [`LlmError::Other`] if the `reqwest` TLS backend fails to
+    /// initialize (e.g., a broken system OpenSSL/rustls install). A functioning
+    /// TLS stack is a hard environment requirement for any HTTP LLM client, so
+    /// this surfaces at construction rather than panicking.
     ///
     /// # Example
     ///
     /// ```rust
     /// use juncture::llm::ChatAnthropic;
     ///
-    /// let model = ChatAnthropic::new("sk-ant-...");
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let model = ChatAnthropic::new("sk-ant-...")?;
+    /// # Ok(())
+    /// # }
     /// ```
-    #[must_use]
-    pub fn new(api_key: impl Into<String>) -> Self {
-        Self {
-            client: {
-                #[cfg(not(target_family = "wasm"))]
-                {
-                    Client::builder()
-                        .timeout(Duration::from_secs(120))
-                        .build()
-                        .expect("Failed to create HTTP client: reqwest TLS backend initialization failed (audit #7: accepted environment-level fault)")
-                }
-                #[cfg(target_family = "wasm")]
-                {
-                    Client::new()
-                }
-            },
+    pub fn new(api_key: impl Into<String>) -> Result<Self, LlmError> {
+        let client = {
+            #[cfg(not(target_family = "wasm"))]
+            {
+                Client::builder()
+                    .timeout(Duration::from_secs(120))
+                    .build()
+                    .map_err(|e| LlmError::Other(Box::new(e)))?
+            }
+            #[cfg(target_family = "wasm")]
+            {
+                Client::new()
+            }
+        };
+        Ok(Self {
+            client,
             api_key: api_key.into(),
             model: "claude-3-5-sonnet-20241022".to_string(),
             base_url: ANTHROPIC_BASE_URL.to_string(),
@@ -116,7 +117,7 @@ impl ChatAnthropic {
             temperature: None,
             top_p: None,
             tools: Vec::new(),
-        }
+        })
     }
 
     /// Create a new Anthropic client from environment variables.
@@ -142,7 +143,7 @@ impl ChatAnthropic {
     pub fn from_env() -> Result<Self, LlmError> {
         let api_key = std::env::var("ANTHROPIC_API_KEY")
             .map_err(|_| LlmError::AuthError("ANTHROPIC_API_KEY not set".to_string()))?;
-        Ok(Self::new(api_key))
+        Self::new(api_key)
     }
 
     /// Set a custom API base URL.
@@ -156,8 +157,11 @@ impl ChatAnthropic {
     /// ```rust
     /// use juncture::llm::ChatAnthropic;
     ///
-    /// let model = ChatAnthropic::new("sk-ant-...")
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let model = ChatAnthropic::new("sk-ant-...")?
     ///     .with_base_url("https://api.anthropic.com");
+    /// # Ok(())
+    /// # }
     /// ```
     #[must_use]
     pub fn with_base_url(mut self, url: impl Into<String>) -> Self {
@@ -176,8 +180,11 @@ impl ChatAnthropic {
     /// ```rust
     /// use juncture::llm::ChatAnthropic;
     ///
-    /// let model = ChatAnthropic::new("sk-ant-...")
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let model = ChatAnthropic::new("sk-ant-...")?
     ///     .with_model("claude-3-opus-20240229");
+    /// # Ok(())
+    /// # }
     /// ```
     #[must_use]
     pub fn with_model(mut self, model: impl Into<String>) -> Self {
@@ -196,8 +203,11 @@ impl ChatAnthropic {
     /// ```rust
     /// use juncture::llm::ChatAnthropic;
     ///
-    /// let model = ChatAnthropic::new("sk-ant-...")
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let model = ChatAnthropic::new("sk-ant-...")?
     ///     .with_max_tokens(8192);
+    /// # Ok(())
+    /// # }
     /// ```
     #[must_use]
     pub const fn with_max_tokens(mut self, max_tokens: u32) -> Self {
@@ -216,8 +226,11 @@ impl ChatAnthropic {
     /// ```rust
     /// use juncture::llm::ChatAnthropic;
     ///
-    /// let model = ChatAnthropic::new("sk-ant-...")
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let model = ChatAnthropic::new("sk-ant-...")?
     ///     .with_temperature(0.7);
+    /// # Ok(())
+    /// # }
     /// ```
     #[must_use]
     pub const fn with_temperature(mut self, temperature: f32) -> Self {

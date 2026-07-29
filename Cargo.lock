@@ -1432,6 +1432,7 @@ dependencies = [
  "bytes",
  "chrono",
  "futures",
+ "juncture",
  "juncture-core",
  "juncture-derive",
  "juncture-store",
@@ -1575,6 +1576,7 @@ name = "juncture-tracing"
 version = "0.2.0"
 dependencies = [
  "juncture-core",
+ "juncture-tracing",
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry_sdk",

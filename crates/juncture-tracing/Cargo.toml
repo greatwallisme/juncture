@@ -18,6 +18,9 @@ otel = [
     "opentelemetry_sdk",
     "tracing-opentelemetry",
 ]
+# Test-only utilities (TestMetricsCollector). Off in production builds so test
+# doubles never ship in release artifacts (M-TEST-UTIL).
+test-util = []
 
 [dependencies]
 juncture-core = { version = "0.2.0", path = "../juncture-core", default-features = false }
@@ -34,6 +37,9 @@ tracing-opentelemetry = { version = "0.28", optional = true }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }
+# Enable this crate's own `test-util` feature for unit/integration/doctests so
+# the gated `test_utils` module and its doc examples compile under `cargo test`.
+juncture-tracing = { path = ".", features = ["test-util"] }
 
 [lints]
 workspace = true

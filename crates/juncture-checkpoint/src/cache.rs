@@ -81,32 +81,33 @@ pub struct MemoryCache {
 }
 
 impl MemoryCache {
-    /// Create a new in-memory cache
+    /// Default LRU capacity (`1_000` entries).
     ///
-    /// # Panics
+    /// `unwrap()` is const-evaluable here and provably non-panicking because
+    /// `1_000` is a non-zero literal (clippy prefers it over `unsafe new_unchecked`).
+    pub const DEFAULT_CAPACITY: NonZeroUsize = NonZeroUsize::new(1_000).unwrap();
+
+    /// Create a new in-memory cache.
     ///
-    /// Panics if capacity is zero.
+    /// `capacity` is a [`NonZeroUsize`] so a zero-capacity cache is
+    /// unrepresentable at the type level -- the underlying `LRU` requires a
+    /// non-zero bound, and encoding that in the parameter type removes the
+    /// need for a runtime panic on bad input.
     #[must_use]
-    pub fn new(capacity: usize) -> Self {
+    pub fn new(capacity: NonZeroUsize) -> Self {
         Self {
-            entries: Arc::new(RwLock::new(LruCache::new(
-                NonZeroUsize::new(capacity).expect("capacity must be non-zero"),
-            ))),
+            entries: Arc::new(RwLock::new(LruCache::new(capacity))),
             default_ttl: None,
         }
     }
 
-    /// Create a new cache with default TTL
+    /// Create a new cache with a default TTL.
     ///
-    /// # Panics
-    ///
-    /// Panics if capacity is zero.
+    /// See [`MemoryCache::new`] for the `NonZeroUsize` capacity contract.
     #[must_use]
-    pub fn with_ttl(capacity: usize, default_ttl: Duration) -> Self {
+    pub fn with_ttl(capacity: NonZeroUsize, default_ttl: Duration) -> Self {
         Self {
-            entries: Arc::new(RwLock::new(LruCache::new(
-                NonZeroUsize::new(capacity).expect("capacity must be non-zero"),
-            ))),
+            entries: Arc::new(RwLock::new(LruCache::new(capacity))),
             default_ttl: Some(default_ttl),
         }
     }
@@ -145,7 +146,7 @@ impl MemoryCache {
 
 impl Default for MemoryCache {
     fn default() -> Self {
-        Self::new(1000)
+        Self::new(Self::DEFAULT_CAPACITY)
     }
 }
 
@@ -229,7 +230,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_memory_cache_set_get() {
-        let cache = MemoryCache::new(10);
+        let cache = MemoryCache::new(NonZeroUsize::new(10).unwrap());
 
         cache
             .set("ns1", "key1", b"hello".to_vec(), None)
@@ -242,7 +243,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_memory_cache_miss() {
-        let cache = MemoryCache::new(10);
+        let cache = MemoryCache::new(NonZeroUsize::new(10).unwrap());
 
         let value = cache.get("ns1", "nonexistent").await.unwrap();
         assert!(value.is_none());
@@ -250,7 +251,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_memory_cache_delete() {
-        let cache = MemoryCache::new(10);
+        let cache = MemoryCache::new(NonZeroUsize::new(10).unwrap());
 
         cache
             .set("ns1", "key1", b"hello".to_vec(), None)
@@ -265,7 +266,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_memory_cache_ttl() {
-        let cache = MemoryCache::with_ttl(10, Duration::from_millis(100));
+        let cache =
+            MemoryCache::with_ttl(NonZeroUsize::new(10).unwrap(), Duration::from_millis(100));
 
         cache
             .set("ns1", "key1", b"hello".to_vec(), None)
@@ -286,7 +288,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_memory_cache_clear_namespace() {
-        let cache = MemoryCache::new(10);
+        let cache = MemoryCache::new(NonZeroUsize::new(10).unwrap());
 
         cache
             .set("ns1", "key1", b"data1".to_vec(), None)
@@ -308,7 +310,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_memory_cache_clear_all() {
-        let cache = MemoryCache::new(10);
+        let cache = MemoryCache::new(NonZeroUsize::new(10).unwrap());
 
         cache
             .set("ns1", "key1", b"data1".to_vec(), None)
@@ -327,7 +329,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_memory_cache_lru_eviction() {
-        let cache = MemoryCache::new(2);
+        let cache = MemoryCache::new(NonZeroUsize::new(2).unwrap());
 
         cache
             .set("ns1", "key1", b"data1".to_vec(), None)
@@ -360,7 +362,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_memory_cache_stats() {
-        let cache = MemoryCache::new(100);
+        let cache = MemoryCache::new(NonZeroUsize::new(100).unwrap());
 
         cache
             .set("ns1", "key1", b"data1".to_vec(), None)

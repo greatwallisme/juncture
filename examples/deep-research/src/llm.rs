@@ -22,22 +22,29 @@ const RECOVERY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1).
 /// # Examples
 ///
 /// ```
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// use deep_research::llm::build_model_with_middleware;
 ///
 /// let model = build_model_with_middleware(
 ///     "sk-...".to_string(),
 ///     Some("https://api.openai.com/v1".to_string()),
 ///     "gpt-4o"
-/// );
+/// )?;
+/// # Ok(())
+/// # }
 /// ```
-#[must_use]
+///
+/// # Errors
+///
+/// Returns [`juncture::llm::LlmError`] if the underlying HTTP client cannot be
+/// constructed (e.g., a broken TLS backend).
 pub fn build_model_with_middleware(
     api_key: String,
     base_url: Option<String>,
     model_name: &str,
-) -> MiddlewareModel<ChatOpenAI> {
+) -> Result<MiddlewareModel<ChatOpenAI>, juncture::llm::LlmError> {
     // Build base ChatOpenAI model
-    let mut model = ChatOpenAI::new(api_key);
+    let mut model = ChatOpenAI::new(api_key)?;
     if let Some(base_url) = base_url {
         model = model.with_base_url(base_url);
     }
@@ -55,9 +62,9 @@ pub fn build_model_with_middleware(
 
     // Wrap model with middleware chain
     // Order matters: logging executes first (pre), then circuit breaker (pre/post)
-    MiddlewareModel::new(model)
+    Ok(MiddlewareModel::new(model)
         .with_middleware(LoggingMiddleware::new().with_model_name(model_name))
-        .with_middleware(circuit_breaker)
+        .with_middleware(circuit_breaker))
 }
 
 // Rust guideline compliant 2026-05-27

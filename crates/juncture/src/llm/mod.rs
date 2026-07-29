@@ -55,6 +55,7 @@ pub use juncture_core::state::messages::{
 mod circuit_breaker;
 mod message;
 mod middleware;
+#[cfg(any(test, feature = "test-util"))]
 mod mock;
 mod pricing;
 mod retry;
@@ -74,6 +75,7 @@ mod ollama;
 pub use circuit_breaker::*;
 pub use message::*;
 pub use middleware::*;
+#[cfg(any(test, feature = "test-util"))]
 pub use mock::MockChatModel;
 pub use pricing::{ModelPricing, PricingTable};
 pub use retry::RetryingModel;

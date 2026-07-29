@@ -38,6 +38,14 @@ ollama = ["dep:reqwest", "dep:bytes"]
 reqwest = ["dep:reqwest", "dep:bytes"]
 store = ["juncture-store"]
 wasm = ["juncture-core/wasm"]
+# Test-only utilities (MockChatModel). Off in production builds so the test
+# double never ships in release artifacts (M-TEST-UTIL).
+test-util = []
+
+[dev-dependencies]
+# Enable this crate's own `test-util` feature for unit/integration/doctests so
+# the gated `MockChatModel` and its doc examples compile under `cargo test`.
+juncture = { path = ".", features = ["test-util"] }
 
 [lints]
 workspace = true

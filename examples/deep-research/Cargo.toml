@@ -33,6 +33,10 @@ regex = "1"
 [lints]
 workspace = true
 
+[dev-dependencies]
+# Enable `test-util` on juncture so the integration tests can use MockChatModel.
+juncture = { path = "../../crates/juncture", features = ["test-util"] }
+
 [[test]]
 name = "integration_tests"
 path = "tests/integration_tests.rs"

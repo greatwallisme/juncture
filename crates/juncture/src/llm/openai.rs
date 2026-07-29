@@ -76,38 +76,39 @@ impl ChatOpenAI {
     ///
     /// * `api_key` - `OpenAI` API key
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics if the `reqwest` TLS backend fails to initialize (e.g., a broken
-    /// system OpenSSL/rustls install). A functioning TLS stack is a hard
-    /// environment requirement for any HTTP LLM client, so this surfaces at
-    /// construction. `new()` is intentionally infallible by signature; a
-    /// fallible `new() -> Result` would be a breaking API change and is
-    /// tracked as a known, accepted limitation (audit #7).
+    /// Returns [`LlmError::Other`] if the `reqwest` TLS backend fails to
+    /// initialize (e.g., a broken system OpenSSL/rustls install). A functioning
+    /// TLS stack is a hard environment requirement for any HTTP LLM client, so
+    /// this surfaces at construction rather than panicking.
     ///
     /// # Example
     ///
     /// ```rust
     /// use juncture::llm::ChatOpenAI;
     ///
-    /// let model = ChatOpenAI::new("sk-...");
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let model = ChatOpenAI::new("sk-...")?;
+    /// # Ok(())
+    /// # }
     /// ```
-    #[must_use]
-    pub fn new(api_key: impl Into<String>) -> Self {
-        Self {
-            client: {
-                #[cfg(not(target_family = "wasm"))]
-                {
-                    Client::builder()
-                        .timeout(Duration::from_secs(120))
-                        .build()
-                        .expect("Failed to create HTTP client: reqwest TLS backend initialization failed (audit #7: accepted environment-level fault)")
-                }
-                #[cfg(target_family = "wasm")]
-                {
-                    Client::new()
-                }
-            },
+    pub fn new(api_key: impl Into<String>) -> Result<Self, LlmError> {
+        let client = {
+            #[cfg(not(target_family = "wasm"))]
+            {
+                Client::builder()
+                    .timeout(Duration::from_secs(120))
+                    .build()
+                    .map_err(|e| LlmError::Other(Box::new(e)))?
+            }
+            #[cfg(target_family = "wasm")]
+            {
+                Client::new()
+            }
+        };
+        Ok(Self {
+            client,
             api_key: api_key.into(),
             model: "gpt-4o".to_string(),
             base_url: OPENAI_BASE_URL.to_string(),
@@ -115,7 +116,7 @@ impl ChatOpenAI {
             temperature: None,
             top_p: None,
             tools: Vec::new(),
-        }
+        })
     }
 
     /// Create a new `OpenAI` client from environment variables.
@@ -149,7 +150,9 @@ impl ChatOpenAI {
         let model = std::env::var("OPENAI_MODEL").unwrap_or_else(|_| "gpt-4o".to_string());
         let base_url =
             std::env::var("OPENAI_BASE_URL").unwrap_or_else(|_| OPENAI_BASE_URL.to_string());
-        Ok(Self::new(api_key).with_model(model).with_base_url(base_url))
+        Ok(Self::new(api_key)?
+            .with_model(model)
+            .with_base_url(base_url))
     }
 
     /// Set a custom API base URL.
@@ -163,8 +166,11 @@ impl ChatOpenAI {
     /// ```rust
     /// use juncture::llm::ChatOpenAI;
     ///
-    /// let model = ChatOpenAI::new("sk-...")
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let model = ChatOpenAI::new("sk-...")?
     ///     .with_base_url("https://api.openai.com/v1");
+    /// # Ok(())
+    /// # }
     /// ```
     #[must_use]
     pub fn with_base_url(mut self, url: impl Into<String>) -> Self {
@@ -183,8 +189,11 @@ impl ChatOpenAI {
     /// ```rust
     /// use juncture::llm::ChatOpenAI;
     ///
-    /// let model = ChatOpenAI::new("sk-...")
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let model = ChatOpenAI::new("sk-...")?
     ///     .with_model("gpt-4-turbo");
+    /// # Ok(())
+    /// # }
     /// ```
     #[must_use]
     pub fn with_model(mut self, model: impl Into<String>) -> Self {
@@ -203,8 +212,11 @@ impl ChatOpenAI {
     /// ```rust
     /// use juncture::llm::ChatOpenAI;
     ///
-    /// let model = ChatOpenAI::new("sk-...")
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let model = ChatOpenAI::new("sk-...")?
     ///     .with_max_tokens(4096);
+    /// # Ok(())
+    /// # }
     /// ```
     #[must_use]
     pub const fn with_max_tokens(mut self, max_tokens: u32) -> Self {
@@ -223,8 +235,11 @@ impl ChatOpenAI {
     /// ```rust
     /// use juncture::llm::ChatOpenAI;
     ///
-    /// let model = ChatOpenAI::new("sk-...")
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let model = ChatOpenAI::new("sk-...")?
     ///     .with_temperature(0.7);
+    /// # Ok(())
+    /// # }
     /// ```
     #[must_use]
     pub const fn with_temperature(mut self, temperature: f32) -> Self {

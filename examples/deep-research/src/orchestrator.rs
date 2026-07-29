@@ -98,14 +98,14 @@ pub async fn run_research(
         config.openai_api_key.clone(),
         config.openai_base_url.clone(),
         &config.model,
-    );
+    )?;
 
     // Create researcher sub-agent graph
     let researcher_model = build_model_with_middleware(
         config.openai_api_key.clone(),
         config.openai_base_url.clone(),
         &config.model,
-    );
+    )?;
     let researcher_tools: Vec<Box<dyn juncture::tools::Tool>> = vec![
         Box::new(WebSearch::new(config.tavily_api_key.clone())),
         Box::new(ThinkTool::new()),
