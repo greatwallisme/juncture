@@ -2247,9 +2247,9 @@ async fn workflow(input: Input, runtime: &Runtime<()>) -> Result<Output> {
 ```
 
 > **实现备注 (D-03-13)**: `#[task]`/`#[entrypoint]` 由 `juncture-derive` 实现为属性宏（design §13.3）。
-> - `#[task(cache=..., retry=..., timeout=..., name=...)]`：将 `async fn(...) -> Result<O, E>` 转为返回 `SyncAsyncFuture<O>` 的可调用包装器；`retry`/`timeout` 通过 `func::run_task` 应用（指数退避 + `tokio::time::timeout`），`cache` 使用**每任务 `OnceLock<CachePolicy>`**（自包含、线程安全；运行时无需注入 cache store）。
-> - `#[entrypoint(checkpointer=..., cache=..., retry=..., timeout=..., name=...)]`：要求被标注函数为**节点兼容签名** `async fn(&S) -> Result<S::Update, JunctureError>`（即 `NodeFnUpdate` 形式），生成 `compile()` 访问器（返回 `CompiledGraph<S, S, S>`）。由于节点 future 必须为 `'static`（引擎用 `tokio::spawn`），生成的适配器会 `Clone` 一份状态快照，故要求 `S: Clone`。
-> - 偏差（已在 audit 中记录）：设计草图里 `#[entrypoint] async fn(I, &Runtime) -> Result<O>` 的 `(input, runtime)` 签名需要逆向 `IntoState`/`FromState` 桥接，proc-macro 无法生成，故当前采用节点兼容签名；跨任务/图级 cache（复用 B-012 的 `CompileConfig.cache_policy`）为后续扩展。
+> - `#[task(cache=..., retry=..., timeout=..., name=...)]`：将 `async fn(...) -> Result<O, E>` 转为返回 `SyncAsyncFuture<O>` 的可调用包装器；`retry`/`timeout` 通过 `func::run_task` 应用（指数退避 + `tokio::time::timeout`）。`cache` 采用**两级**：先查**图级 cache**（runner-scoped `TASK_CACHE_POLICY` task-local，源自 `RunnableConfig::task_cache_policy`，由 `CompiledGraph` 从 `CompileConfig.cache_policy` 注入），未命中再 fallback 到**每任务 `OnceLock<CachePolicy>`**（`#[task(cache=...)]` 的静态策略）。图级 cache 使同一图内多个 `#[task]` 共享一个 cache store。
+> - `#[entrypoint(checkpointer=..., cache=..., retry=..., timeout=..., name=...)]`：要求被标注函数为**节点兼容 + Runtime 签名** `async fn(&S, &Runtime<()>) -> Result<S::Update, JunctureError>`（`NodeFnUpdateWithRuntime` 形式），生成 `compile()` 访问器（返回 `CompiledGraph<S, S, S>`）。引擎在节点执行时把动态 `previous`（§14，从 checkpoint `__return__` 加载到 `config.previous`）合并进 `runtime.previous`，故 entrypoint 可直接经 `runtime.previous` 访问（§14 累积/增量模式）。由于节点 future 必须为 `'static`（`tokio::spawn`），适配器 `Clone` 状态快照 + `Runtime`，要求 `S: Clone`。
+> - 剩余偏差（audit 记录）：设计草图的 `#[entrypoint] async fn(I, &Runtime) -> Result<O>` 中 **I/O 类型解耦**（`I`、`O` 独立于 `S`）需要逆向 `IntoState`/`FromState` 桥接，proc-macro 无法生成，故当前 `I = S`、`O = S::Update`。`&Runtime` 参数已实现（恢复 §14 previous 访问）。I/O 解耦为后续扩展。
 
 ---
 

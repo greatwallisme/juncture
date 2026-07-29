@@ -162,42 +162,61 @@ pub fn task_impl(attr: TokenStream, item: TokenStream) -> syn::Result<TokenStrea
         |e| quote! { ::std::option::Option::Some(#e) },
     );
 
-    // Cache lookup (only when `cache` is configured).
-    let cache_lookup = args.cache.as_ref().map_or_else(
-        || quote! {},
-        |cache_expr| {
+    // Cache lookup: graph-level cache first (design 03 §13.3, runner-scoped
+    // `TASK_CACHE_POLICY` from `RunnableConfig::task_cache_policy`), then the
+    // per-task static policy as a fallback when `#[task(cache = ...)]` is set.
+    let cache_lookup = {
+        let per_task = args.cache.as_ref().map(|cache_expr| {
             quote! {
                 static __TASK_CACHE: ::std::sync::OnceLock<::juncture_core::config::CachePolicy> =
                     ::std::sync::OnceLock::new();
-                let __task_namespace = #namespace_expr;
-                let __task_key = {
-                    let __args_value = ::serde_json::to_value(&#tuple_expr)
-                        .unwrap_or(::serde_json::Value::Null);
-                    ::juncture_core::func::task_cache_key(&__task_namespace, &__args_value)
-                };
                 let __task_policy = __TASK_CACHE.get_or_init(|| #cache_expr);
-                if let ::std::option::Option::Some(__task_hit) =
-                    __task_policy
-                        .get(&__task_key)
-                        .and_then(|__v| ::serde_json::from_value::<#ok_ty>(__v).ok())
+                let __task_key =
+                    ::juncture_core::func::task_cache_key(&__task_namespace, &__task_args_value);
+                if let ::std::option::Option::Some(__task_hit) = __task_policy
+                    .get(&__task_key)
+                    .and_then(|__v| ::serde_json::from_value::<#ok_ty>(__v).ok())
                 {
                     return ::juncture_core::pregel::SyncAsyncFuture::ready(__task_hit);
                 }
             }
-        },
-    );
-
-    // Cache store on success (only when `cache` is configured).
-    let cache_store = if args.cache.is_some() {
+        });
         quote! {
-            if let ::std::result::Result::Ok(ref __task_ok) = __task_result {
+            let __task_namespace = #namespace_expr;
+            let __task_args_value =
+                ::serde_json::to_value(&#tuple_expr).unwrap_or(::serde_json::Value::Null);
+            // Graph-level cache (runner-scoped TASK_CACHE_POLICY).
+            if let ::std::option::Option::Some(__task_hit) =
+                ::juncture_core::pregel::try_task_cache_lookup::<#ok_ty>(
+                    &__task_namespace,
+                    &__task_args_value,
+                )
+            {
+                return ::juncture_core::pregel::SyncAsyncFuture::ready(__task_hit);
+            }
+            #per_task
+        }
+    };
+
+    // Cache store on success: graph-level cache first, then per-task policy.
+    let cache_store = {
+        let per_task_store = args.cache.as_ref().map(|_| {
+            quote! {
                 if let ::std::result::Result::Ok(__task_value) = ::serde_json::to_value(__task_ok) {
                     __task_policy.put(__task_key, __task_value);
                 }
             }
+        });
+        quote! {
+            if let ::std::result::Result::Ok(ref __task_ok) = __task_result {
+                ::juncture_core::pregel::try_task_cache_store(
+                    &__task_namespace,
+                    &__task_args_value,
+                    __task_ok,
+                );
+                #per_task_store
+            }
         }
-    } else {
-        quote! {}
     };
 
     let expanded = quote! {

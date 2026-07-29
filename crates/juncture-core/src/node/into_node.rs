@@ -715,11 +715,24 @@ where
     fn call(
         &self,
         state: &S,
-        _config: &RunnableConfig,
+        config: &RunnableConfig,
     ) -> std::pin::Pin<
         Box<dyn std::future::Future<Output = Result<Command<S>, JunctureError>> + Send + '_>,
     > {
-        let runtime = self.runtime.clone();
+        let mut runtime = self.runtime.clone();
+        // Design 03-pregel-engine §14: surface the engine-loaded previous
+        // return value so Runtime-aware entrypoint nodes see `runtime.previous`.
+        // `config.previous` is populated from the checkpoint `__return__` field
+        // before node execution; the PREVIOUS task-local is the runner-scoped
+        // fallback, matching `Runtime::from_core`.
+        if runtime.previous.is_none() {
+            runtime.previous = config.previous.clone().or_else(|| {
+                crate::pregel::PREVIOUS
+                    .try_with(std::clone::Clone::clone)
+                    .ok()
+                    .flatten()
+            });
+        }
         let state_clone = state.clone();
         let func = &self.func;
         Box::pin(async move {
@@ -731,11 +744,21 @@ where
     fn call_arc(
         &self,
         state: std::sync::Arc<S>,
-        _config: &RunnableConfig,
+        config: &RunnableConfig,
     ) -> std::pin::Pin<
         Box<dyn std::future::Future<Output = Result<Command<S>, JunctureError>> + Send + '_>,
     > {
-        let runtime = self.runtime.clone();
+        let mut runtime = self.runtime.clone();
+        // Design 03-pregel-engine §14: see `call` -- merge the engine-loaded
+        // previous return value into the runtime before invoking the node.
+        if runtime.previous.is_none() {
+            runtime.previous = config.previous.clone().or_else(|| {
+                crate::pregel::PREVIOUS
+                    .try_with(std::clone::Clone::clone)
+                    .ok()
+                    .flatten()
+            });
+        }
         let state_arc = std::sync::Arc::clone(&state);
         let func = &self.func;
         Box::pin(async move {

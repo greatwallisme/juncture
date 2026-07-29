@@ -54,6 +54,12 @@ pub struct RunnableConfig {
     /// `func::Runtime::previous` reflects the prior run's output. `None` on
     /// first execution and for non-entrypoint graphs.
     pub previous: Option<serde_json::Value>,
+    /// Graph-level cache policy for `#[task]` functions (design 03 §13.3).
+    /// Populated by `CompiledGraph` from `CompileConfig.cache_policy` so the
+    /// runner can scope the `TASK_CACHE_POLICY` task-local, letting `#[task]`
+    /// calls within a graph share one cache store. `None` (default) disables
+    /// graph-level task caching; tasks then use their own `#[task(cache = ...)]`.
+    pub task_cache_policy: Option<CachePolicy>,
 
     /// Checkpoint namespace (for subgraph isolation)
     pub checkpoint_ns: Option<crate::checkpoint::CheckpointNamespace>,
@@ -175,6 +181,10 @@ impl std::fmt::Debug for RunnableConfig {
                 "llm_cache_policy",
                 &self.llm_cache_policy.as_ref().map(|_| "<CachePolicy>"),
             )
+            .field(
+                "task_cache_policy",
+                &self.task_cache_policy.as_ref().map(|_| "<CachePolicy>"),
+            )
             .field("heartbeat", &self.heartbeat.as_ref().map(|_| "<Heartbeat>"))
             .field(
                 "budget_tracker",
@@ -262,6 +272,16 @@ impl RunnableConfig {
     #[must_use]
     pub fn with_cache(mut self, cache: CacheConfig) -> Self {
         self.cache = Some(cache);
+        self
+    }
+
+    /// Set the graph-level cache policy for `#[task]` functions (design 03
+    /// §13.3). When set, `#[task]` calls inside this graph share one cache
+    /// store scoped by the runner, instead of each task's static
+    /// `#[task(cache = ...)]` policy.
+    #[must_use]
+    pub fn with_task_cache_policy(mut self, policy: CachePolicy) -> Self {
+        self.task_cache_policy = Some(policy);
         self
     }
 

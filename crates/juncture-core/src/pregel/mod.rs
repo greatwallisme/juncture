@@ -46,9 +46,10 @@ mod types;
 pub use crate::stream::{StreamEvent, StreamMode};
 pub use budget::{
     BUDGET_TRACKER, BudgetConfig, BudgetExceededAction, BudgetExceededReason, BudgetReportError,
-    BudgetTracker, BudgetUsage, LLM_CACHE_POLICY, PREVIOUS, try_llm_cache_lookup,
-    try_llm_cache_store, try_report_llm_call, try_report_llm_duration, try_report_model_call,
-    try_report_tool_call, try_report_tool_duration, try_report_tool_error,
+    BudgetTracker, BudgetUsage, LLM_CACHE_POLICY, PREVIOUS, TASK_CACHE_POLICY,
+    try_llm_cache_lookup, try_llm_cache_store, try_report_llm_call, try_report_llm_duration,
+    try_report_model_call, try_report_tool_call, try_report_tool_duration, try_report_tool_error,
+    try_task_cache_lookup, try_task_cache_store,
 };
 pub use context::{ExecutionConfig, ExecutionContext, TimeoutPolicy};
 pub use durability::Durability;

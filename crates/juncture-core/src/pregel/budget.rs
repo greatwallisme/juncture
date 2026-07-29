@@ -34,6 +34,13 @@ tokio::task_local! {
     /// trait signature change (same pattern as `BUDGET_TRACKER`). `None` when
     /// no cache policy is configured (caching disabled).
     pub static LLM_CACHE_POLICY: Option<Arc<crate::observability::CachePolicy>>;
+    /// Graph-level cache policy for `#[task]` functions (design
+    /// `03-pregel-engine` §13.3). Scoped by the runner around each task from
+    /// `RunnableConfig::task_cache_policy` so `#[task]` calls within a graph
+    /// share one cache store instead of per-task static `OnceLock`s. `None`
+    /// when no graph-level cache is configured (tasks then fall back to their
+    /// own `#[task(cache = ...)]` policy).
+    pub static TASK_CACHE_POLICY: Option<crate::config::CachePolicy>;
 }
 
 /// Action to take when a budget limit is exceeded
@@ -624,6 +631,49 @@ pub fn try_llm_cache_store(input: &crate::observability::CacheKeyInput, message:
         if let Some(policy) = policy.as_ref() {
             let key = policy.generate_key(input);
             policy.put(key, message.clone());
+        }
+    });
+}
+
+/// Look up a graph-level cached `#[task]` result.
+///
+/// Consults the `TASK_CACHE_POLICY` task-local (scoped by the runner from
+/// `RunnableConfig::task_cache_policy`, design `03-pregel-engine` §13.3).
+/// `#[task]` macros call this before executing the body; a `Some` result is a
+/// cache hit and the task returns it without re-executing. Returns `None` when
+/// no graph-level cache policy is scoped (the task then falls back to its own
+/// per-task `#[task(cache = ...)]` policy) or on a miss/expiry.
+#[must_use]
+pub fn try_task_cache_lookup<O>(namespace: &str, args: &serde_json::Value) -> Option<O>
+where
+    O: serde::de::DeserializeOwned,
+{
+    TASK_CACHE_POLICY
+        .try_with(|policy| {
+            policy.as_ref().and_then(|policy| {
+                let key = crate::func::task_cache_key(namespace, args);
+                policy.get(&key).and_then(|v| serde_json::from_value::<O>(v).ok())
+            })
+        })
+        .ok()
+        .flatten()
+}
+
+/// Store a `#[task]` result in the graph-level cache.
+///
+/// Consults the `TASK_CACHE_POLICY` task-local. `#[task]` macros call this
+/// after a successful execution so subsequent identical calls hit the cache.
+/// No-op when no graph-level cache policy is scoped.
+pub fn try_task_cache_store<O>(namespace: &str, args: &serde_json::Value, result: &O)
+where
+    O: serde::Serialize,
+{
+    let _ = TASK_CACHE_POLICY.try_with(|policy| {
+        if let Some(policy) = policy.as_ref() {
+            let key = crate::func::task_cache_key(namespace, args);
+            if let Ok(value) = serde_json::to_value(result) {
+                policy.put(key, value);
+            }
         }
     });
 }

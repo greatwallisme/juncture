@@ -1,10 +1,11 @@
 //! The `#[entrypoint(...)]` attribute macro.
 //!
-//! Marks an `async fn(&S) -> Result<S::Update, JunctureError>` as a functional
-//! API entrypoint and generates a `compile()` accessor that builds a
-//! `CompiledGraph` via `compile_entrypoint_with_config`, wiring the `cache`,
+//! Marks an `async fn(&S, &Runtime<()>) -> Result<S::Update, JunctureError>` as
+//! a functional API entrypoint and generates a `compile()` accessor that builds
+//! a `CompiledGraph` via `compile_entrypoint_with_config`, wiring the `cache`,
 //! `retry`, `timeout`, and `name` args into a `TaskConfig`. See design
-//! `03-pregel-engine` §13.3.
+//! `03-pregel-engine` §13.3. The `Runtime` parameter restores design §14
+//! `previous` (Previous Result Injection) and store/context access.
 //!
 //! The caller supplies the `S`/`I`/`O` type parameters (as with
 //! `compile_entrypoint::<S, I, O, _>` today).
@@ -145,13 +146,16 @@ pub fn entrypoint_impl(attr: TokenStream, item: TokenStream) -> syn::Result<Toke
             >
         {
             ::juncture_core::func::compile_entrypoint_with_config::<#state_ty, #state_ty, #state_ty, _>(
-                ::juncture_core::node::NodeFnUpdate(
-                    |__state: &#state_ty| {
-                        // Snapshot the borrowed state so the returned future is
-                        // `'static` (the engine spawns node futures).
+                ::juncture_core::node::NodeFnUpdateWithRuntime::new(
+                    |__state: &#state_ty, __runtime: ::juncture_core::runtime::Runtime<()>| {
+                        // Snapshot the borrowed state and own the runtime so the
+                        // returned future is `'static` (the engine spawns node
+                        // futures). The engine merges the loaded `previous`
+                        // value (design 03 §14) into the runtime before calling.
                         let __owned = ::std::clone::Clone::clone(__state);
-                        async move { #fn_ident(&__owned).await }
+                        async move { #fn_ident(&__owned, &__runtime).await }
                     },
+                    ::juncture_core::runtime::Runtime::<()>::new(),
                 ),
                 &#task_config,
                 #checkpointer_arg,

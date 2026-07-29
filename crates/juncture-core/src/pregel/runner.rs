@@ -472,8 +472,10 @@ where
 
                         let __previous = task_config.previous.clone();
                         let __cache_policy = task_config.llm_cache_policy.clone().map(Arc::new);
+                        let __task_cache_policy = task_config.task_cache_policy.clone();
                         let inner_future = async {
                             crate::pregel::PREVIOUS.scope(__previous, async {
+                                crate::pregel::TASK_CACHE_POLICY.scope(__task_cache_policy, async {
                                 crate::pregel::LLM_CACHE_POLICY.scope(__cache_policy, async {
                                 if let Some(ref policy) = retry_policy {
                                 // Retry-enabled execution: each attempt runs inside
@@ -517,6 +519,7 @@ where
                                     }
                                 }).await
                             }
+                            }).await
                             }).await
                             }).await
                         };

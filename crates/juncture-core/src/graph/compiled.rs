@@ -486,6 +486,11 @@ impl<S: State, I: IntoState<S>, O: FromState<S>> CompiledGraph<S, I, O> {
         // via `func::Runtime::previous`. `None` on first execution and when no
         // checkpointer is configured.
         let mut run_config = config.clone();
+        // Graph-level `#[task]` cache (design 03 §13.3): surface
+        // `CompileConfig.cache_policy` so the runner can scope the
+        // `TASK_CACHE_POLICY` task-local, letting `#[task]` calls within this
+        // graph share one cache store.
+        run_config.task_cache_policy = self.inner.cache_policy.clone();
         if let Some(cp) = self.inner.checkpointer.as_ref() {
             if let Ok(Some(tuple)) = cp.get_tuple(&run_config).await {
                 run_config.previous = tuple.metadata.return_value;
