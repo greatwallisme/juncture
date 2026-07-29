@@ -254,6 +254,7 @@ Juncture 在 Rust 版 LangGraph 实现中有着明确的定位：
 - [ ] 更多 LLM 提供商
 - [x] 图可视化工具
 - [ ] LangGraph Platform API 兼容
+- [ ] RemoteGraph 流式 + 统一 `PregelProtocol`（跨进程图调用的 SSE 端点；见 design `03-pregel-engine` §11.6）
 
 ## 贡献
 

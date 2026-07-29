@@ -371,6 +371,45 @@ impl ChatOllama {
 
 ---
 
+### 3.4 Middleware 系统（`crates/juncture/src/llm/middleware.rs`）
+
+> 参考：facade 既有的 `LlmMiddleware` trait + `MiddlewareModel` 包装器。本节补齐既有功能的文档化（非 433c7d8 新增）。
+
+`ChatModel::invoke()` / `stream()` 调用可被 middleware 链拦截，实现日志、指标、请求改写、错误恢复等横切关注点。
+
+#### 架构
+
+middleware 按管线执行：
+
+1. **pre_invoke（正序）**：所有 middleware 的 `pre_invoke()` 按添加顺序执行（先添加先执行）。每个可修改 `messages` / `options`，或返回 `Err` 中止调用（错误回传调用方，不执行 LLM）。
+2. **LLM 调用**：执行内层模型的 `invoke()` / `stream()`。
+3. **post_invoke（逆序）**：所有 middleware 的 `post_invoke()` 按**逆序**执行（后添加先执行）。每个可修改结果，或将错误转为成功（实现错误恢复/转换）。
+
+#### 核心 trait 与类型
+
+```rust
+#[cfg_attr(target_family = "wasm", async_trait(?Send))]
+#[cfg_attr(not(target_family = "wasm"), async_trait)]
+pub trait LlmMiddleware: Send + Sync + 'static {
+    /// 正序；可改写 messages/options，返回 Err 中止调用
+    async fn pre_invoke(&self, _messages: &mut Vec<Message>, _options: &mut CallOptions) -> Result<(), LlmError> { Ok(()) }
+    /// 逆序；可改写结果或将 Err 转 Ok
+    async fn post_invoke(&self, _result: &mut Result<Message, LlmError>) -> Result<(), LlmError> { Ok(()) }
+}
+
+/// 包装任意 ChatModel，套用 pre/post 管线
+pub struct MiddlewareModel<M: ChatModel> {
+    inner: M,
+    middleware: Vec<Arc<dyn LlmMiddleware>>,
+}
+```
+
+`MiddlewareModel::new(inner)` 创建包装器，`with_middleware(mw)` 添加 middleware；`invoke()` / `stream()` 自动套用 pre/post 管线。wasm 目标使用 `(?Send)` 变体以适配单线程运行时。
+
+> **实现备注 (D-08-18)**：middleware 管线仅作用于消息与结果层（pre/post hooks），不参与 `bind_tools` / `with_structured_output` 的工具绑定。内置实现含 `LoggingMiddleware`、`MetricsMiddleware`。注意区分：`AgentMiddleware`（`prebuilt/agent_middleware.rs`，如 `LoopDetectionMiddleware`、`ToolErrorHandlingMiddleware`）作用于 **agent 循环**（跨多轮节点），与本节的 `LlmMiddleware`（单次 LLM 调用）是不同层级，两者不可混淆。
+
+---
+
 ## 4. Tool 系统
 
 ### 4.0 ToolRuntime 注入类型

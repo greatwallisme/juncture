@@ -46,9 +46,9 @@ Fix every finding from the 2026-07-28 deep conformance re-audit (13 sync-reviewe
 - B-005/B-012: TWO distinct CachePolicy types — observability::CachePolicy (LLM response cache, B-005) and config::CachePolicy (node-result cache, B-012). Both wired.
 - chat.rs duplicate: facade llm types (CallOptions/ToolDefinition/etc.) structurally duplicate core's. B-005 bridged via to_core_cache_key_input; full consolidation deferred (see M).
 
-## Remaining (2 large items, not started — require dedicated sessions)
-- **B-004 #[entrypoint]/#[task] attribute macros** (design 03 §13.3): new proc-macro. Approach: extend juncture-derive with `#[entrypoint]`/`#[task]` attribute macros that expand to `compile_entrypoint`/`compile_entrypoint_with_config` calls, parsing `cache`/`retry`/`timeout`/`name` args into TaskConfig. Est. large.
-- **chat.rs duplicate consolidation**: facade `crates/juncture/src/llm/{trait_,message}.rs` defines CallOptions/ToolDefinition/ToolChoice/ResponseFormat/Message duplicates of `juncture-core/src/llm.rs` + `state/messages.rs`. Consolidation: make facade re-export core types (verify no behavioral impls differ), update all facade providers/prelude. Est. large refactor.
+## Completed large items (previously listed as "Remaining, not started")
+- **B-004 #[entrypoint]/#[task] attribute macros** (design 03 §13.3) — COMPLETE in Phase L (2026-07-29, commit 433c7d8); see `progress.md` Session 2026-07-29 Phase L.
+- **chat.rs duplicate consolidation** — COMPLETE in Phase M (2026-07-29, commit 433c7d8); see `progress.md` Session 2026-07-29 Phase M.
 
 ## Errors Encountered
 | Error | Attempt | Resolution |

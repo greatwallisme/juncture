@@ -254,6 +254,7 @@ The trade-off is clear: Juncture prioritizes completeness and compatibility over
 - [ ] Additional LLM providers
 - [x] Graph visualization tooling
 - [ ] LangGraph Platform API compatibility
+- [ ] RemoteGraph streaming + unified `PregelProtocol` (SSE endpoint for cross-process graph invocation; see design `03-pregel-engine` §11.6)
 
 ## Contributing
 
