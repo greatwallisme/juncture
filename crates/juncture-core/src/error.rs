@@ -550,10 +550,13 @@ impl From<crate::checkpoint::CheckpointError> for JunctureError {
     }
 }
 
+/// Remote-graph HTTP failures surface as execution errors so callers see a
+/// normal `JunctureError` rather than a client-specific type. Only compiled
+/// when the `client` module is available (`chat` feature, non-wasm), matching
+/// the `client` module's cfg gate in `lib.rs`.
+#[cfg(all(feature = "chat", not(target_family = "wasm")))]
 impl From<crate::client::ClientError> for JunctureError {
     fn from(err: crate::client::ClientError) -> Self {
-        // Remote-graph HTTP failures surface as execution errors so callers see
-        // a normal `JunctureError` rather than a client-specific type.
         Self::execution(err.to_string())
     }
 }

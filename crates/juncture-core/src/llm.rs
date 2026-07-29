@@ -50,8 +50,11 @@ pub enum LlmError {
     /// Network error during HTTP request.
     ///
     /// Carries the typed `reqwest::Error` so callers can inspect the
-    /// underlying transport failure. Available whenever the `chat` feature
-    /// is enabled (the `llm` module is `chat`-gated and `chat = ["reqwest"]`).
+    /// underlying transport failure. Only compiled when the `chat` feature
+    /// is enabled (`chat = ["reqwest"]`); the variant is cfg-gated because the
+    /// `llm` module itself is compiled unconditionally, while `reqwest` is an
+    /// optional dependency gated behind `chat`.
+    #[cfg(feature = "chat")]
     #[error("network error: {0}")]
     NetworkError(#[from] reqwest::Error),
 
