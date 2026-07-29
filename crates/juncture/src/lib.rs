@@ -15,4 +15,8 @@ pub mod prelude {
 // Re-export core types
 pub use juncture_core::*;
 
-// Rust guideline compliant 2026-05-19
+// Re-export the functional-API attribute macros (design `03-pregel-engine`
+// §13.3) so users can write `use juncture::{entrypoint, task};`.
+pub use juncture_derive::{entrypoint, task};
+
+// Rust guideline compliant 2026-07-29

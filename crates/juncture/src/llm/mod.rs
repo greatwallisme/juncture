@@ -43,10 +43,13 @@
 //! - `retry`: Retry wrapper for resilient LLM calls
 //! - `structured`: Structured output extraction
 
-// Re-export core types from juncture-core
-pub use juncture_core::{
-    state::messages::{Content, ContentPart, ImageData, ImageSource, Message, Role, ToolCall},
-    stream::{MessageChunk, ToolCallChunk},
+// Re-export the message value types from juncture-core. The `ChatModel`
+// trait, `LlmError`, `CallOptions`, `ToolDefinition`, `ToolChoice`,
+// `ResponseFormat`, `StructuredOutputModel`, and the streaming aliases
+// (`MessageChunk`, `ToolCallChunk`, `BoxStream`) are re-exported via
+// `trait_` from the canonical `juncture_core::llm` definitions.
+pub use juncture_core::state::messages::{
+    Content, ContentPart, ImageData, ImageSource, Message, Role, ToolCall,
 };
 
 mod circuit_breaker;
@@ -67,9 +70,6 @@ mod openai;
 #[cfg(feature = "ollama")]
 mod ollama;
 
-#[cfg(feature = "structured-output")]
-mod structured;
-
 // Public exports
 pub use circuit_breaker::*;
 pub use message::*;
@@ -89,52 +89,31 @@ pub use openai::ChatOpenAI;
 #[cfg(feature = "ollama")]
 pub use ollama::ChatOllama;
 
-#[cfg(feature = "structured-output")]
-pub use structured::StructuredOutputModel;
+// `StructuredOutputModel` is re-exported via `trait_::*` from the canonical
+// `juncture_core::llm::StructuredOutputModel` definition.
 
-/// Build a core [`juncture_core::observability::CacheKeyInput`] from a
-/// provider's facade-typed inputs for LLM cache lookup/store (design
-/// `09-observability` §4.4).
+/// Build a [`juncture_core::observability::CacheKeyInput`] for LLM response
+/// cache lookup/store (design `09-observability` §4.4).
 ///
-/// The facade's `ToolDefinition`/`CallOptions` are structurally identical to
-/// `juncture_core`'s (see the chat.rs duplicate note in `findings.md`), so the
-/// conversion is a faithful field-by-field copy. `Message` is already the core
-/// type. The core `CacheKeyInput::hash` keys on `model`, the full `messages`
-/// and `tools`, and the scalar `temperature`/`max_tokens`/`top_p` options, so
-/// `tool_choice`/`response_format`/`tags` are left as their `None`/empty
-/// defaults (they do not affect the generated key; a custom `key_func` can
-/// capture them if finer-grained keys are needed).
+/// Now that the facade re-exports the canonical `juncture_core` types, this is
+/// a direct construction (the former field-by-field `to_core_cache_key_input`
+/// bridge is no longer needed). `CacheKeyInput::hash` keys on `model`, the
+/// full `messages` and `tools`, and the scalar `temperature`/`max_tokens`/
+/// `top_p` options, so `tool_choice`/`response_format`/`tags` do not affect
+/// the generated key.
 #[must_use]
-pub(crate) fn to_core_cache_key_input(
+pub(crate) fn cache_key_input(
     model: &str,
     messages: &[Message],
     tools: &[ToolDefinition],
     config: Option<&CallOptions>,
 ) -> juncture_core::observability::CacheKeyInput {
-    let core_tools = tools
-        .iter()
-        .map(|t| juncture_core::ToolDefinition {
-            name: t.name.clone(),
-            description: t.description.clone(),
-            parameters: t.parameters.clone(),
-        })
-        .collect();
-    let core_config = config.map(|c| juncture_core::CallOptions {
-        temperature: c.temperature,
-        max_tokens: c.max_tokens,
-        stop_sequences: c.stop_sequences.clone(),
-        top_p: c.top_p,
-        model_override: c.model_override.clone(),
-        tool_choice: None,
-        response_format: None,
-        tags: Vec::new(),
-    });
     juncture_core::observability::CacheKeyInput {
         model: model.to_string(),
         messages: messages.to_vec(),
-        tools: core_tools,
-        config: core_config,
+        tools: tools.to_vec(),
+        config: config.cloned(),
     }
 }
 
-// Rust guideline compliant 2026-05-19
+// Rust guideline compliant 2026-07-29

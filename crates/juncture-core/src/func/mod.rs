@@ -420,6 +420,104 @@ where
     )
 }
 
+/// Run a task body with optional retry and timeout (used by the `#[task]` macro).
+///
+/// `args` are cloned for each attempt so the task body `f` can be re-invoked
+/// on transient failures (`A: Clone` is required when `retry` is set). When
+/// `timeout` is set, each attempt is bounded; an elapsed deadline becomes
+/// a `JunctureError::execution`. When `retry` is set, failed attempts are
+/// retried with exponential backoff (capped by `max_interval`, +/- 25% jitter
+/// when `jitter` is set) up to `max_attempts`.
+///
+/// # Errors
+///
+/// Returns the last error (mapped via `E: Into<JunctureError>`) once retries
+/// are exhausted, or a timeout error if an attempt exceeds `timeout`.
+#[allow(
+    clippy::option_if_let_else,
+    reason = "the inner future `fut` is moved in both the timeout and non-timeout arms, so `map_or_else` would require cloning it; the `match` is the only sound form"
+)]
+pub async fn run_task<A, O, E, Fut, F>(
+    retry: Option<crate::graph::RetryPolicy>,
+    timeout: Option<std::time::Duration>,
+    args: A,
+    f: F,
+) -> Result<O, crate::JunctureError>
+where
+    A: Clone,
+    E: Into<crate::JunctureError>,
+    F: Fn(A) -> Fut,
+    Fut: std::future::Future<Output = Result<O, E>>,
+{
+    let max_attempts = retry.as_ref().map_or(1, |r| r.max_attempts.max(1));
+    let mut last_err: Option<crate::JunctureError> = None;
+    let mut delay = retry
+        .as_ref()
+        .map(|r| r.initial_interval)
+        .unwrap_or_default();
+
+    for attempt in 0..max_attempts {
+        let fut = f(args.clone());
+        let result: Result<O, crate::JunctureError> = match timeout {
+            Some(d) => match tokio::time::timeout(d, fut).await {
+                Ok(r) => r.map_err(E::into),
+                Err(_) => Err(crate::JunctureError::execution(format!(
+                    "task exceeded {d:?} timeout"
+                ))),
+            },
+            None => fut.await.map_err(E::into),
+        };
+        match result {
+            Ok(value) => return Ok(value),
+            Err(err) => {
+                last_err = Some(err);
+                if attempt + 1 >= max_attempts {
+                    break;
+                }
+                if let Some(ref r) = retry {
+                    let actual = task_compute_delay(delay, r.jitter, r.max_interval);
+                    tokio::time::sleep(actual).await;
+                    delay = delay.mul_f64(r.backoff_factor).min(r.max_interval);
+                }
+            }
+        }
+    }
+
+    Err(last_err.unwrap_or_else(|| crate::JunctureError::execution("task produced no result")))
+}
+
+/// Compute a backoff sleep with optional +/- 25% jitter, capped at `max_interval`
+/// (mirrors `graph::builder::compute_delay` for the task retry path).
+fn task_compute_delay(
+    base: std::time::Duration,
+    jitter: bool,
+    max_interval: std::time::Duration,
+) -> std::time::Duration {
+    let capped = base.min(max_interval);
+    if !jitter {
+        return capped;
+    }
+    let jitter_fraction: f64 = rand::random_range(0.75..=1.25);
+    capped.mul_f64(jitter_fraction).min(max_interval)
+}
+
+/// Build a stable cache key for a `#[task]` invocation.
+///
+/// Combines a namespace (the task name) with the serialized args. Used by the
+/// `#[task]` macro's per-task `OnceLock<CachePolicy>` cache to distinguish
+/// arg-sets.
+#[must_use]
+pub fn task_cache_key(namespace: &str, args: &serde_json::Value) -> String {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    std::hash::Hash::hash(namespace, &mut hasher);
+    std::hash::Hash::hash(args, &mut hasher);
+    format!(
+        "task:{}:{:016x}",
+        namespace,
+        std::hash::Hasher::finish(&hasher)
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -255,8 +255,7 @@ impl ChatModel for ChatAnthropic {
         // LLM response cache lookup (design 09-observability §4.4): consult the
         // cache policy scoped by the runner from `RunnableConfig::llm_cache_policy`
         // before the HTTP call; a miss proceeds and stores the fresh response below.
-        let cache_key_input =
-            crate::llm::to_core_cache_key_input(model, messages, &self.tools, options);
+        let cache_key_input = crate::llm::cache_key_input(model, messages, &self.tools, options);
         if let Some(cached) = juncture_core::pregel::try_llm_cache_lookup(&cache_key_input) {
             return Ok(cached);
         }
@@ -446,11 +445,11 @@ impl ChatModel for ChatAnthropic {
         clippy::uninlined_format_args,
         reason = "Complex SSE stream parsing logic"
     )]
-    fn stream(
+    async fn stream(
         &self,
         messages: &[Message],
         options: Option<&CallOptions>,
-    ) -> BoxStream<'_, Result<crate::llm::MessageChunk, LlmError>> {
+    ) -> Result<BoxStream<'_, Result<crate::llm::MessageChunk, LlmError>>, LlmError> {
         let model = options
             .and_then(|o| o.model_override.as_ref())
             .unwrap_or(&self.model);
@@ -497,7 +496,7 @@ impl ChatModel for ChatAnthropic {
 
         // If conversion failed, return a stream with the error
         if let Err(e) = conversion_result {
-            return Box::pin(stream::once(async move { Err(e) }));
+            return Ok(Box::pin(stream::once(async move { Err(e) })));
         }
 
         let request = AnthropicRequest {
@@ -534,7 +533,7 @@ impl ChatModel for ChatAnthropic {
         let base_url = self.base_url.clone();
         let client = self.client.clone();
 
-        Box::pin(stream::unfold(
+        Ok(Box::pin(stream::unfold(
             (client, api_key, base_url, request, false, Vec::new()),
             |(client, api_key, base_url, request, done, mut buffer)| async move {
                 if done {
@@ -649,7 +648,7 @@ impl ChatModel for ChatAnthropic {
 
                 None
             },
-        ))
+        )))
     }
 
     fn bind_tools(&self, tools: Vec<ToolDefinition>) -> Self {

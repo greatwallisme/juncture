@@ -27,12 +27,11 @@ Core types and engine for Juncture. This is the largest crate; all other crates 
 | `checkpoint.rs` | `CheckpointSaver` trait, `Checkpoint`, `CheckpointMetadata`, `CheckpointNamespace`, `PendingWrite`, `CHECKPOINT_NS_SEPARATOR` |
 | `config.rs` | `RunnableConfig` (with `with_run_id()`), `CacheConfig`, `CachePolicy`, `TaskConfig`, `EntrypointConfig` |
 | `store.rs` | `Store` trait, `MemoryStore`, `FilterExpr`, `SearchQuery`, `TTLConfig`, `IndexConfig`, `EmbeddingFunc` (cross-thread KV storage with optional vector search) |
-| `llm.rs` | `ChatModel` trait, `ToolDefinition`, `CallOptions`, `LlmError` (`Other` variant holds `Box<dyn Error + Send + Sync>`) |
+| `llm.rs` | `ChatModel` trait (canonical, async `stream -> Result<BoxStream, LlmError>`), `ToolDefinition`, `CallOptions`, `ToolChoice`, `ResponseFormat`, `LlmError` (9 variants incl. typed `NetworkError(#[from] reqwest::Error)` under `chat` feature, `ModelNotFound`, `ContentFiltered`, `Timeout`, `Other`), `StructuredOutputModel` (tool-based extraction with text fallback), `MessageChunk` (re-exported from `stream`), `BoxStream` |
 | `tools.rs` | `Tool<S>` trait, `ToolRuntime<S>` (with `emit_tool_started`/`emit_tool_finished`), `ToolNode`, `ToolNodeConfig`, `ToolExecutionTrace`, `tools_condition` |
 | `prebuilt.rs` | `PromptSource`, `ReactAgentConfig` |
 | `observability.rs` | `MetricsCollector` trait, `GraphLifecycleCallback` trait, `CacheKeyInput`, `LlmCachePolicy`, `ServerInfo` |
 | `error.rs` | `JunctureError`, `ErrorCode`, `NodeTimeoutError`, `InvalidUpdateError` |
-| `chat.rs` | `ChatAnthropic`, `ChatOpenAI`, `ChatOllama` (thin re-exports; real impls in facade crate) |
 | `send.rs` | `Send` for dynamic fan-out |
 | `client.rs` | `GraphClient`, `JunctureClient`, `StateSnapshot`, `Thread` for remote graph access |
 

@@ -2246,6 +2246,11 @@ async fn workflow(input: Input, runtime: &Runtime<()>) -> Result<Output> {
 }
 ```
 
+> **实现备注 (D-03-13)**: `#[task]`/`#[entrypoint]` 由 `juncture-derive` 实现为属性宏（design §13.3）。
+> - `#[task(cache=..., retry=..., timeout=..., name=...)]`：将 `async fn(...) -> Result<O, E>` 转为返回 `SyncAsyncFuture<O>` 的可调用包装器；`retry`/`timeout` 通过 `func::run_task` 应用（指数退避 + `tokio::time::timeout`），`cache` 使用**每任务 `OnceLock<CachePolicy>`**（自包含、线程安全；运行时无需注入 cache store）。
+> - `#[entrypoint(checkpointer=..., cache=..., retry=..., timeout=..., name=...)]`：要求被标注函数为**节点兼容签名** `async fn(&S) -> Result<S::Update, JunctureError>`（即 `NodeFnUpdate` 形式），生成 `compile()` 访问器（返回 `CompiledGraph<S, S, S>`）。由于节点 future 必须为 `'static`（引擎用 `tokio::spawn`），生成的适配器会 `Clone` 一份状态快照，故要求 `S: Clone`。
+> - 偏差（已在 audit 中记录）：设计草图里 `#[entrypoint] async fn(I, &Runtime) -> Result<O>` 的 `(input, runtime)` 签名需要逆向 `IntoState`/`FromState` 桥接，proc-macro 无法生成，故当前采用节点兼容签名；跨任务/图级 cache（复用 B-012 的 `CompileConfig.cache_policy`）为后续扩展。
+
 ---
 
 ## 14. Previous Result Injection

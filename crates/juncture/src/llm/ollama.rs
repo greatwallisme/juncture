@@ -172,8 +172,7 @@ impl ChatModel for ChatOllama {
         // LLM response cache lookup (design 09-observability §4.4): consult the
         // cache policy scoped by the runner from `RunnableConfig::llm_cache_policy`
         // before the HTTP call; a miss proceeds and stores the fresh response below.
-        let cache_key_input =
-            crate::llm::to_core_cache_key_input(model, messages, &self.tools, options);
+        let cache_key_input = crate::llm::cache_key_input(model, messages, &self.tools, options);
         if let Some(cached) = juncture_core::pregel::try_llm_cache_lookup(&cache_key_input) {
             return Ok(cached);
         }
@@ -319,11 +318,11 @@ impl ChatModel for ChatOllama {
         clippy::too_many_lines,
         reason = "Complex SSE stream parsing logic with full Ollama protocol handling"
     )]
-    fn stream(
+    async fn stream(
         &self,
         messages: &[Message],
         options: Option<&CallOptions>,
-    ) -> BoxStream<'_, Result<crate::llm::MessageChunk, LlmError>> {
+    ) -> Result<BoxStream<'_, Result<crate::llm::MessageChunk, LlmError>>, LlmError> {
         let model = options
             .and_then(|o| o.model_override.as_ref())
             .unwrap_or(&self.model);
@@ -371,7 +370,7 @@ impl ChatModel for ChatOllama {
         let base_url = self.base_url.clone();
         let client = self.client.clone();
 
-        Box::pin(stream::unfold(
+        Ok(Box::pin(stream::unfold(
             (client, base_url, request, false, Vec::new()),
             |(client, base_url, request, done, mut buffer)| async move {
                 if done {
@@ -522,7 +521,7 @@ impl ChatModel for ChatOllama {
 
                 None
             },
-        ))
+        )))
     }
 
     fn bind_tools(&self, tools: Vec<ToolDefinition>) -> Self {

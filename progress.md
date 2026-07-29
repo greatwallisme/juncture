@@ -388,3 +388,44 @@ All 10 previously-dead DebugEvent variants now emitted (design 09 §5.1 "all int
 - `compile_entrypoint_with_config`: wires `timeout` → `TimeoutPolicy` (add_node timeout_policies) AND `cache_policy` → CompileConfig.cache_policy (was both silently dropped).
 - `invoke_async_inner`: node-result cache check (key from serialized input state; hit → deserialize + return early) + store (serialize final state) on success.
 - Test `test_compile_entrypoint_node_result_cache_hit_on_second_invoke`: entrypoint runs once; 2nd identical invoke served from cache (exec_count stays 1). VERIFIED.
+
+## Session 2026-07-29: Complete the remaining two items (L + M)
+
+### Phase M — chat.rs duplicate consolidation — COMPLETE (all gates green, 214/214)
+User chose "Full breaking consolidation". Investigation revealed the duplicate types genuinely DIFFER (not a mechanical re-export):
+- Facade `ChatModel::stream` was sync; core's (design 08 §2) is `async -> Result<BoxStream, LlmError>`. Core canonical.
+- Facade `LlmError` had 9 variants + typed `reqwest::Error`; core had 6 + `NetworkError(String)`. Facade canonical (matches design 08 line 1198).
+- Facade `StructuredOutputModel` (tool-based + text fallback + `extract()`) was richer than core's thin one. Moved facade's into core.
+- `MessageChunk`: core had TWO (`llm::MessageChunk` role+usage matching design 08 §1.3; `stream::MessageChunk` usage_delta used by all providers). Unified on `stream::MessageChunk` (the de-facto shape all providers build) via `pub use crate::stream::MessageChunk` in llm.rs — avoids adding a vestigial `role` field never populated. `call_llm_streaming` updated (`chunk.usage` → `chunk.usage_delta`); stream_chunk forward simplified.
+
+Changes:
+- **Core llm.rs**: enriched `LlmError` (added `ModelNotFound`/`ContentFiltered`/`Timeout`; `NetworkError` → typed `#[from] reqwest::Error` under `chat` feature); replaced thin `StructuredOutputModel` with the rich version; `MessageChunk` now re-exported from `stream`; `ChatModel::with_structured_output` given a default body (providers no longer each implement it); `JsonSchema`/`DeserializeOwned` tightened bounds.
+- **Core chat.rs DELETED** (2018 lines, zero importers, the documented dead duplicate). `lib.rs` `pub mod chat` + `pub use chat::{...}` removed.
+- **Facade `trait_.rs`**: gutted to a pure re-export of `juncture_core::llm::{BoxStream, CallOptions, ChatModel, DeserializeOwned, JsonSchema, LlmError, MessageChunk, ResponseFormat, StructuredOutputModel, ToolCallChunk, ToolChoice, ToolDefinition}`.
+- **Facade `structured.rs` DELETED** (moved to core). `mod.rs` structured gating removed; B-005 `to_core_cache_key_input` bridge replaced by identity `cache_key_input` (types now identical; `CacheKeyInput::hash` ignores tool_choice/response_format/tags).
+- **6 providers + ScriptedModel test**: `stream` sync→async-Result signature (anthropic/openai/ollama wrap final `Box::pin` in `Ok(...)`; retry/middleware forward `.await`; mock early-return wrapped). retry/middleware dropped unused `Pin`/`Stream` imports, added `BoxStream`.
+- **Consumer**: `examples/11_streaming_chat.rs` `.stream(...)` → `.stream(...).await?`.
+- **Cargo.toml (facade)**: removed dead `schemars` optional dep + `structured-output` feature (StructuredOutputModel now always available via core).
+- **Design 08 §3.1/3.2/3.3 + checklist 08-015/016/017**: reconciled to the facade providers' actual API (`client` field, `new(api_key)` ctor, `from_env() -> Result`, `with_model`, per-call options instead of `default_options`). Documented D-08-15/16/17. This is legitimate stale-design reconciliation (the spec described dead chat.rs, not the live facade) — per Phase N precedent. Restored 214/214.
+- **CLAUDE.md** (core + facade): corrected the audit-flagged false "chat.rs = thin re-exports" claim; updated trait_/structured/feature descriptions.
+
+Discovered conformance gap (resolved via reconcile-to-facade, user-approved): the prior 214/214 was INFLATED by dead chat.rs (it held the design-conformant provider fields `http_client`/`default_options`/`with_api_key` that the live facade lacks). Deleting chat.rs exposed that the facade providers use an idiomatic API differing from design 08's sketch. Resolved by reconciling design+checklist to the facade (option A — best for reliability/maintainability/performance: no dead code, single source of truth, design matches code, lowest risk).
+
+VERIFIED: fmt exit 0; clippy -D warnings 0 issues; test --all-targets 0 failures; test --doc 0 failures; rustdoc -D warnings 0 issues; build exit 0; design coverage 214/214 (100.0%).
+
+### Phase L — B-004 #[entrypoint]/#[task] attribute macros — COMPLETE (all gates green, 216/216)
+User approved a scoped plan (plan file `compiled-tumbling-locket.md`). Two attribute macros added to `juncture-derive`, building on the existing `SyncAsyncFuture` (`pregel/types.rs`) and `compile_entrypoint_with_config`.
+
+Changes:
+- **Core `func/mod.rs`**: `pub async fn run_task<A,O,E,Fut,F>(retry, timeout, args, f)` — retry loop (exponential backoff capped by `max_interval`, +/-25% jitter, mirrors `graph::builder::compute_delay`) + `tokio::time::timeout` per attempt; args cloned per attempt (`A: Clone`). `pub fn task_cache_key(namespace, args)` — stable hash for per-task cache keys. Both re-exported from `lib.rs`.
+- **`juncture-derive/src/task_attr.rs`** (`#[task]`): parses `cache`/`retry`/`timeout`/`name` (key=expr); renames the body to `<name>__task_inner`; emits `pub fn <name>(...) -> SyncAsyncFuture<O>` that (a) when `cache` set, checks a function-local `static OnceLock<CachePolicy>` keyed by serialized args (`O: Serialize+DeserializeOwned`, args `Serialize`, tuple `Clone`) → `SyncAsyncFuture::ready` on hit; (b) else `SyncAsyncFuture::pending(async move { run_task(...).await })` storing on success. `#[allow]` on the inner fn for `non_snake_case` + `clippy::unused_async` (async required so the fn returns a future the runtime awaits, even with no internal await).
+- **`juncture-derive/src/entrypoint_attr.rs`** (`#[entrypoint]`): parses `checkpointer`/`cache`/`retry`/`timeout`/`name`; extracts state type `S` from the first `&S` param; emits the fn unchanged + a `compile()` accessor returning `CompiledGraph<S,S,S>` via `compile_entrypoint_with_config`, using a clone adapter (`let __owned = Clone::clone(__state); async move { fn(&__owned).await }`) so the node future is `'static` (engine spawns node futures) — requires `S: Clone`.
+- **`juncture-derive/src/lib.rs`**: `#[proc_macro_attribute] task`/`entrypoint` fns wiring the impls.
+- **Facade `lib.rs`**: `pub use juncture_derive::{entrypoint, task};`.
+- **`crates/juncture-core/tests/func_macros.rs`** (integration test — separate crate so `::juncture_core::` paths resolve): 5 tests — task basic/retry/timeout/cache + entrypoint compile→invoke_async. All pass.
+- **Design 03 §13.3**: D-03-13 note documenting the implemented semantics + deviations (node-compatible entrypoint signature, per-task OnceLock cache).
+- **Checklist 03-pregel-engine.json**: 03-026 (`#[task]`) + 03-027 (`#[entrypoint]`) → coverage 214→216.
+
+Documented deviations (per the approved plan): (1) `#[entrypoint]` requires node-compatible `async fn(&S) -> Result<S::Update, JunctureError>` (not the design sketch's `(I, &Runtime) -> Result<O>` — that needs reverse IntoState/FromState, not macro-generatable); (2) `#[task]` cache is a per-task `OnceLock` (self-contained, no runner cache-store wiring).
+
+VERIFIED: fmt exit 0; clippy -D warnings 0 issues; test --all-targets 0 failures (incl. 5 new func_macros tests); test --doc 0 failures; rustdoc -D warnings 0 issues; build exit 0; design coverage 216/216 (100.0%).

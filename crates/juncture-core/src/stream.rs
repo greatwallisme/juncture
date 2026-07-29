@@ -750,17 +750,15 @@ pub async fn call_llm_streaming<S: State, M: crate::llm::ChatModel>(
             }
         }
 
-        if let Some(ref usage) = chunk.usage {
+        if let Some(ref usage) = chunk.usage_delta {
             total_usage.input_tokens += usage.input_tokens;
             total_usage.output_tokens += usage.output_tokens;
             total_usage.total_tokens += usage.total_tokens;
         }
 
-        let stream_chunk = MessageChunk {
-            content: chunk.content,
-            tool_call_chunks: chunk.tool_call_chunks,
-            usage_delta: chunk.usage,
-        };
+        // `chunk` is already the canonical `stream::MessageChunk`, so forward
+        // it directly into the event (no field-by-field rebuild needed).
+        let stream_chunk = chunk;
 
         let event = StreamEvent::Messages {
             chunk: stream_chunk,

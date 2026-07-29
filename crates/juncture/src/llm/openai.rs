@@ -286,8 +286,7 @@ impl ChatModel for ChatOpenAI {
         // cache policy scoped by the runner from `RunnableConfig::llm_cache_policy`
         // before the HTTP call. A hit returns the cached response with no
         // network round-trip; a miss proceeds and stores the fresh response below.
-        let cache_key_input =
-            crate::llm::to_core_cache_key_input(model, messages, &self.tools, options);
+        let cache_key_input = crate::llm::cache_key_input(model, messages, &self.tools, options);
         if let Some(cached) = juncture_core::pregel::try_llm_cache_lookup(&cache_key_input) {
             return Ok(cached);
         }
@@ -443,11 +442,11 @@ impl ChatModel for ChatOpenAI {
         clippy::uninlined_format_args,
         reason = "Complex SSE stream parsing logic"
     )]
-    fn stream(
+    async fn stream(
         &self,
         messages: &[Message],
         options: Option<&CallOptions>,
-    ) -> BoxStream<'_, Result<crate::llm::MessageChunk, LlmError>> {
+    ) -> Result<BoxStream<'_, Result<crate::llm::MessageChunk, LlmError>>, LlmError> {
         let model = options
             .and_then(|o| o.model_override.as_ref())
             .unwrap_or(&self.model);
@@ -617,11 +616,13 @@ impl ChatModel for ChatOpenAI {
         // On WASM, wrap the !Send stream with force_send_stream for ChatModel trait compatibility.
         #[cfg(target_family = "wasm")]
         {
-            Box::pin(juncture_core::wasm_send::force_send_stream(stream))
+            Ok(Box::pin(juncture_core::wasm_send::force_send_stream(
+                stream,
+            )))
         }
         #[cfg(not(target_family = "wasm"))]
         {
-            Box::pin(stream)
+            Ok(Box::pin(stream))
         }
     }
 

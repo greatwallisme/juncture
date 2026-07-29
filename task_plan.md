@@ -28,17 +28,18 @@ Fix every finding from the 2026-07-28 deep conformance re-audit (13 sync-reviewe
 | K | B-010 Ollama tool calling | COMPLETE | tools field + bind_tools + OllamaTool conversion + tool_calls parsing (invoke+stream) + 7 tests |
 | B-011 | get_graph(xray) | COMPLETE | Node::drawable_subgraph + SubgraphNode override + get_graph expansion + test |
 | N | Docs/checklist reconciliation + StreamChannel | COMPLETE | 100% design coverage (214/214); StreamChannel implemented; 6 stale doc/checklist items reconciled |
-| L | B-004 #[entrypoint]/#[task] macros | PENDING | New proc-macro (extend juncture-derive or new crate) — very large |
-| M | chat.rs duplicate consolidation | PENDING | Facade llm types duplicate core (bridged for B-005 via to_core_cache_key_input); full consolidation is a large refactor |
-| Z | Final verification | IN PROGRESS | fmt/clippy/test --all-targets/test --doc/doc(-D warnings)/build all green |
+| L | B-004 #[entrypoint]/#[task] macros | COMPLETE | juncture-derive: `#[task]` (SyncAsyncFuture + cache/retry/timeout via func::run_task + per-task OnceLock) + `#[entrypoint]` (compile() accessor, node-compatible &S, clone adapter); core func::run_task + task_cache_key; facade re-export; integration tests (5); design 03 §13.3 note + checklist 03-026/03-027; 216/216 |
+| M | chat.rs duplicate consolidation | COMPLETE | Core = single source of truth; facade re-exports core's ChatModel/LlmError/leaf-types; chat.rs dead duplicate DELETED; facade providers adopt async-stream ChatModel; design 08 §3 + checklist reconciled to facade API; 214/214 |
+| Z | Final verification | COMPLETE | fmt/clippy/test --all-targets/test --doc/doc(-D warnings)/build all green; 216/216 |
 
-## Verified quality gates (current)
+## Verified quality gates (final, 2026-07-29)
 - cargo fmt --all -- --check: PASS
 - cargo clippy --workspace --all-targets --all-features -- -D warnings: PASS
-- cargo test --workspace --all-targets --all-features: PASS (44 groups, 0 failures)
+- cargo test --workspace --all-targets --all-features: PASS (0 failures, incl. 5 new func_macros tests)
 - cargo test --workspace --doc --all-features: PASS
 - RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps: PASS
-- Design coverage: 214/214 (100.0%)
+- cargo build --workspace --all-features: PASS
+- Design coverage: 216/216 (100.0%)
 
 ## Architectural notes (design doc is the spec)
 - B-003: RemoteGraph deliberately does NOT impl PregelProtocol — HTTP GraphClient has no SSE stream endpoint and client::StateSnapshot shape differs from checkpoint's; implementing would fabricate data (a simplification). RemoteGraph offers equivalent ops via its own client-typed API (B-002).

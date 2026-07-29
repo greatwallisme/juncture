@@ -42,16 +42,16 @@
 
 use std::cell::Cell;
 use std::fmt;
-use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use async_trait::async_trait;
-use futures::Stream;
 use tracing::{Level, event};
 
-use crate::llm::{CallOptions, ChatModel, LlmError, Message, MessageChunk, ToolDefinition};
+use crate::llm::{
+    BoxStream, CallOptions, ChatModel, LlmError, Message, MessageChunk, ToolDefinition,
+};
 
 // Thread-local storage for middleware timing data.
 // Each middleware that needs timing data can use this to store a start time
@@ -306,15 +306,15 @@ impl<M: ChatModel> ChatModel for MiddlewareModel<M> {
         result
     }
 
-    fn stream(
+    async fn stream(
         &self,
         messages: &[Message],
         options: Option<&CallOptions>,
-    ) -> Pin<Box<dyn Stream<Item = Result<MessageChunk, LlmError>> + Send + '_>> {
-        // For streaming, we pass through to the inner model
-        // Running async pre_invoke in the non-async stream() method is not feasible
-        // For production use, consider a different design for streaming middleware
-        self.inner.stream(messages, options)
+    ) -> Result<BoxStream<'_, Result<MessageChunk, LlmError>>, LlmError> {
+        // For streaming, we pass through to the inner model. Running async
+        // pre_invoke before the stream is not feasible here; for production
+        // streaming middleware consider a different design.
+        self.inner.stream(messages, options).await
     }
 
     fn bind_tools(&self, tools: Vec<ToolDefinition>) -> Self {

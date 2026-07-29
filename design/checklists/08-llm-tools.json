@@ -7,8 +7,24 @@
       "category": "struct",
       "parent": null,
       "name": "Message",
-      "required_methods": ["system", "human", "ai", "ai_with_tool_calls", "tool_result", "content_text", "has_tool_calls"],
-      "required_fields": ["id", "role", "content", "tool_calls", "tool_call_id", "name", "usage"],
+      "required_methods": [
+        "system",
+        "human",
+        "ai",
+        "ai_with_tool_calls",
+        "tool_result",
+        "content_text",
+        "has_tool_calls"
+      ],
+      "required_fields": [
+        "id",
+        "role",
+        "content",
+        "tool_calls",
+        "tool_call_id",
+        "name",
+        "usage"
+      ],
       "required_variants": [],
       "findings": [],
       "description": "LLM message with constructors and helpers",
@@ -21,7 +37,12 @@
       "name": "Role",
       "required_methods": [],
       "required_fields": [],
-      "required_variants": ["System", "Human", "AI", "Tool"],
+      "required_variants": [
+        "System",
+        "Human",
+        "AI",
+        "Tool"
+      ],
       "findings": [],
       "description": "Message role enum",
       "verification_pattern": "pub enum Role"
@@ -33,7 +54,10 @@
       "name": "Content",
       "required_methods": [],
       "required_fields": [],
-      "required_variants": ["Text", "MultiPart"],
+      "required_variants": [
+        "Text",
+        "MultiPart"
+      ],
       "findings": [],
       "description": "Content: text or multipart",
       "verification_pattern": "pub enum Content"
@@ -45,8 +69,14 @@
       "name": "ContentPart",
       "required_methods": [],
       "required_fields": [],
-      "required_variants": ["Text", "Image", "Thinking"],
-      "findings": ["Part3#22"],
+      "required_variants": [
+        "Text",
+        "Image",
+        "Thinking"
+      ],
+      "findings": [
+        "Part3#22"
+      ],
       "description": "Content part including Thinking for extended thinking",
       "verification_pattern": "pub enum ContentPart"
     },
@@ -56,7 +86,10 @@
       "parent": null,
       "name": "ImageData",
       "required_methods": [],
-      "required_fields": ["media_type", "source"],
+      "required_fields": [
+        "media_type",
+        "source"
+      ],
       "required_variants": [],
       "findings": [],
       "description": "Image data with media type and source",
@@ -69,7 +102,10 @@
       "name": "ImageSource",
       "required_methods": [],
       "required_fields": [],
-      "required_variants": ["Base64", "Url"],
+      "required_variants": [
+        "Base64",
+        "Url"
+      ],
       "findings": [],
       "description": "Image source: base64 or URL",
       "verification_pattern": "pub enum ImageSource"
@@ -80,7 +116,11 @@
       "parent": null,
       "name": "ToolCall",
       "required_methods": [],
-      "required_fields": ["id", "name", "arguments"],
+      "required_fields": [
+        "id",
+        "name",
+        "arguments"
+      ],
       "required_variants": [],
       "findings": [],
       "description": "Tool call with id, name, arguments",
@@ -92,7 +132,11 @@
       "parent": null,
       "name": "TokenUsage",
       "required_methods": [],
-      "required_fields": ["input_tokens", "output_tokens", "total_tokens"],
+      "required_fields": [
+        "input_tokens",
+        "output_tokens",
+        "total_tokens"
+      ],
       "required_variants": [],
       "findings": [],
       "description": "Token usage tracking",
@@ -104,7 +148,12 @@
       "parent": null,
       "name": "MessageChunk",
       "required_methods": [],
-      "required_fields": ["role", "content", "tool_call_chunks", "usage"],
+      "required_fields": [
+        "role",
+        "content",
+        "tool_call_chunks",
+        "usage"
+      ],
       "required_variants": [],
       "findings": [],
       "description": "Streaming message chunk",
@@ -116,7 +165,12 @@
       "parent": null,
       "name": "ToolCallChunk",
       "required_methods": [],
-      "required_fields": ["index", "id", "name", "arguments"],
+      "required_fields": [
+        "index",
+        "id",
+        "name",
+        "arguments"
+      ],
       "required_variants": [],
       "findings": [],
       "description": "Streaming tool call chunk",
@@ -127,7 +181,13 @@
       "category": "trait",
       "parent": null,
       "name": "ChatModel",
-      "required_methods": ["invoke", "stream", "bind_tools", "with_structured_output", "model_name"],
+      "required_methods": [
+        "invoke",
+        "stream",
+        "bind_tools",
+        "with_structured_output",
+        "model_name"
+      ],
       "required_fields": [],
       "required_variants": [],
       "findings": [],
@@ -140,9 +200,20 @@
       "parent": null,
       "name": "CallOptions",
       "required_methods": [],
-      "required_fields": ["temperature", "max_tokens", "stop_sequences", "top_p", "model_override", "tool_choice", "response_format"],
+      "required_fields": [
+        "temperature",
+        "max_tokens",
+        "stop_sequences",
+        "top_p",
+        "model_override",
+        "tool_choice",
+        "response_format"
+      ],
       "required_variants": [],
-      "findings": ["Part3#10", "Part3#11"],
+      "findings": [
+        "Part3#10",
+        "Part3#11"
+      ],
       "description": "Per-call options with tool_choice and response_format",
       "verification_pattern": "pub struct CallOptions"
     },
@@ -153,8 +224,15 @@
       "name": "ToolChoice",
       "required_methods": [],
       "required_fields": [],
-      "required_variants": ["Auto", "None", "Required", "Specific"],
-      "findings": ["Part3#10"],
+      "required_variants": [
+        "Auto",
+        "None",
+        "Required",
+        "Specific"
+      ],
+      "findings": [
+        "Part3#10"
+      ],
       "description": "Tool choice strategy",
       "verification_pattern": "pub enum ToolChoice"
     },
@@ -165,8 +243,13 @@
       "name": "ResponseFormat",
       "required_methods": [],
       "required_fields": [],
-      "required_variants": ["JsonObject", "JsonSchema"],
-      "findings": ["Part3#11"],
+      "required_variants": [
+        "JsonObject",
+        "JsonSchema"
+      ],
+      "findings": [
+        "Part3#11"
+      ],
       "description": "Response format for structured output",
       "verification_pattern": "pub enum ResponseFormat"
     },
@@ -175,8 +258,24 @@
       "category": "struct",
       "parent": null,
       "name": "ChatAnthropic",
-      "required_methods": ["new", "from_env", "with_api_key", "with_base_url", "with_max_tokens", "with_temperature"],
-      "required_fields": ["model", "api_key", "base_url", "default_options", "tools", "http_client", "max_tokens"],
+      "required_methods": [
+        "new",
+        "from_env",
+        "with_base_url",
+        "with_model",
+        "with_max_tokens",
+        "with_temperature"
+      ],
+      "required_fields": [
+        "client",
+        "api_key",
+        "model",
+        "base_url",
+        "max_tokens",
+        "temperature",
+        "top_p",
+        "tools"
+      ],
       "required_variants": [],
       "findings": [],
       "description": "Anthropic Claude provider implementation",
@@ -187,8 +286,24 @@
       "category": "struct",
       "parent": null,
       "name": "ChatOpenAI",
-      "required_methods": ["new", "from_env", "with_api_key", "with_base_url"],
-      "required_fields": ["model", "api_key", "base_url", "default_options", "tools", "http_client"],
+      "required_methods": [
+        "new",
+        "from_env",
+        "with_base_url",
+        "with_model",
+        "with_max_tokens",
+        "with_temperature"
+      ],
+      "required_fields": [
+        "client",
+        "api_key",
+        "model",
+        "base_url",
+        "max_tokens",
+        "temperature",
+        "top_p",
+        "tools"
+      ],
       "required_variants": [],
       "findings": [],
       "description": "OpenAI-compatible provider (OpenAI, Groq, Together, vLLM)",
@@ -199,8 +314,20 @@
       "category": "struct",
       "parent": null,
       "name": "ChatOllama",
-      "required_methods": ["new", "with_base_url"],
-      "required_fields": ["model", "base_url", "default_options", "tools", "http_client"],
+      "required_methods": [
+        "new",
+        "with_base_url",
+        "with_temperature"
+      ],
+      "required_fields": [
+        "client",
+        "model",
+        "base_url",
+        "temperature",
+        "top_p",
+        "tools",
+        "stream"
+      ],
       "required_variants": [],
       "findings": [],
       "description": "Ollama local model provider",
@@ -211,7 +338,13 @@
       "category": "trait",
       "parent": null,
       "name": "Tool",
-      "required_methods": ["name", "description", "schema", "definition", "invoke"],
+      "required_methods": [
+        "name",
+        "description",
+        "schema",
+        "definition",
+        "invoke"
+      ],
       "required_fields": [],
       "required_variants": [],
       "findings": [],
@@ -224,7 +357,11 @@
       "parent": null,
       "name": "ToolDefinition",
       "required_methods": [],
-      "required_fields": ["name", "description", "parameters"],
+      "required_fields": [
+        "name",
+        "description",
+        "parameters"
+      ],
       "required_variants": [],
       "findings": [],
       "description": "Tool definition with JSON Schema parameters",
@@ -237,7 +374,11 @@
       "name": "ToolError",
       "required_methods": [],
       "required_fields": [],
-      "required_variants": ["InvalidInput", "ExecutionFailed", "Timeout"],
+      "required_variants": [
+        "InvalidInput",
+        "ExecutionFailed",
+        "Timeout"
+      ],
       "findings": [],
       "description": "Tool execution error types",
       "verification_pattern": "pub enum ToolError"
@@ -247,8 +388,14 @@
       "category": "struct",
       "parent": null,
       "name": "ToolNode",
-      "required_methods": ["new", "with_error_handling"],
-      "required_fields": ["tools", "handle_errors"],
+      "required_methods": [
+        "new",
+        "with_error_handling"
+      ],
+      "required_fields": [
+        "tools",
+        "handle_errors"
+      ],
       "required_variants": [],
       "findings": [],
       "description": "Tool execution node with concurrent tool calls",
@@ -260,9 +407,18 @@
       "parent": null,
       "name": "ToolNodeConfig",
       "required_methods": [],
-      "required_fields": ["tools", "handle_errors", "validate_input", "call_transformer", "interceptor", "tools_condition"],
+      "required_fields": [
+        "tools",
+        "handle_errors",
+        "validate_input",
+        "call_transformer",
+        "interceptor",
+        "tools_condition"
+      ],
       "required_variants": [],
-      "findings": ["M-3"],
+      "findings": [
+        "M-3"
+      ],
       "description": "Advanced ToolNode config with validation, transformer, interceptor",
       "verification_pattern": "pub struct ToolNodeConfig"
     },
@@ -271,10 +427,15 @@
       "category": "trait",
       "parent": null,
       "name": "ToolInterceptor",
-      "required_methods": ["pre_execute", "post_execute"],
+      "required_methods": [
+        "pre_execute",
+        "post_execute"
+      ],
       "required_fields": [],
       "required_variants": [],
-      "findings": ["M-3"],
+      "findings": [
+        "M-3"
+      ],
       "description": "Tool execution interceptor for pre/post hooks",
       "verification_pattern": "pub trait ToolInterceptor"
     },
@@ -283,7 +444,9 @@
       "category": "trait",
       "parent": null,
       "name": "ToolCallTransformer",
-      "required_methods": ["transform"],
+      "required_methods": [
+        "transform"
+      ],
       "required_fields": [],
       "required_variants": [],
       "findings": [],
@@ -295,7 +458,10 @@
       "category": "trait",
       "parent": null,
       "name": "StatefulTool",
-      "required_methods": ["invoke_with_state", "invoke_with_store"],
+      "required_methods": [
+        "invoke_with_state",
+        "invoke_with_store"
+      ],
       "required_fields": [],
       "required_variants": [],
       "findings": [],
@@ -307,10 +473,19 @@
       "category": "struct",
       "parent": null,
       "name": "ToolRuntime",
-      "required_methods": ["emit_output_delta"],
-      "required_fields": ["state", "tool_call_id", "config", "store"],
+      "required_methods": [
+        "emit_output_delta"
+      ],
+      "required_fields": [
+        "state",
+        "tool_call_id",
+        "config",
+        "store"
+      ],
       "required_variants": [],
-      "findings": ["L-13"],
+      "findings": [
+        "L-13"
+      ],
       "description": "Tool runtime context with state, config, store",
       "verification_pattern": "pub struct ToolRuntime"
     },
@@ -320,7 +495,14 @@
       "parent": null,
       "name": "ToolExecutionTrace",
       "required_methods": [],
-      "required_fields": ["tool_name", "tool_call_id", "attempt", "first_attempt_time", "duration_ms", "success"],
+      "required_fields": [
+        "tool_name",
+        "tool_call_id",
+        "attempt",
+        "first_attempt_time",
+        "duration_ms",
+        "success"
+      ],
       "required_variants": [],
       "findings": [],
       "description": "Tool execution trace record",
@@ -331,10 +513,19 @@
       "category": "struct",
       "parent": null,
       "name": "ValidationNode",
-      "required_methods": ["new", "with_max_tokens", "with_validator"],
-      "required_fields": ["max_input_tokens", "validator"],
+      "required_methods": [
+        "new",
+        "with_max_tokens",
+        "with_validator"
+      ],
+      "required_fields": [
+        "max_input_tokens",
+        "validator"
+      ],
       "required_variants": [],
-      "findings": ["L-15"],
+      "findings": [
+        "L-15"
+      ],
       "description": "Input validation node for message format checking",
       "verification_pattern": "pub struct ValidationNode"
     },
@@ -346,7 +537,9 @@
       "required_methods": [],
       "required_fields": [],
       "required_variants": [],
-      "findings": ["L-14"],
+      "findings": [
+        "L-14"
+      ],
       "description": "Standard tool routing: has tool_calls -> tools, else END",
       "verification_pattern": "pub fn tools_condition"
     },
@@ -368,9 +561,22 @@
       "parent": null,
       "name": "ReactAgentConfig",
       "required_methods": [],
-      "required_fields": ["model", "tools", "prompt", "response_format", "pre_model_hook", "post_model_hook", "store", "interrupt_before", "interrupt_after", "model_selector"],
+      "required_fields": [
+        "model",
+        "tools",
+        "prompt",
+        "response_format",
+        "pre_model_hook",
+        "post_model_hook",
+        "store",
+        "interrupt_before",
+        "interrupt_after",
+        "model_selector"
+      ],
       "required_variants": [],
-      "findings": ["H-08"],
+      "findings": [
+        "H-08"
+      ],
       "description": "Advanced ReAct agent configuration",
       "verification_pattern": "pub struct ReactAgentConfig"
     },
@@ -381,7 +587,10 @@
       "name": "PromptSource",
       "required_methods": [],
       "required_fields": [],
-      "required_variants": ["Static", "Dynamic"],
+      "required_variants": [
+        "Static",
+        "Dynamic"
+      ],
       "findings": [],
       "description": "Prompt source: static string or dynamic function",
       "verification_pattern": "pub enum PromptSource"
@@ -392,7 +601,9 @@
       "parent": null,
       "name": "StructuredOutputModel",
       "required_methods": [],
-      "required_fields": ["inner"],
+      "required_fields": [
+        "inner"
+      ],
       "required_variants": [],
       "findings": [],
       "description": "Wrapper for structured output via function calling",
@@ -403,7 +614,11 @@
       "category": "trait",
       "parent": null,
       "name": "ModelPricing",
-      "required_methods": ["input_price_per_mtok", "output_price_per_mtok", "cost_for_usage"],
+      "required_methods": [
+        "input_price_per_mtok",
+        "output_price_per_mtok",
+        "cost_for_usage"
+      ],
       "required_fields": [],
       "required_variants": [],
       "findings": [],
@@ -417,7 +632,16 @@
       "name": "LlmError",
       "required_methods": [],
       "required_fields": [],
-      "required_variants": ["AuthError", "RateLimited", "ContextLengthExceeded", "NetworkError", "InvalidResponse", "ModelNotFound", "ContentFiltered", "Timeout"],
+      "required_variants": [
+        "AuthError",
+        "RateLimited",
+        "ContextLengthExceeded",
+        "NetworkError",
+        "InvalidResponse",
+        "ModelNotFound",
+        "ContentFiltered",
+        "Timeout"
+      ],
       "findings": [],
       "description": "LLM error types",
       "verification_pattern": "pub enum LlmError"
@@ -428,7 +652,11 @@
       "parent": null,
       "name": "RetryingModel",
       "required_methods": [],
-      "required_fields": ["inner", "max_retries", "initial_backoff"],
+      "required_fields": [
+        "inner",
+        "max_retries",
+        "initial_backoff"
+      ],
       "required_variants": [],
       "findings": [],
       "description": "Retrying model wrapper with exponential backoff",

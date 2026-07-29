@@ -219,26 +219,29 @@ pub enum ResponseFormat {
 ### 3.1 ChatAnthropic (`feature = "anthropic"`)
 
 ```rust
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct ChatAnthropic {
-    model: String,
+    client: reqwest::Client,
     api_key: String,
+    model: String,
     base_url: String,
-    default_options: CallOptions,
-    tools: Vec<ToolDefinition>,
-    http_client: reqwest::Client,
     max_tokens: u32,
+    temperature: Option<f32>,
+    top_p: Option<f32>,
+    tools: Vec<ToolDefinition>,
 }
 
 impl ChatAnthropic {
-    pub fn new(model: impl Into<String>) -> Self;
-    pub fn from_env() -> Self;
-    pub fn with_api_key(self, key: impl Into<String>) -> Self;
+    pub fn new(api_key: impl Into<String>) -> Self;
+    pub fn from_env() -> Result<Self, LlmError>;
     pub fn with_base_url(self, url: impl Into<String>) -> Self;
+    pub fn with_model(self, model: impl Into<String>) -> Self;
     pub fn with_max_tokens(self, n: u32) -> Self;
     pub fn with_temperature(self, t: f32) -> Self;
 }
 ```
+
+> **实现备注 (D-08-15)**: 调用选项通过 `ChatModel::invoke(messages, options)` 按调用传入，而非实例级 `default_options` 字段——避免隐藏的可变默认值。HTTP 客户端字段命名为 `client`（非 `http_client`），密钥通过 `new(api_key)` 构造函数传入（非 `with_api_key` setter），与惯用 Rust builder 模式一致。`from_env()` 返回 `Result`（密钥缺失时 `Err(LlmError::AuthError)`）。此实现位于 `juncture` facade crate；core 的旧 `chat.rs` 重复实现已作为死代码删除（设计合规性以 facade 为准）。
 
 **Anthropic Messages API 格式转换**：
 
@@ -287,23 +290,29 @@ pub trait ModelPricing {
 ### 3.2 ChatOpenAI (`feature = "openai"`)
 
 ```rust
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct ChatOpenAI {
-    model: String,
+    client: reqwest::Client,
     api_key: String,
+    model: String,
     base_url: String,
-    default_options: CallOptions,
+    max_tokens: Option<u32>,
+    temperature: Option<f32>,
+    top_p: Option<f32>,
     tools: Vec<ToolDefinition>,
-    http_client: reqwest::Client,
 }
 
 impl ChatOpenAI {
-    pub fn new(model: impl Into<String>) -> Self;
-    pub fn from_env() -> Self;
-    pub fn with_api_key(self, key: impl Into<String>) -> Self;
+    pub fn new(api_key: impl Into<String>) -> Self;
+    pub fn from_env() -> Result<Self, LlmError>;
     pub fn with_base_url(self, url: impl Into<String>) -> Self;
+    pub fn with_model(self, model: impl Into<String>) -> Self;
+    pub fn with_max_tokens(self, n: u32) -> Self;
+    pub fn with_temperature(self, t: f32) -> Self;
 }
 ```
+
+> **实现备注 (D-08-16)**: 同 D-08-15——按调用传入 options、`client` 字段命名、`new(api_key)` 构造、`from_env() -> Result`。`from_env()` 读取 `OPENAI_API_KEY`（必需）、`OPENAI_MODEL`（默认 `gpt-4o`）、`OPENAI_BASE_URL`（默认官方端点），与 `.env.example` 对齐。
 
 **兼容性**：`base_url` 可设置为任何兼容 OpenAI Chat Completions API 格式的服务：
 - Groq (`https://api.groq.com/openai/v1`)
@@ -328,20 +337,25 @@ impl ChatOpenAI {
 ### 3.3 ChatOllama (`feature = "ollama"`)
 
 ```rust
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct ChatOllama {
+    client: reqwest::Client,
     model: String,
     base_url: String,
-    default_options: CallOptions,
+    temperature: Option<f32>,
+    top_p: Option<f32>,
     tools: Vec<ToolDefinition>,
-    http_client: reqwest::Client,
+    stream: bool,
 }
 
 impl ChatOllama {
     pub fn new(model: impl Into<String>) -> Self;
     pub fn with_base_url(self, url: impl Into<String>) -> Self;
+    pub fn with_temperature(self, t: f32) -> Self;
 }
 ```
+
+> **实现备注 (D-08-17)**: Ollama 本地部署无需 API 密钥，故 `new(model)`（非 `new(api_key)`）。同 D-08-15 的 `client`/按调用 options 模式。
 
 **API 端点**：`POST {base_url}/api/chat`
 

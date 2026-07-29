@@ -1,13 +1,15 @@
 # CLAUDE.md -- juncture-derive
 
-Proc-macro crate providing `#[derive(State)]`. Has no runtime dependencies beyond `syn`, `quote`, `proc-macro2`.
+Proc-macro crate providing `#[derive(State)]` plus the functional-API attribute macros `#[task]` and `#[entrypoint]` (design `03-pregel-engine` §13.3). Runtime deps: `syn`, `quote`, `proc-macro2` only.
 
 ## Structure
 
 ```
 src/
-  lib.rs           -- proc-macro entry point
-  state_derive.rs  -- State derive implementation
+  lib.rs             -- proc-macro entry points (derive State, attribute task/entrypoint)
+  state_derive.rs    -- State derive implementation
+  task_attr.rs       -- #[task] attribute macro (SyncAsyncFuture wrapper + cache/retry/timeout)
+  entrypoint_attr.rs -- #[entrypoint] attribute macro (generates a compile() graph accessor)
 ```
 
 ## What the macro generates

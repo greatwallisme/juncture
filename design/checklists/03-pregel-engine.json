@@ -470,6 +470,34 @@
       ],
       "description": "May be sync or async task result for functional API",
       "verification_pattern": "pub enum SyncAsyncFuture"
+    },
+    {
+      "id": "03-026",
+      "category": "macro",
+      "parent": null,
+      "name": "task",
+      "required_methods": [],
+      "required_fields": [],
+      "required_variants": [],
+      "findings": [
+        "B-004"
+      ],
+      "description": "#[task] attribute macro: wraps an async fn into a SyncAsyncFuture-returning callable with optional cache/retry/timeout/name",
+      "verification_pattern": "pub fn task\\b"
+    },
+    {
+      "id": "03-027",
+      "category": "macro",
+      "parent": null,
+      "name": "entrypoint",
+      "required_methods": [],
+      "required_fields": [],
+      "required_variants": [],
+      "findings": [
+        "B-004"
+      ],
+      "description": "#[entrypoint] attribute macro: marks a node-compatible fn as a workflow entrypoint, generating a compile() accessor",
+      "verification_pattern": "pub fn entrypoint\\b"
     }
   ]
 }

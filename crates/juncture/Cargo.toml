@@ -28,7 +28,6 @@ tracing = "0.1"
 # Provider dependencies (feature-gated)
 reqwest = { version = "0.12", features = ["json", "stream"], optional = true }
 bytes = { version = "1", optional = true }
-schemars = { version = "0.8", optional = true }
 
 [features]
 default = ["multi-thread"]
@@ -37,7 +36,6 @@ anthropic = ["dep:reqwest", "dep:bytes"]
 openai = ["dep:reqwest", "dep:bytes"]
 ollama = ["dep:reqwest", "dep:bytes"]
 reqwest = ["dep:reqwest", "dep:bytes"]
-structured-output = ["schemars"]
 store = ["juncture-store"]
 wasm = ["juncture-core/wasm"]
 

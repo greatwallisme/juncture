@@ -168,14 +168,14 @@ impl ChatModel for MockChatModel {
         Ok(msg)
     }
 
-    fn stream(
+    async fn stream(
         &self,
         _messages: &[Message],
         _options: Option<&CallOptions>,
-    ) -> BoxStream<'_, Result<MessageChunk, LlmError>> {
+    ) -> Result<BoxStream<'_, Result<MessageChunk, LlmError>>, LlmError> {
         if self.should_error {
             let error = LlmError::Other(Box::new(MockError));
-            return Box::pin(stream::once(async move { Err(error) }));
+            return Ok(Box::pin(stream::once(async move { Err(error) })));
         }
 
         let content = self.response.clone().unwrap_or_default();
@@ -195,7 +195,7 @@ impl ChatModel for MockChatModel {
             usage_delta: None,
         };
 
-        Box::pin(stream::once(async move { Ok(chunk) }))
+        Ok(Box::pin(stream::once(async move { Ok(chunk) })))
     }
 
     fn bind_tools(&self, tools: Vec<ToolDefinition>) -> Self {

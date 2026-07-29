@@ -13,12 +13,18 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use crate::state::{Message, Role};
+use crate::state::{Content, Message};
 
 /// Re-export `BoxStream` for use in `ChatModel` trait
 pub use futures::stream::BoxStream;
 
 /// LLM invocation error types
+///
+/// Matches the canonical variant set from design `08-llm-tools` (the
+/// `LlmError` enum + implementation note D-08-7). This is the single source
+/// of truth consumed by both `juncture-core` and the `juncture` facade
+/// providers (the former `chat.rs` / `llm/trait_.rs` duplicates are
+/// consolidated onto this definition).
 #[derive(Debug, thiserror::Error)]
 pub enum LlmError {
     /// Authentication failed
@@ -41,13 +47,33 @@ pub enum LlmError {
         limit: u64,
     },
 
-    /// Network error during HTTP request
+    /// Network error during HTTP request.
+    ///
+    /// Carries the typed `reqwest::Error` so callers can inspect the
+    /// underlying transport failure. Available whenever the `chat` feature
+    /// is enabled (the `llm` module is `chat`-gated and `chat = ["reqwest"]`).
     #[error("network error: {0}")]
-    NetworkError(String),
+    NetworkError(#[from] reqwest::Error),
 
     /// Invalid response from LLM provider
     #[error("invalid response: {0}")]
     InvalidResponse(String),
+
+    /// Model not found.
+    ///
+    /// The requested model name does not exist or is not available.
+    #[error("model not found: {0}")]
+    ModelNotFound(String),
+
+    /// Content filtered by provider policy.
+    #[error("content filtered")]
+    ContentFiltered,
+
+    /// Request timeout.
+    ///
+    /// The provider did not respond within the specified time limit.
+    #[error("timeout after {0:?}")]
+    Timeout(std::time::Duration),
 
     /// Other errors
     #[error("llm error: {0}")]
@@ -132,21 +158,15 @@ pub struct ToolDefinition {
     pub parameters: serde_json::Value,
 }
 
-/// Streaming message chunk
+/// Streaming message chunk yielded by [`ChatModel::stream`].
 ///
-/// Represents incremental data from streaming LLM responses.
-/// Chunks must be accumulated to reconstruct the complete message.
-#[derive(Clone, Debug)]
-pub struct MessageChunk {
-    /// Message role (may be empty in early chunks)
-    pub role: Option<Role>,
-    /// Text content delta
-    pub content: String,
-    /// Tool call chunks (using `args_delta` field name from stream module)
-    pub tool_call_chunks: Vec<ToolCallChunk>,
-    /// Token usage (only in final chunk)
-    pub usage: Option<crate::state::TokenUsage>,
-}
+/// Re-exported from [`crate::stream`] so the LLM streaming surface and the
+/// internal stream/event module share a single `MessageChunk` definition
+/// (design `08-llm-tools` §1.3). The implementation converged on a
+/// `usage_delta` field (token usage reported on the final chunk) rather than
+/// the design sketch's `role`/`usage` pair; the design doc is reconciled to
+/// this shape so code and spec agree.
+pub use crate::stream::MessageChunk;
 
 /// Streaming tool call chunk
 ///
@@ -211,17 +231,20 @@ pub trait ChatModel: Send + Sync + Clone + 'static {
     /// Convert to structured output model
     ///
     /// Returns a wrapper that forces the model to output structured JSON
-    /// matching type T's schema.
+    /// matching type T's schema, using tool-based extraction with a text
+    /// fallback (see [`StructuredOutputModel`]).
     ///
     /// # Type Parameters
     ///
     /// * `T` - Target type with JSON Schema support
     #[must_use]
-    fn with_structured_output<T: JsonSchema + DeserializeOwned + Serialize>(
-        self,
-    ) -> StructuredOutputModel<Self, T>
+    fn with_structured_output<T>(self) -> StructuredOutputModel<Self, T>
     where
-        Self: Sized;
+        Self: Sized,
+        T: JsonSchema + DeserializeOwned + Serialize + Clone + Send + Sync + 'static,
+    {
+        StructuredOutputModel::new(self)
+    }
 
     /// Get the model name
     fn model_name(&self) -> &str;
@@ -239,24 +262,55 @@ pub trait DeserializeOwned: for<'de> Deserialize<'de> {}
 /// Blanket implementation for all deserializable types
 impl<T: for<'de> Deserialize<'de>> DeserializeOwned for T {}
 
-/// Wrapper for structured output from LLMs
+/// Wrapper for extracting structured output from LLM responses.
 ///
-/// Uses function calling to force the model to output JSON matching
-/// the schema of type T.
+/// Forces the model to return output matching a specific schema, which is
+/// then deserialized into the target type `T`.
+///
+/// By default uses tool-based extraction: creates a virtual tool with `T`'s
+/// JSON schema and sets `tool_choice` to require the tool. Falls back to
+/// text-based JSON parsing if the model does not return tool calls.
+///
+/// This is the single source of truth (design `08-llm-tools`); the former
+/// facade `structured.rs` duplicate was consolidated onto this definition.
+///
+/// # Type Parameters
+///
+/// * `M` - The underlying [`ChatModel`] implementation
+/// * `T` - The target type for structured output (must implement [`Clone`],
+///   [`Send`], [`Sync`], [`JsonSchema`] and [`DeserializeOwned`])
 pub struct StructuredOutputModel<M, T>
 where
-    M: Clone,
+    M: ChatModel,
+    T: DeserializeOwned + JsonSchema + Clone + Send + Sync + 'static,
 {
-    /// Inner model
+    /// Inner model to wrap.
     pub(crate) inner: M,
-    /// Phantom data for target type
+
+    /// Whether to use tool-based extraction (vs. plain text parsing).
+    pub(crate) use_tool_based: bool,
+
+    /// Name of the synthetic extraction tool.
+    pub(crate) tool_name: String,
+
+    /// Tool definition built from `T`'s JSON schema.
+    pub(crate) tool_definition: ToolDefinition,
+
+    /// Phantom data for the target type.
     pub(crate) _phantom: std::marker::PhantomData<T>,
 }
 
-impl<M: Clone, T> Clone for StructuredOutputModel<M, T> {
+impl<M, T> Clone for StructuredOutputModel<M, T>
+where
+    M: ChatModel,
+    T: DeserializeOwned + JsonSchema + Clone + Send + Sync + 'static,
+{
     fn clone(&self) -> Self {
         Self {
             inner: self.inner.clone(),
+            use_tool_based: self.use_tool_based,
+            tool_name: self.tool_name.clone(),
+            tool_definition: self.tool_definition.clone(),
             _phantom: std::marker::PhantomData,
         }
     }
@@ -264,13 +318,148 @@ impl<M: Clone, T> Clone for StructuredOutputModel<M, T> {
 
 impl<M, T> std::fmt::Debug for StructuredOutputModel<M, T>
 where
-    M: Clone,
+    M: ChatModel,
+    T: DeserializeOwned + JsonSchema + Clone + Send + Sync + 'static,
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("StructuredOutputModel")
             .field("inner", &"<model>")
-            .field("_phantom", &self._phantom)
-            .finish()
+            .field("use_tool_based", &self.use_tool_based)
+            .field("tool_name", &self.tool_name)
+            // `tool_definition` intentionally omitted: it is a bulky JSON
+            // schema that would clutter debug output.
+            .finish_non_exhaustive()
+    }
+}
+
+impl<M, T> StructuredOutputModel<M, T>
+where
+    M: ChatModel,
+    T: DeserializeOwned + JsonSchema + Clone + Send + Sync + 'static,
+{
+    /// Create a new structured output wrapper.
+    ///
+    /// Tool-based extraction is enabled by default; disable it with
+    /// [`with_tool_based_extraction`](Self::with_tool_based_extraction).
+    #[must_use]
+    pub fn new(inner: M) -> Self {
+        let type_name = std::any::type_name::<T>();
+        // Sanitize the type name into a valid tool identifier by replacing
+        // Rust-specific characters (::, <, >, ,) with underscores.
+        let tool_name = format!(
+            "extract_{}",
+            type_name
+                .replace("::", "_")
+                .replace(['<', '>', ','], "_")
+                .replace(' ', "")
+        );
+
+        let schema = schemars::schema_for!(T);
+        // Schema serialization cannot fail for a `RootSchema` (only String /
+        // Vec / Map leaves); the fallback purely satisfies the non-fallible
+        // constructor signature.
+        let parameters =
+            serde_json::to_value(&schema).unwrap_or_else(|_| serde_json::json!({"type": "object"}));
+
+        let tool_definition = ToolDefinition {
+            name: tool_name.clone(),
+            description: format!(
+                "Extract structured data conforming to the schema for {type_name}"
+            ),
+            parameters,
+        };
+
+        Self {
+            inner,
+            use_tool_based: true,
+            tool_name,
+            tool_definition,
+            _phantom: std::marker::PhantomData,
+        }
+    }
+
+    /// Enable or disable tool-based extraction.
+    ///
+    /// When enabled (default), the model is forced to use a synthetic tool
+    /// whose schema matches `T`; the tool-call arguments are then extracted
+    /// and deserialized. When disabled, the model's text response is parsed
+    /// as JSON.
+    #[must_use]
+    pub const fn with_tool_based_extraction(mut self, enabled: bool) -> Self {
+        self.use_tool_based = enabled;
+        self
+    }
+
+    /// Borrow the inner model.
+    #[must_use]
+    #[allow(
+        clippy::missing_const_for_fn,
+        reason = "Cannot be const in current Rust version"
+    )]
+    pub fn inner(&self) -> &M {
+        &self.inner
+    }
+
+    /// Extract structured output from a fully-assembled message.
+    ///
+    /// Tries tool-call arguments first; falls back to parsing text content
+    /// if the tool-call arguments do not match `T`'s schema.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LlmError::InvalidResponse`] if neither the tool-call
+    /// arguments nor the text content parse as `T`.
+    pub fn extract(&self, message: &Message) -> Result<T, LlmError> {
+        if !message.tool_calls.is_empty()
+            && let Ok(result) = Self::extract_from_tool_call(message)
+        {
+            return Ok(result);
+        }
+        // Tool-call arguments did not match the schema; fall back to text.
+        Self::extract_from_text(message)
+    }
+
+    /// Deserialize `T` from the first tool-call's arguments.
+    fn extract_from_tool_call(message: &Message) -> Result<T, LlmError> {
+        let tool_call = message.tool_calls.first().ok_or_else(|| {
+            LlmError::InvalidResponse(
+                "No tool calls found in response for tool-based extraction".to_string(),
+            )
+        })?;
+
+        serde_json::from_value(tool_call.arguments.clone()).map_err(|e| {
+            LlmError::InvalidResponse(format!(
+                "Failed to parse tool call arguments as structured output: {e}"
+            ))
+        })
+    }
+
+    /// Deserialize `T` from the message's text content.
+    fn extract_from_text(message: &Message) -> Result<T, LlmError> {
+        let content = match &message.content {
+            Content::Text(text) => text,
+            Content::MultiPart(_) => {
+                return Err(LlmError::InvalidResponse(
+                    "Cannot extract structured output from multipart content".to_string(),
+                ));
+            }
+        };
+
+        serde_json::from_str(content).map_err(|e| {
+            LlmError::InvalidResponse(format!(
+                "Failed to parse structured output: {e}\nContent: {content}"
+            ))
+        })
+    }
+}
+
+impl<M, T> Default for StructuredOutputModel<M, T>
+where
+    M: ChatModel + Default,
+    T: DeserializeOwned + JsonSchema + Clone + Send + Sync + 'static,
+{
+    fn default() -> Self {
+        Self::new(M::default())
     }
 }
 
@@ -279,64 +468,46 @@ where
 impl<M, T> ChatModel for StructuredOutputModel<M, T>
 where
     M: ChatModel,
-    T: JsonSchema + DeserializeOwned + Serialize + Send + Sync + 'static,
+    T: JsonSchema + DeserializeOwned + Serialize + Clone + Send + Sync + 'static,
 {
     async fn invoke(
         &self,
         messages: &[Message],
         options: Option<&CallOptions>,
     ) -> Result<Message, LlmError> {
-        // Create a virtual tool with T's schema
-        let schema = schemars::schema_for!(T);
-        let tool_def = ToolDefinition {
-            name: "structured_output".to_string(),
-            description: "Output structured data".to_string(),
-            parameters: serde_json::to_value(schema)
-                .map_err(|e| LlmError::InvalidResponse(e.to_string()))?,
-        };
+        if self.use_tool_based {
+            // Bind the extraction tool and force the model to call it.
+            let model_with_tool = self.inner.bind_tools(vec![self.tool_definition.clone()]);
 
-        // Force tool usage
-        #[allow(
-            clippy::manual_unwrap_or_default,
-            clippy::option_if_let_else,
-            reason = "project rules prohibit unwrap_or_default; match is explicit and readable"
-        )]
-        let mut opts = match options.cloned() {
-            Some(opts) => opts,
-            None => CallOptions::default(),
-        };
-        opts.tool_choice = Some(ToolChoice::Required);
+            // Merge options, enforcing tool_choice for the extraction tool.
+            // Explicit match (not `unwrap_or_default`) per project style.
+            #[allow(
+                clippy::manual_unwrap_or_default,
+                clippy::option_if_let_else,
+                reason = "project rules prohibit unwrap_or_default; match is explicit and readable"
+            )]
+            let mut merged_opts = match options.cloned() {
+                Some(opts) => opts,
+                None => CallOptions::default(),
+            };
+            merged_opts.tool_choice = Some(ToolChoice::Specific {
+                name: self.tool_name.clone(),
+            });
 
-        // Call inner model with tool bound
-        let model_with_tool = self.inner.bind_tools(vec![tool_def]);
-        let response = model_with_tool.invoke(messages, Some(&opts)).await?;
+            let response = model_with_tool.invoke(messages, Some(&merged_opts)).await?;
 
-        // Extract tool call arguments and parse as T
-        if let Some(tool_call) = response.tool_calls.first() {
-            let _value: T = serde_json::from_value(tool_call.arguments.clone()).map_err(|e| {
-                LlmError::InvalidResponse(format!("Failed to parse structured output: {e}"))
-            })?;
-
-            // Return as JSON string in content
-            Ok(Message {
-                id: response.id,
-                role: Role::Ai,
-                content: crate::state::Content::Text(serde_json::to_string(&_value).map_err(
-                    |e| {
-                        LlmError::InvalidResponse(format!(
-                            "Failed to serialize structured output: {e}"
-                        ))
-                    },
-                )?),
-                tool_calls: vec![],
-                tool_call_id: None,
-                name: None,
-                usage: response.usage,
-            })
+            // Accept the response if its tool-call arguments deserialize as T;
+            // otherwise fall through to the text-content fallback.
+            if !response.tool_calls.is_empty() && Self::extract_from_tool_call(&response).is_ok() {
+                return Ok(response);
+            }
+            Self::extract_from_text(&response)?;
+            Ok(response)
         } else {
-            Err(LlmError::InvalidResponse(
-                "No tool call in response".to_string(),
-            ))
+            // Text-based extraction: validate that the response body parses as T.
+            let response = self.inner.invoke(messages, options).await?;
+            Self::extract_from_text(&response)?;
+            Ok(response)
         }
     }
 
@@ -345,24 +516,19 @@ where
         messages: &[Message],
         options: Option<&CallOptions>,
     ) -> Result<BoxStream<'_, Result<MessageChunk, LlmError>>, LlmError> {
+        // Forward the inner stream unchanged. Streaming does not validate the
+        // structured output; callers wanting validation should use `invoke()`
+        // or collect the stream and call [`Self::extract`].
         self.inner.stream(messages, options).await
     }
 
     fn bind_tools(&self, tools: Vec<ToolDefinition>) -> Self {
+        let inner_with_tools = self.inner.bind_tools(tools);
         Self {
-            inner: self.inner.bind_tools(tools),
-            _phantom: std::marker::PhantomData,
-        }
-    }
-
-    fn with_structured_output<U: JsonSchema + DeserializeOwned + Serialize>(
-        self,
-    ) -> StructuredOutputModel<Self, U>
-    where
-        Self: Sized,
-    {
-        StructuredOutputModel {
-            inner: self,
+            inner: inner_with_tools,
+            use_tool_based: self.use_tool_based,
+            tool_name: self.tool_name.clone(),
+            tool_definition: self.tool_definition.clone(),
             _phantom: std::marker::PhantomData,
         }
     }

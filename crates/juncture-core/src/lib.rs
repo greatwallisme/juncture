@@ -1,5 +1,3 @@
-#[cfg(feature = "chat")]
-pub mod chat;
 pub mod checkpoint;
 #[cfg(all(feature = "chat", not(target_family = "wasm")))]
 pub mod client;
@@ -209,8 +207,6 @@ macro_rules! parent_command {
     };
 }
 
-#[cfg(all(feature = "chat", not(target_family = "wasm")))]
-pub use chat::{ChatAnthropic, ChatOllama, ChatOpenAI};
 pub use checkpoint::{
     CHECKPOINT_NS_SEPARATOR, CheckpointNamespace, CheckpointSaver, DeltaCounters, NamespaceSegment,
     generate_checkpoint_id,
@@ -225,7 +221,10 @@ pub use config::{
 };
 pub use edge::{END, Edge, PathMap, RouteResult, Router, START, TriggerTable};
 pub use error::{ErrorCode, InvalidUpdateError, JunctureError, NodeTimeoutError};
-pub use func::{Runtime as FuncRuntime, compile_entrypoint, compile_entrypoint_with_config};
+pub use func::{
+    Runtime as FuncRuntime, compile_entrypoint, compile_entrypoint_with_config, run_task,
+    task_cache_key,
+};
 pub use graph::{
     CircuitBreakerConfig, CircuitBreakerState, CircuitState, CompiledGraph, DrawableEdge,
     DrawableGraph, DrawableNode, ErrorHandlerNode, GraphOutput, GraphOutputMetadata, InterruptInfo,

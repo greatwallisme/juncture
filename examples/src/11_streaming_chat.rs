@@ -28,7 +28,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Message::human("Tell me a story about a robot learning to paint."),
     ];
 
-    let mut stream = llm.stream(&messages, None);
+    let mut stream = llm.stream(&messages, None).await?;
     let mut full_response = String::new();
 
     while let Some(chunk_result) = stream.next().await {

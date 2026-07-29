@@ -17,15 +17,14 @@ src/
 
 | File | Description |
 |------|-------------|
-| `trait_.rs` | `ChatModel` trait, `StructuredOutputModel`, `CallOptions`, `LlmError` (`Other` holds `Box<dyn Error + Send + Sync>`) |
-| `message.rs` | Message builder helpers |
+| `trait_.rs` | Re-exports the canonical `juncture-core` LLM surface (`ChatModel`, `LlmError`, `CallOptions`, `ToolDefinition`, `ToolChoice`, `ResponseFormat`, `StructuredOutputModel`, `BoxStream`, `MessageChunk`, `ToolCallChunk`) -- single source of truth (Phase M consolidation) |
+| `message.rs` | `TokenUsage` alias |
 | `anthropic.rs` | `ChatAnthropic` (feature `anthropic`) -- Anthropic Claude API |
 | `openai.rs` | `ChatOpenAI` (feature `openai`) -- OpenAI GPT API |
 | `ollama.rs` | `ChatOllama` (feature `ollama`) -- Ollama local model API |
 | `mock.rs` | `MockChatModel` for testing (uses `MockError` custom error type) |
 | `retry.rs` | `RetryingModel` wrapper with configurable retry policy (`RetryExhaustedError` custom error type) |
 | `pricing.rs` | `ModelPricing`, `PricingTable` for cost tracking |
-| `structured.rs` | Structured output extraction (feature `structured-output`) |
 | `middleware.rs` | `LlmMiddleware` trait for wrapping individual `ChatModel::invoke()` calls |
 | `circuit_breaker.rs` | `CircuitBreaker` for LLM provider health tracking |
 
@@ -61,7 +60,6 @@ src/
 - `anthropic` -- Anthropic Claude provider (reqwest + SSE streaming)
 - `openai` -- OpenAI GPT provider (reqwest + SSE streaming)
 - `ollama` -- Ollama local model provider (reqwest)
-- `structured-output` -- Structured output via schemars JSON Schema
 - `store` -- Enable `juncture-store` integration
 - `reqwest` -- Enable WebFetchTool and other HTTP-dependent built-in tools
 

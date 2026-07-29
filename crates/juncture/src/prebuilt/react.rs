@@ -793,12 +793,14 @@ mod tests {
             Ok(Message::ai_with_tool_calls(content, calls))
         }
 
-        fn stream(
+        async fn stream(
             &self,
             _messages: &[crate::llm::Message],
             _options: Option<&crate::llm::CallOptions>,
-        ) -> crate::llm::BoxStream<'_, Result<crate::llm::MessageChunk, crate::llm::LlmError>>
-        {
+        ) -> Result<
+            crate::llm::BoxStream<'_, Result<crate::llm::MessageChunk, crate::llm::LlmError>>,
+            crate::llm::LlmError,
+        > {
             // The ReAct agent drives the loop via invoke(); streaming is not
             // exercised here. Emit one chunk to satisfy the trait contract.
             let (content, _calls) = self.next_turn();
@@ -807,7 +809,7 @@ mod tests {
                 tool_call_chunks: Vec::new(),
                 usage_delta: None,
             };
-            Box::pin(futures::stream::once(async move { Ok(chunk) }))
+            Ok(Box::pin(futures::stream::once(async move { Ok(chunk) })))
         }
 
         fn bind_tools(&self, _tools: Vec<crate::llm::ToolDefinition>) -> Self {

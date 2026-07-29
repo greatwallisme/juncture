@@ -3,13 +3,13 @@
 //! Provides automatic retry logic with exponential backoff for transient errors
 //! like rate limiting and network timeouts.
 
-use std::pin::Pin;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use futures::Stream;
 
-use crate::llm::{CallOptions, ChatModel, LlmError, Message, MessageChunk, ToolDefinition};
+use crate::llm::{
+    BoxStream, CallOptions, ChatModel, LlmError, Message, MessageChunk, ToolDefinition,
+};
 
 /// Simple error type for retry-related errors
 #[derive(Debug, thiserror::Error)]
@@ -249,14 +249,14 @@ impl<M: ChatModel> ChatModel for RetryingModel<M> {
         Err(last_error.unwrap_or_else(|| LlmError::Other(Box::new(RetryExhaustedError))))
     }
 
-    fn stream(
+    async fn stream(
         &self,
         messages: &[Message],
         options: Option<&CallOptions>,
-    ) -> Pin<Box<dyn Stream<Item = Result<MessageChunk, LlmError>> + Send + '_>> {
+    ) -> Result<BoxStream<'_, Result<MessageChunk, LlmError>>, LlmError> {
         // For streaming, we don't implement retry logic since the stream
-        // may already be partially consumed. Return the inner stream directly.
-        self.inner.stream(messages, options)
+        // may already be partially consumed. Forward the inner stream directly.
+        self.inner.stream(messages, options).await
     }
 
     fn bind_tools(&self, tools: Vec<ToolDefinition>) -> Self {
