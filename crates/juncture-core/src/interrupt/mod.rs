@@ -618,6 +618,37 @@ impl Scratchpad {
 mod tests {
     use super::*;
 
+    // --- generate_interrupt_id determinism/format (design 06 §2.2 xxh3 guarantee) ---
+    // Previously only doc-tested for length; determinism + uniqueness are the
+    // actual guarantees grep-based coverage cannot verify.
+
+    #[test]
+    fn generate_interrupt_id_is_deterministic_for_same_input() {
+        let a = generate_interrupt_id("approval_node", 0);
+        let b = generate_interrupt_id("approval_node", 0);
+        assert_eq!(a, b, "same (node, index) must yield the same ID within a build");
+        assert_eq!(a.len(), 32);
+    }
+
+    #[test]
+    fn generate_interrupt_id_differs_across_index_and_node() {
+        let base = generate_interrupt_id("node_a", 0);
+        let next_index = generate_interrupt_id("node_a", 1);
+        let other_node = generate_interrupt_id("node_b", 0);
+        assert_ne!(base, next_index, "different index must yield a different ID");
+        assert_ne!(base, other_node, "different node must yield a different ID");
+    }
+
+    #[test]
+    fn generate_interrupt_id_is_lowercase_hex() {
+        let id = generate_interrupt_id("my_node", 7);
+        assert_eq!(id.len(), 32);
+        assert!(
+            id.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+            "ID must be 32-char lowercase hex, got {id}"
+        );
+    }
+
     // --- Scratchpad tests ---
 
     #[test]

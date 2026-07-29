@@ -1065,6 +1065,68 @@ mod scheduler_tests {
     use crate::node::IntoNode;
     use crate::state::FieldVersions;
 
+    // FieldVersionTracker / VersionsSeen unit coverage (design 01 §2.6).
+    // These scheduling-critical primitives previously had only doc-tests; the
+    // global-max bump strategy and the `version > seen` activation gate are
+    // exactly the behavior grep-based coverage cannot verify.
+    #[test]
+    fn field_version_tracker_bump_uses_global_max_strategy() {
+        let mut tracker = FieldVersionTracker::new(3);
+        tracker.bump(0);
+        assert_eq!(tracker.get(0), 1);
+        assert_eq!(tracker.global_max(), 1);
+        tracker.bump(2);
+        // Global-max strategy: field 2 takes the next global counter (2),
+        // NOT a per-field increment (which would also be 1).
+        assert_eq!(tracker.get(2), 2);
+        assert_eq!(tracker.get(0), 1, "bumping field 2 must not touch field 0");
+        assert_eq!(tracker.global_max(), 2);
+    }
+
+    #[test]
+    fn field_version_tracker_bump_all_only_changed_fields() {
+        let mut tracker = FieldVersionTracker::new(3);
+        let changed = FieldsChanged(0b101); // fields 0 and 2
+        tracker.bump_all(&changed);
+        assert_eq!(tracker.get(0), 1);
+        assert_eq!(tracker.get(1), 0, "field 1 not in changed set, must stay 0");
+        assert_eq!(tracker.get(2), 2);
+        assert_eq!(tracker.global_max(), 2);
+    }
+
+    #[test]
+    #[should_panic(expected = "Cannot track more than 64 fields")]
+    fn field_version_tracker_new_rejects_over_64_fields() {
+        let _ = FieldVersionTracker::new(65);
+    }
+
+    #[test]
+    fn versions_seen_activates_only_when_version_strictly_above_seen() {
+        let nodes = vec!["node_a".to_string()];
+        let seen = VersionsSeen::new(&nodes, 3);
+        let current = vec![1, 0, 0];
+        // field 0 advanced (1 > 0) -> activate
+        assert!(seen.should_activate("node_a", &[0], &current));
+        // field 1 unchanged (0 == 0) -> must NOT activate (strictly-greater, not >=)
+        assert!(
+            !seen.should_activate("node_a", &[1], &current),
+            "equal version must not activate"
+        );
+    }
+
+    #[test]
+    fn versions_seen_mark_consumed_suppresses_reactivation() {
+        let nodes = vec!["node_a".to_string()];
+        let mut seen = VersionsSeen::new(&nodes, 3);
+        let current = vec![1, 0, 0];
+        assert!(seen.should_activate("node_a", &[0], &current));
+        seen.mark_consumed("node_a", &current);
+        assert!(
+            !seen.should_activate("node_a", &[0], &current),
+            "after consuming, the same versions must not reactivate the node"
+        );
+    }
+
     #[derive(Clone, Debug, Default)]
     struct TestState;
 

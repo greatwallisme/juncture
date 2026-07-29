@@ -1200,6 +1200,47 @@ mod tests {
         ch.update(vec![1, 2]);
     }
 
+    // Direct Reducer trait coverage (design 01 §2.3 / §3.6 multi-writer table).
+    // Append/LastWriteWins were previously exercised only indirectly via
+    // Topic/Delta; AnyValue was re-exported but never used or tested.
+    #[test]
+    fn append_reducer_accumulates_in_order() {
+        let mut val: Vec<i32> = Vec::new();
+        AppendReducer::reduce(&mut val, vec![vec![1, 2], vec![3, 4]]);
+        assert_eq!(val, vec![1, 2, 3, 4], "AppendReducer must preserve write order");
+        // reduce_one fast path extends without building a Vec<Vec<T>>
+        AppendReducer::reduce_one(&mut val, vec![5, 6]);
+        assert_eq!(val, vec![1, 2, 3, 4, 5, 6]);
+    }
+
+    #[test]
+    fn last_write_wins_reducer_allows_multiple_last_wins() {
+        let mut val = 0;
+        LastWriteWinsReducer::reduce(&mut val, vec![1, 2, 3]);
+        assert_eq!(val, 3, "LastWriteWins keeps the last value; must not panic on multi-write");
+
+        let mut single = 0;
+        LastWriteWinsReducer::reduce(&mut single, vec![42]);
+        assert_eq!(single, 42);
+    }
+
+    #[test]
+    fn any_value_reducer_equal_values_last_wins() {
+        let mut val = 0;
+        AnyValueReducer::reduce(&mut val, vec![7, 7, 7]);
+        assert_eq!(val, 7, "AnyValue with equal inputs keeps the last without panicking");
+    }
+
+    // debug_assert is only active under the debug profile used by `cargo test`,
+    // so gate the panic expectation to debug builds to avoid a release-mode false failure.
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "AnyValue reducer: all values should be equal")]
+    fn any_value_reducer_unequal_values_debug_assert_panics() {
+        let mut val = 0;
+        AnyValueReducer::reduce(&mut val, vec![1, 2]);
+    }
+
     // NamedBarrierChannel tests
     #[test]
     fn named_barrier_channel_not_available_initially() {
