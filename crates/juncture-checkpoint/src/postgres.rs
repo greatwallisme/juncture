@@ -104,9 +104,9 @@ const CHECKPOINTS_CREATE_TABLE_SQL: &str = r"
         pending_tasks JSONB,
         pending_sends JSONB,
         pending_interrupts JSONB,
-        schema_version INTEGER NOT NULL DEFAULT 1,
+        schema_version BIGINT NOT NULL DEFAULT 1,
         metadata JSONB NOT NULL,
-        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        created_at TEXT NOT NULL,
         PRIMARY KEY (thread_id, checkpoint_ns, checkpoint_id)
     )
 ";
@@ -121,7 +121,7 @@ const CHECKPOINT_WRITES_CREATE_TABLE_SQL: &str = r"
         task_id TEXT NOT NULL,
         channel TEXT NOT NULL,
         value BYTEA NOT NULL,
-        idx INTEGER NOT NULL,
+        idx BIGINT NOT NULL,
         PRIMARY KEY (thread_id, checkpoint_ns, checkpoint_id, task_id, idx)
     )
 ";
@@ -1193,6 +1193,84 @@ mod tests {
             .await;
         let _ = sqlx::query("DELETE FROM checkpoint_writes WHERE thread_id = $1")
             .bind(&config.thread_id)
+            .execute(&*saver.pool)
+            .await;
+    }
+
+    /// Parity with `test_memory_saver_thread_isolation` (checkpoint-persistence
+    /// spec #8): `PostgresSaver` must isolate checkpoints by `thread_id`.
+    #[tokio::test]
+    #[cfg(feature = "postgres")]
+    async fn test_postgres_saver_thread_isolation() {
+        let conn_str = std::env::var("TEST_POSTGRES_URL")
+            .unwrap_or_else(|_| "postgresql://postgres:postgres@localhost:5432/test".to_string());
+        let Ok(saver) = PostgresSaver::new(&conn_str).await else {
+            return;
+        };
+
+        let config_t1 = create_test_config("pg-iso-thread1");
+        let config_t2 = create_test_config("pg-iso-thread2");
+        let cp1 = create_test_checkpoint("cp1");
+        let cp2 = create_test_checkpoint("cp2");
+        let metadata = create_test_metadata();
+
+        saver.put(&config_t1, cp1, metadata.clone()).await.unwrap();
+        saver.put(&config_t2, cp2, metadata).await.unwrap();
+
+        let r1 = saver.get_tuple(&config_t1).await.unwrap().unwrap();
+        assert_eq!(r1.checkpoint.id, "cp1");
+        let r2 = saver.get_tuple(&config_t2).await.unwrap().unwrap();
+        assert_eq!(r2.checkpoint.id, "cp2");
+
+        for tid in ["pg-iso-thread1", "pg-iso-thread2"] {
+            let _ = sqlx::query("DELETE FROM checkpoints WHERE thread_id = $1")
+                .bind(tid)
+                .execute(&*saver.pool)
+                .await;
+            let _ = sqlx::query("DELETE FROM checkpoint_writes WHERE thread_id = $1")
+                .bind(tid)
+                .execute(&*saver.pool)
+                .await;
+        }
+    }
+
+    /// Parity with `test_memory_saver_namespace_isolation` (checkpoint-persistence
+    /// spec #8): `PostgresSaver` must isolate checkpoints by `checkpoint_ns` within
+    /// the same thread.
+    #[tokio::test]
+    #[cfg(feature = "postgres")]
+    async fn test_postgres_saver_namespace_isolation() {
+        use juncture_core::checkpoint::CheckpointNamespace;
+
+        let conn_str = std::env::var("TEST_POSTGRES_URL")
+            .unwrap_or_else(|_| "postgresql://postgres:postgres@localhost:5432/test".to_string());
+        let Ok(saver) = PostgresSaver::new(&conn_str).await else {
+            return;
+        };
+
+        let config_ns1 = RunnableConfig::default()
+            .with_thread_id("pg-iso-ns-thread")
+            .with_checkpoint_ns(CheckpointNamespace::parse("ns1"));
+        let config_ns2 = RunnableConfig::default()
+            .with_thread_id("pg-iso-ns-thread")
+            .with_checkpoint_ns(CheckpointNamespace::parse("ns2"));
+        let cp1 = create_test_checkpoint("cp1");
+        let cp2 = create_test_checkpoint("cp2");
+        let metadata = create_test_metadata();
+
+        saver.put(&config_ns1, cp1, metadata.clone()).await.unwrap();
+        saver.put(&config_ns2, cp2, metadata).await.unwrap();
+
+        // ns2 must not see ns1's checkpoint.
+        let r2 = saver.get_tuple(&config_ns2).await.unwrap().unwrap();
+        assert_eq!(r2.checkpoint.id, "cp2");
+
+        let _ = sqlx::query("DELETE FROM checkpoints WHERE thread_id = $1")
+            .bind("pg-iso-ns-thread")
+            .execute(&*saver.pool)
+            .await;
+        let _ = sqlx::query("DELETE FROM checkpoint_writes WHERE thread_id = $1")
+            .bind("pg-iso-ns-thread")
             .execute(&*saver.pool)
             .await;
     }

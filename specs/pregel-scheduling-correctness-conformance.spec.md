@@ -96,7 +96,28 @@ tags: [design-conformance, pregel, scheduler, 03-pregel-engine]
   当 节点标记为 circuit_blocked
   那么 不为该节点调度 fallback 任务
 
+场景: 并发同字段写入按注册序合并（非字母序）
+  测试:
+    包: juncture-core
+    过滤: test_apply_writes_merges_in_registration_order_not_alphabetical
+  当 注册 zebra 先于 apple，两节点并发写同一 append 字段
+  那么 合并结果为 [z, a]（注册序，非字母序 [a, z]）
+
+场景: check_replace_conflicts 多写入返回结构化 multiple_writers 错误
+  测试:
+    包: juncture-core
+    过滤: test_check_replace_conflicts_returns_multiple_writers_error
+  当 两节点写同一 replace 字段
+  那么 返回 `JunctureError::multiple_writers`（结构化，非通用 Execution）
+
+场景: apply_writes 多 replace 写入在应用前拒绝整个 superstep
+  测试:
+    包: juncture-core
+    过滤: test_apply_writes_replace_conflict_errors_before_apply
+  当 apply_writes 收到两个 replace 写入
+  那么 返回 multiple_writers 错误且 state 未被部分写入修改
+
 ## Questions
 
-- [ ] **replace 冲突-检测(Err)路径无测试**：`check_replace_conflicts`（返回 `JunctureError::Execution`）与 `check_replace_conflicts_from_state`（返回 `JunctureError::multiple_writers`）都只测了 Ok 路径（_empty/_no_conflicts），多写入触发 Err 的正面路径零测试。需补冲突检测测试。（按用户指示推迟到试点结束后统一决策 2026-07-29）
-- [ ] **两个冲突检查器返回不同错误类型**：`Execution`（通用）vs `multiple_writers`（结构化）。与 deviation #2（`InvalidUpdateError::MultipleWriters` 从未构造）相关，三者错误模型需统一。（同上推迟）
+- [x] **replace 冲突-检测(Err)路径无测试**：RESOLVED 2026-07-29 — 新增 Err-path 测试 `test_check_replace_conflicts_returns_multiple_writers_error` + `test_apply_writes_replace_conflict_errors_before_apply`（断言 `is_multiple_writers()` + 拒绝 superstep 不应用部分写入）。
+- [x] **两个冲突检查器返回不同错误类型**：RESOLVED 2026-07-29 — 用户决策 #1：`check_replace_conflicts` 已统一为返回结构化 `JunctureError::multiple_writers()`，与 `check_replace_conflicts_from_state` 一致。错误模型统一。

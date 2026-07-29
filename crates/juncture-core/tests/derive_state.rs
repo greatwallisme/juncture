@@ -487,6 +487,45 @@ fn subset_roundtrip_extract_then_map_update() {
     assert_eq!(parent_update.messages, Some(vec!["third".to_string()]));
 }
 
+/// Full shared-state subgraph cycle (subgraph spec Question #10): extract the
+/// subgraph's view of the parent state, the subgraph produces a delta update,
+/// `map_update` projects it back to a parent update, and the parent applies it
+/// so the subgraph's changes propagate to the parent state. This is the
+/// shared-state subgraph pattern end-to-end (modulo the `SubgraphMount` plumbing
+/// exercised separately): the existing tests cover `extract`/`map_update` in
+/// isolation, this pins the `extract` -> `map_update` -> `parent.apply` cycle.
+#[test]
+fn subset_shared_state_cycle_applies_child_changes_to_parent() {
+    let mut parent = ParentState {
+        name: "Eve".to_string(),
+        age: 50,
+        messages: vec!["p1".to_string()],
+    };
+
+    // 1. Subgraph extracts its view (name + messages; age is parent-only).
+    let child = ChildState::extract(&parent);
+    assert_eq!(child.name, "Eve");
+    assert_eq!(child.messages, vec!["p1"]);
+
+    // 2. Subgraph produces its delta update.
+    let child_update = ChildStateUpdate {
+        name: Some("Eve II".to_string()),
+        messages: Some(vec!["c1".to_string()]),
+    };
+
+    // 3. map_update projects the child delta to a parent update.
+    let parent_update = <ChildState as StateSubset<ParentState>>::map_update(child_update);
+    assert_eq!(parent_update.name, Some("Eve II".to_string()));
+    assert_eq!(parent_update.messages, Some(vec!["c1".to_string()]));
+    assert_eq!(parent_update.age, None); // age is parent-only -> not mapped
+
+    // 4. Parent applies the mapped update -> the subgraph's change propagates.
+    parent.apply(parent_update);
+    assert_eq!(parent.name, "Eve II"); // replace reducer
+    assert_eq!(parent.messages, vec!["p1", "c1"]); // append reducer
+    assert_eq!(parent.age, 50); // parent-only field untouched by the subgraph
+}
+
 // --- Multi-writer detection tests ---
 
 #[test]
@@ -524,10 +563,15 @@ fn check_replace_conflicts_detects_multiple_writers() {
         bubble_ups: vec![],
     };
 
-    // count is at index 0, label is at index 1 -- both are replace fields
+    // count is at index 0, label is at index 1 -- both are replace fields.
+    // Design 01 §3.9: the conflict surfaces as a structured MultipleWriters
+    // error (not a generic Execution error), carrying the conflicting nodes.
     let err = check_replace_conflicts::<BasicState>(&result, &[0])
         .expect_err("should detect multiple writers on count");
-    assert!(err.is_execution(), "expected execution error, got: {err:?}");
+    assert!(
+        err.is_multiple_writers(),
+        "expected structured multiple_writers error, got {err:?}"
+    );
     let msg = err.to_string();
     assert!(
         msg.contains("node_a") && msg.contains("node_b"),
@@ -633,7 +677,7 @@ fn apply_writes_rejects_multiple_writers_on_replace_field() {
         circuit_blocked: false,
     };
 
-    let result = apply_writes(&mut state, &[task_a, task_b], &mut tracker);
+    let result = apply_writes(&mut state, &[task_a, task_b], &mut tracker, &HashMap::new());
     assert!(
         result.is_err(),
         "apply_writes should reject multiple writers"
@@ -667,8 +711,8 @@ fn apply_writes_allows_single_writer_on_replace_field() {
         circuit_blocked: false,
     };
 
-    let changed =
-        apply_writes(&mut state, &[task_a], &mut tracker).expect("single writer should succeed");
+    let changed = apply_writes(&mut state, &[task_a], &mut tracker, &HashMap::new())
+        .expect("single writer should succeed");
     assert_eq!(state.count, 42);
     assert_eq!(state.label, "hello");
     assert!(changed.has_field(BasicState::FIELD_COUNT));
@@ -723,7 +767,11 @@ fn apply_writes_allows_append_field_multiple_writers() {
         circuit_blocked: false,
     };
 
-    let changed = apply_writes(&mut state, &[task_a, task_b], &mut tracker)
+    let registration: HashMap<String, usize> =
+        [("node_a".to_string(), 0), ("node_b".to_string(), 1)]
+            .into_iter()
+            .collect();
+    let changed = apply_writes(&mut state, &[task_a, task_b], &mut tracker, &registration)
         .expect("append reducer allows multiple writers");
     assert_eq!(state.items, vec!["a", "b"]);
     assert!(changed.has_field(FullState::FIELD_ITEMS));

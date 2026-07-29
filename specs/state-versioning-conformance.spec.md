@@ -89,4 +89,4 @@ tags: [design-conformance, state, pregel, scheduler, 01-state-channel]
 
 ## Questions
 
-- [ ] **per-state `FieldVersions` 与引擎 `FieldVersionTracker` 双轨**：State trait 暴露 `field_versions()`/`bump_versions()` 但默认 no-op（版本追踪委托引擎侧 FieldVersionTracker）。两套类型并存（trait_.rs 的 `FieldVersions(Vec<u64>` 与 scheduler.rs 的 `FieldVersionTracker`），需确认 per-state 那套是否为可移除的遗留、还是 checkpoint 序列化所需。（按用户指示推迟到试点结束后统一决策 2026-07-29）
+- [x] **per-state `FieldVersions` 与引擎 `FieldVersionTracker` 双轨**：RESOLVED 2026-07-29 — per-state `FieldVersions`（struct + `type FieldVersions` + `field_versions()`/`bump_versions()` trait 方法 + derive 生成）经核实**零生产调用点**（死代码），且 design §2.6 明确"字段版本号不存储在 State 本身，而是由 PregelLoop 管理"。用户 2026-07-29 决策 #5：移除死代码。已移除：trait_.rs 定义、state_derive.rs 生成、18 处 `type FieldVersions =` impl、state/mod.rs re-export、design/01 §2.2 trait + §2.6 note、checklists/01-state-channel.json。版本追踪统一由引擎 `FieldVersionTracker` 负责。verify-design-coverage 216/216，guard 14/14 通过。

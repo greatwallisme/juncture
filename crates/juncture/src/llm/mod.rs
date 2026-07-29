@@ -101,6 +101,7 @@ pub use ollama::ChatOllama;
 /// full `messages` and `tools`, and the scalar `temperature`/`max_tokens`/
 /// `top_p` options, so `tool_choice`/`response_format`/`tags` do not affect
 /// the generated key.
+#[cfg(any(feature = "ollama", feature = "openai", feature = "anthropic"))]
 #[must_use]
 pub(crate) fn cache_key_input(
     model: &str,

@@ -101,6 +101,13 @@ tags: [design-conformance, graph-builder, topology, retry, 02-graph-builder]
   当 错误为 interrupt
   那么 should_retry 返回 false（不重试中断）
 
+场景: 无出口的固定边环被 compile 拒绝（PotentialInfiniteLoop）
+  测试:
+    包: juncture-core
+    过滤: test_check_infinite_loops_rejects_cycle_with_no_exit
+  当 图含 a↔b 固定边环且无条件出口
+  那么 `TopologyValidator` 返回 `PotentialInfiniteLoop`（2 节点环）
+
 ## Questions
 
-- [ ] **拓扑环检测覆盖**：本合约覆盖 validate_keys 的索引/命名/entry-finish 校验；环路检测（tarjan SCC）仅有 test_tarjan_scc_simple/cycle 两个测试，端到端 compile-时环拒绝路径覆盖较薄。（按用户指示推迟到试点结束后统一决策 2026-07-29）
+- [x] **拓扑环检测覆盖**：RESOLVED 2026-07-29 — 新增 `test_check_infinite_loops_rejects_cycle_with_no_exit`（topology.rs），覆盖 e2e compile-时环拒绝路径：`TopologyValidator::check_infinite_loops` 对无出口的固定边环（a↔b）返回 `TopologyError::PotentialInfiniteLoop`（2 节点环）。补齐了原 test_tarjan_scc_simple/cycle 仅测算法、未测拒绝决策的薄弱覆盖。

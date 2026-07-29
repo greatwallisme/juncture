@@ -291,7 +291,6 @@ impl<S: State> Default for Command<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::FieldVersions;
     use serde_json::json;
 
     #[derive(Clone, Debug, Default)]
@@ -299,7 +298,6 @@ mod tests {
 
     impl State for TestState {
         type Update = TestUpdate;
-        type FieldVersions = FieldVersions;
         fn apply(&mut self, _: Self::Update) -> crate::FieldsChanged {
             crate::FieldsChanged(0)
         }

@@ -413,15 +413,17 @@ pub fn detect_format(data: &[u8]) -> SerializationFormat {
         return SerializationFormat::Json;
     }
 
-    // MessagePack format detection (heuristic)
-    // fixmap: 0x80-0x8f, fixarray: 0x90-0x9f, map16: 0xde, map32: 0xdf
-    // array16: 0xdc, array32: 0xdd
-    if (0x80..=0x9f).contains(&first_byte)
-        || first_byte == 0xde
-        || first_byte == 0xdf
-        || first_byte == 0xdc
-        || first_byte == 0xdd
-    {
+    // MessagePack format detection. Any first byte >= 0x80 is unambiguously
+    // msgpack: valid JSON never starts with a byte >= 0x80 (JSON values begin
+    // with ASCII 0x00-0x7f: '{', '[', '"', digit, '-', 't'/'f'/'n', whitespace).
+    // This covers fixmap (0x80-0x8f), fixarray (0x90-0x9f), fixstr (0xa0-0xbf),
+    // all marker bytes (nil/bool/bin/float/uint/int/fixext/str/array/map:
+    // 0xc0-0xdf), and negative fixint (0xe0-0xff). Positive fixint (0x00-0x7f)
+    // overlaps ASCII and is left to the JSON default below.
+    // Without the fixstr range (0xa0-0xbf), msgpack-serialized scalar string
+    // values (the default `SerializerKind::MessagePack`) were misdetected as
+    // JSON and failed to deserialize.
+    if (0x80..=0xff).contains(&first_byte) {
         return SerializationFormat::MessagePack;
     }
 

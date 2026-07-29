@@ -521,9 +521,11 @@ async fn process_edge<S: State>(
 /// Apply writes from completed tasks to the state
 ///
 /// Takes outputs from a superstep and applies all updates to the state.
-/// Uses path-based sorting (PULL tasks sorted by node name, PUSH tasks
-/// sorted by send index) for deterministic merge order, matching the
-/// `LangGraph` merge semantics.
+/// Uses registration-order sorting: PULL tasks are sorted by node registration
+/// order (the order `add_node` was called), PUSH tasks by send index, so that
+/// concurrent writes to the same field merge deterministically in the graph's
+/// declaration order (design 01 §2.3/§3.2/§3.7), independent of task completion
+/// order. This guarantees deterministic results for non-associative reducers.
 ///
 /// Returns [`FieldsChanged`] indicating which fields were modified.
 ///
@@ -532,6 +534,9 @@ async fn process_edge<S: State>(
 /// * `state` - Mutable state to apply updates to
 /// * `task_outputs` - Outputs from completed tasks in the superstep
 /// * `field_versions` - Version tracker to bump for changed fields
+/// * `node_registration` - Node name -> registration index (`add_node` call order),
+///   used to order PULL writes by registration order; pass an empty map only
+///   when the caller cannot supply registration order (unknown nodes sort last)
 ///
 /// # Errors
 ///
@@ -542,15 +547,22 @@ async fn process_edge<S: State>(
 ///
 /// ```ignore
 /// use juncture_core::pregel::scheduler::{apply_writes, FieldVersionTracker};
+/// use std::collections::HashMap;
 ///
 /// let mut state = MyState::default();
 /// let mut tracker = FieldVersionTracker::new(3);
-/// let changed = apply_writes(&mut state, &task_outputs, &mut tracker)?;
+/// let node_registration = HashMap::new();
+/// let changed = apply_writes(&mut state, &task_outputs, &mut tracker, &node_registration)?;
 /// ```
+#[expect(
+    clippy::implicit_hasher,
+    reason = "public API accepts std HashMap; PregelLoop stores a std HashMap<String, usize> built from node registration order, and callers pass that ref directly"
+)]
 pub fn apply_writes<S: State>(
     state: &mut S,
     task_outputs: &[crate::pregel::types::TaskOutput<S>],
     field_versions: &mut FieldVersionTracker,
+    node_registration: &HashMap<String, usize>,
 ) -> Result<FieldsChanged, JunctureError> {
     // Check for multiple-writer conflicts on replace fields before applying any writes.
     // This must happen first so that we reject the entire superstep rather than
@@ -559,16 +571,25 @@ pub fn apply_writes<S: State>(
 
     let mut total_changed = FieldsChanged(0);
 
-    // Sort indices by path-based ordering for deterministic merge
-    // PULL tasks: alphabetical by node name
-    // PUSH tasks: by send index
+    // Sort indices by registration order for deterministic merge (design 01 §2.3).
+    // PULL tasks: by node registration index (add_node call order); unknown nodes
+    //              sort last via usize::MAX so registration is the total ordering.
+    // PUSH tasks: by send index.
     let mut sorted_indices: Vec<usize> = (0..task_outputs.len()).collect();
     sorted_indices.sort_by(|&a, &b| {
         let task_a = &task_outputs[a];
         let task_b = &task_outputs[b];
         match (&task_a.trigger, &task_b.trigger) {
             (crate::pregel::types::TaskTrigger::Pull, crate::pregel::types::TaskTrigger::Pull) => {
-                task_a.node_name.cmp(&task_b.node_name)
+                let ra = node_registration
+                    .get(&task_a.node_name)
+                    .copied()
+                    .unwrap_or(usize::MAX);
+                let rb = node_registration
+                    .get(&task_b.node_name)
+                    .copied()
+                    .unwrap_or(usize::MAX);
+                ra.cmp(&rb)
             }
             (
                 crate::pregel::types::TaskTrigger::Push { index: idx_a },
@@ -681,7 +702,8 @@ impl std::fmt::Debug for TriggerToNodes {
 /// # Returns
 ///
 /// - `Ok(())` if no conflicts
-/// - `Err(JunctureError::Execution)` if conflicts exist
+/// - `Err(JunctureError::multiple_writers)` if conflicts exist, carrying the
+///   conflicting node names (matches design 01 §3.9 `InvalidUpdateError::MultipleWriters`)
 ///
 /// # Errors
 ///
@@ -713,9 +735,10 @@ pub fn check_replace_conflicts<S: State>(
             .collect();
 
         if writers.len() > 1 {
-            return Err(JunctureError::execution(format!(
-                "Multiple writers for replace field {field_idx}: {writers:?}"
-            )));
+            return Err(JunctureError::multiple_writers(
+                field_idx,
+                writers.iter().map(|&s| String::from(s)).collect(),
+            ));
         }
     }
     Ok(())
@@ -1063,7 +1086,6 @@ pub fn get_error_handler_node(
 mod scheduler_tests {
     use super::*;
     use crate::node::IntoNode;
-    use crate::state::FieldVersions;
 
     // FieldVersionTracker / VersionsSeen unit coverage (design 01 §2.6).
     // These scheduling-critical primitives previously had only doc-tests; the
@@ -1132,7 +1154,6 @@ mod scheduler_tests {
 
     impl State for TestState {
         type Update = TestUpdate;
-        type FieldVersions = FieldVersions;
 
         fn apply(&mut self, _: Self::Update) -> FieldsChanged {
             FieldsChanged(0)
@@ -1198,8 +1219,8 @@ mod scheduler_tests {
         let mut tracker = FieldVersionTracker::new(3);
         let outputs: Vec<crate::pregel::types::TaskOutput<TestState>> = Vec::new();
 
-        let changed =
-            apply_writes(&mut state, &outputs, &mut tracker).expect("empty outputs should succeed");
+        let changed = apply_writes(&mut state, &outputs, &mut tracker, &HashMap::new())
+            .expect("empty outputs should succeed");
         assert_eq!(changed.0, 0);
     }
 
@@ -1220,7 +1241,6 @@ mod scheduler_tests {
 
     impl State for AppendState {
         type Update = AppendUpdate;
-        type FieldVersions = FieldVersions;
 
         fn apply(&mut self, update: Self::Update) -> FieldsChanged {
             if let Some(new_items) = update.items {
@@ -1271,18 +1291,35 @@ mod scheduler_tests {
 
         let mut state_abc = AppendState::default();
         let mut tracker_abc = FieldVersionTracker::new(1);
-        apply_writes(&mut state_abc, &outputs_abc, &mut tracker_abc)
-            .expect("abc order should merge cleanly");
+        let registration: HashMap<String, usize> = [
+            ("node_a".to_string(), 0),
+            ("node_b".to_string(), 1),
+            ("node_c".to_string(), 2),
+        ]
+        .into_iter()
+        .collect();
+        apply_writes(
+            &mut state_abc,
+            &outputs_abc,
+            &mut tracker_abc,
+            &registration,
+        )
+        .expect("abc order should merge cleanly");
 
         let mut state_cba = AppendState::default();
         let mut tracker_cba = FieldVersionTracker::new(1);
-        apply_writes(&mut state_cba, &outputs_cba, &mut tracker_cba)
-            .expect("cba order should merge cleanly");
+        apply_writes(
+            &mut state_cba,
+            &outputs_cba,
+            &mut tracker_cba,
+            &registration,
+        )
+        .expect("cba order should merge cleanly");
 
         let expected = vec!["a".to_string(), "b".to_string(), "c".to_string()];
         assert_eq!(
             state_abc.items, expected,
-            "abc input order should merge to alphabetical [a, b, c]"
+            "abc input order should merge to registration order [a, b, c]"
         );
         assert_eq!(
             state_cba.items, expected,
@@ -1291,6 +1328,37 @@ mod scheduler_tests {
         assert_eq!(
             state_abc.items, state_cba.items,
             "concurrent same-field writes must be order-independent"
+        );
+    }
+
+    /// Verify `apply_writes` merges PULL writes in **registration order** (the
+    /// order `add_node` was called), not alphabetical node-name order (design 01
+    /// §2.3/§3.2/§3.7). Registering `zebra` before `apple` must apply `zebra`'s
+    /// write first, so an append field yields `[z, a]`. Alphabetical sorting
+    /// would instead produce `[a, z]` -- this test distinguishes the two and
+    /// fails if the sort key regresses to node-name comparison.
+    #[test]
+    fn test_apply_writes_merges_in_registration_order_not_alphabetical() {
+        // Registration order: zebra (0), apple (1) -- deliberately non-alphabetical.
+        let registration: HashMap<String, usize> =
+            [("zebra".to_string(), 0), ("apple".to_string(), 1)]
+                .into_iter()
+                .collect();
+        // Feed apple's output first in the input vector; the sort must still
+        // apply zebra first because zebra has the lower registration index.
+        let outputs = vec![append_output("apple", "a"), append_output("zebra", "z")];
+
+        let mut state = AppendState::default();
+        let mut tracker = FieldVersionTracker::new(1);
+        apply_writes(&mut state, &outputs, &mut tracker, &registration)
+            .expect("two append writers should merge");
+
+        // Registration order (zebra before apple) -> [z, a]. Alphabetical would
+        // give [a, z]; this assertion pins registration order.
+        assert_eq!(
+            state.items,
+            vec!["z".to_string(), "a".to_string()],
+            "PULL writes must merge in registration order, not alphabetical node-name order"
         );
     }
 
@@ -1326,6 +1394,100 @@ mod scheduler_tests {
         };
         let replace_fields = vec![0, 1];
         check_replace_conflicts(&result, &replace_fields).unwrap();
+    }
+
+    /// A state with a single replace-reducer field, used to exercise the Err
+    /// path of the multi-writer conflict checkers (design 01 §3.6/§3.9
+    /// `InvalidUpdateError::MultipleWriters`). `AppendState` above uses an
+    /// append reducer and cannot trigger a replace conflict.
+    #[derive(Clone, Debug, Default, PartialEq)]
+    struct ReplaceState {
+        value: i32,
+    }
+
+    #[derive(Clone, Debug, Default, serde::Serialize)]
+    struct ReplaceUpdate {
+        value: Option<i32>,
+    }
+
+    impl State for ReplaceState {
+        type Update = ReplaceUpdate;
+
+        fn apply(&mut self, update: Self::Update) -> FieldsChanged {
+            if let Some(v) = update.value {
+                self.value = v;
+                FieldsChanged(1)
+            } else {
+                FieldsChanged(0)
+            }
+        }
+
+        fn reset_ephemeral(&mut self) {}
+
+        fn field_is_set(update: &Self::Update, field_idx: usize) -> bool {
+            field_idx == 0 && update.value.is_some()
+        }
+
+        fn replace_field_indices() -> &'static [usize] {
+            &[0]
+        }
+    }
+
+    /// Build a PULL `TaskOutput` where `node` writes `value` to the replace
+    /// field `value`.
+    fn replace_output(node: &str, value: i32) -> crate::pregel::types::TaskOutput<ReplaceState> {
+        crate::pregel::types::TaskOutput {
+            task_id: format!("task_{node}"),
+            node_name: node.to_string(),
+            command: crate::Command::update(ReplaceUpdate { value: Some(value) }),
+            duration: std::time::Duration::ZERO,
+            trigger: crate::pregel::types::TaskTrigger::Pull,
+            triggered_fields: Vec::new(),
+            error: None,
+            circuit_blocked: false,
+        }
+    }
+
+    /// Err path for the public `check_replace_conflicts`: two nodes writing the
+    /// same replace field must return the structured `JunctureError::multiple_writers`
+    /// (design 01 §3.9), not a generic `Execution` error. Previously only the Ok
+    /// path was tested (audit: replace conflict Err path had zero tests).
+    #[test]
+    fn test_check_replace_conflicts_returns_multiple_writers_error() {
+        let result: SuperstepResult<ReplaceState> = SuperstepResult {
+            task_outputs: vec![replace_output("node_a", 1), replace_output("node_b", 2)],
+            bubble_ups: Vec::new(),
+        };
+        let err = check_replace_conflicts(&result, &[0])
+            .expect_err("two writers on a replace field must error");
+        assert!(
+            err.is_multiple_writers(),
+            "expected structured multiple_writers error, got {err:?}"
+        );
+    }
+
+    /// Err path for `check_replace_conflicts_from_state` exercised via
+    /// `apply_writes`: the main merge path must reject the entire superstep with
+    /// a structured `multiple_writers` error before applying any writes (design
+    /// 01 §3.6/§3.9). Previously only the Ok path was tested.
+    #[test]
+    fn test_apply_writes_replace_conflict_errors_before_apply() {
+        let mut state = ReplaceState::default();
+        let mut tracker = FieldVersionTracker::new(1);
+        let outputs = vec![replace_output("node_a", 1), replace_output("node_b", 2)];
+
+        let err = apply_writes(&mut state, &outputs, &mut tracker, &HashMap::new())
+            .expect_err("two replace writers must fail apply_writes");
+        assert!(
+            err.is_multiple_writers(),
+            "apply_writes must surface structured multiple_writers, got {err:?}"
+        );
+        // The superstep is rejected before applying any writes, so the value
+        // is unchanged from Default (no partial last-write-wins application).
+        assert_eq!(
+            state.value, 0,
+            "rejected superstep must not apply partial writes"
+        );
     }
 
     #[test]

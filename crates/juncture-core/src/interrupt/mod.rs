@@ -11,6 +11,8 @@ use xxhash_rust::xxh3::Xxh3;
 
 use chrono::{DateTime, Utc};
 
+use crate::JunctureError;
+
 pub use context::InterruptContext;
 
 // Task-local storage for the interrupt context during node execution.
@@ -224,7 +226,7 @@ pub fn extract_namespace(interrupt_id: &str) -> Option<&str> {
 pub fn validate_resume_coverage(
     pending: &[InterruptSignal],
     resume_values: &HashMap<String, serde_json::Value>,
-) -> Result<(), Vec<String>> {
+) -> Result<(), JunctureError> {
     let mut uncovered = Vec::new();
 
     for signal in pending {
@@ -238,7 +240,10 @@ pub fn validate_resume_coverage(
     if uncovered.is_empty() {
         Ok(())
     } else {
-        Err(uncovered)
+        // Design 06 §3.3: surface uncovered interrupts as a typed
+        // `MissingResumeValue` error (carrying all uncovered ids) instead of a
+        // bare `Vec<String>`, so callers handle a structured error.
+        Err(JunctureError::missing_resume_value(uncovered))
     }
 }
 
@@ -626,7 +631,10 @@ mod tests {
     fn generate_interrupt_id_is_deterministic_for_same_input() {
         let a = generate_interrupt_id("approval_node", 0);
         let b = generate_interrupt_id("approval_node", 0);
-        assert_eq!(a, b, "same (node, index) must yield the same ID within a build");
+        assert_eq!(
+            a, b,
+            "same (node, index) must yield the same ID within a build"
+        );
         assert_eq!(a.len(), 32);
     }
 
@@ -635,7 +643,10 @@ mod tests {
         let base = generate_interrupt_id("node_a", 0);
         let next_index = generate_interrupt_id("node_a", 1);
         let other_node = generate_interrupt_id("node_b", 0);
-        assert_ne!(base, next_index, "different index must yield a different ID");
+        assert_ne!(
+            base, next_index,
+            "different index must yield a different ID"
+        );
         assert_ne!(base, other_node, "different node must yield a different ID");
     }
 
@@ -644,7 +655,8 @@ mod tests {
         let id = generate_interrupt_id("my_node", 7);
         assert_eq!(id.len(), 32);
         assert!(
-            id.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+            id.chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
             "ID must be 32-char lowercase hex, got {id}"
         );
     }
@@ -809,7 +821,15 @@ mod tests {
 
         let result = validate_resume_coverage(&pending, &resume_values);
         assert!(result.is_err());
-        assert_eq!(result.unwrap_err(), vec!["int-2".to_string()]);
+        let err = result.unwrap_err();
+        assert!(
+            err.is_missing_resume_value(),
+            "expected MissingResumeValue error, got {err:?}"
+        );
+        let ids = err
+            .missing_resume_ids()
+            .expect("MissingResumeValue should carry uncovered ids");
+        assert_eq!(ids.to_vec(), vec!["int-2".to_string()]);
     }
 
     #[test]
@@ -862,7 +882,14 @@ mod tests {
 
         let result = validate_resume_coverage(&pending, &resume_values);
         assert!(result.is_err());
-        let uncovered = result.unwrap_err();
+        let err = result.unwrap_err();
+        assert!(
+            err.is_missing_resume_value(),
+            "expected MissingResumeValue error, got {err:?}"
+        );
+        let uncovered = err
+            .missing_resume_ids()
+            .expect("MissingResumeValue should carry uncovered ids");
         assert_eq!(uncovered.len(), 3);
         assert!(uncovered.contains(&"int-1".to_string()));
         assert!(uncovered.contains(&"int-2".to_string()));
@@ -953,7 +980,6 @@ mod tests {
 
     impl crate::State for TestState {
         type Update = TestUpdate;
-        type FieldVersions = crate::state::FieldVersions;
 
         fn apply(&mut self, _: Self::Update) -> crate::FieldsChanged {
             crate::FieldsChanged(0)

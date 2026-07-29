@@ -95,6 +95,13 @@ tags: [design-conformance, llm-tools, tool, interceptor, 08-llm-tools]
   当 带 tools_condition 配置
   那么 按配置正确路由到 tools 节点
 
+场景: ToolNode 拦截器 pre→tool→post 严格时序
+  测试:
+    包: juncture
+    过滤: test_tool_node_interceptor_pre_post_timing_around_execution
+  当 ToolNode 配 RecordingTool + RecordingInterceptor 执行一次 tool 调用
+  那么 调用顺序严格为 [pre, tool, post]
+
 ## Questions
 
-- [ ] **ToolInterceptor pre/post 钩子时序**：本合约验证组合与阻塞传播；pre/post 钩子相对 tool 执行的精确时序需更细粒度测试。（按用户指示推迟到试点结束后统一决策 2026-07-29）
+- [x] **ToolInterceptor pre/post 钩子时序**：RESOLVED 2026-07-29 — 新增 `test_tool_node_interceptor_pre_post_timing_around_execution`（node.rs），用 RecordingTool（记录 tool 体执行）+ RecordingInterceptor（记录 pre/post）驱动真实 ToolNode，断言执行顺序严格为 [pre, tool, post]。原 interceptor 测试仅在隔离态调 pre/post，本测试 pin 住 ToolNode 的实际时序契约。

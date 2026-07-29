@@ -705,7 +705,7 @@ where
 /// When jitter is enabled, applies +/- 25% random variation to the base delay
 /// to prevent thundering herd effects across concurrent retries.
 /// The result is then capped at `max_interval`.
-fn compute_delay(
+pub fn compute_delay(
     base: std::time::Duration,
     jitter: bool,
     max_interval: std::time::Duration,
@@ -2093,7 +2093,6 @@ mod tests {
 
     impl crate::State for ChildState {
         type Update = ChildStateUpdate;
-        type FieldVersions = crate::state::FieldVersions;
 
         fn apply(&mut self, update: Self::Update) -> crate::FieldsChanged {
             if let Some(v) = update.value {
@@ -2418,7 +2417,6 @@ mod tests {
 
     impl crate::State for StateWithBadReplaceIndex {
         type Update = StateWithBadReplaceIndexUpdate;
-        type FieldVersions = crate::state::FieldVersions;
 
         fn apply(&mut self, update: Self::Update) -> crate::FieldsChanged {
             let mut changed = crate::FieldsChanged::default();
@@ -2464,7 +2462,6 @@ mod tests {
 
     impl crate::State for StateWithBadAfterFinishIndex {
         type Update = StateWithBadAfterFinishIndexUpdate;
-        type FieldVersions = crate::state::FieldVersions;
 
         fn apply(&mut self, update: Self::Update) -> crate::FieldsChanged {
             let mut changed = crate::FieldsChanged::default();
@@ -2613,7 +2610,6 @@ mod tests {
 
     impl crate::State for StateDummy {
         type Update = StateDummyUpdate;
-        type FieldVersions = crate::state::FieldVersions;
 
         fn apply(&mut self, _update: Self::Update) -> crate::FieldsChanged {
             crate::FieldsChanged(0)

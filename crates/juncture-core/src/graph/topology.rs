@@ -443,6 +443,36 @@ mod tests {
         assert_eq!(sccs[0].len(), 2);
     }
 
+    /// E2e compile-time cycle rejection (graph-builder spec Question: the
+    /// `check_infinite_loops` -> `TopologyError::PotentialInfiniteLoop` path was
+    /// only covered by the tarjan *algorithm* tests above; this pins the
+    /// rejection decision for a fixed-edge cycle with no conditional exit,
+    /// which is the path `TopologyValidator::validate` exercises during
+    /// `StateGraph::compile` (builder.rs compile validation chain).
+    #[test]
+    fn test_check_infinite_loops_rejects_cycle_with_no_exit() {
+        let mut nodes: IndexMap<String, Arc<dyn crate::Node<StateDummy>>> = IndexMap::new();
+        nodes.insert("a".to_string(), mock_node("a"));
+        nodes.insert("b".to_string(), mock_node("b"));
+        // Fixed-edge cycle a <-> b with no conditional exit to END or outside.
+        let edges = vec![
+            Edge::Fixed {
+                from: "a".to_string(),
+                to: "b".to_string(),
+            },
+            Edge::Fixed {
+                from: "b".to_string(),
+                to: "a".to_string(),
+            },
+        ];
+        let err = TopologyValidator::check_infinite_loops(&nodes, &edges)
+            .expect_err("fixed-edge cycle with no exit must be rejected");
+        assert!(
+            matches!(&err, TopologyError::PotentialInfiniteLoop { cycle } if cycle.len() == 2),
+            "expected PotentialInfiniteLoop with a 2-node cycle, got {err:?}"
+        );
+    }
+
     fn mock_node(name: &str) -> Arc<dyn crate::Node<StateDummy>> {
         NodeFnUpdate(|_s: &StateDummy| async move { Ok(StateDummyUpdate) }).into_node(name)
     }
@@ -452,7 +482,6 @@ mod tests {
 
     impl crate::State for StateDummy {
         type Update = StateDummyUpdate;
-        type FieldVersions = crate::state::FieldVersions;
 
         fn apply(&mut self, _update: Self::Update) -> crate::FieldsChanged {
             crate::FieldsChanged(0)

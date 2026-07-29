@@ -130,6 +130,14 @@ pub struct PregelLoop<S: State> {
     /// Graph nodes
     pub nodes: IndexMap<String, Arc<dyn Node<S>>>,
 
+    /// Node registration order: node name -> registration index (position in
+    /// `nodes` at construction, i.e. the order `add_node` was called). Used by
+    /// `apply_writes` to merge concurrent writes in registration order (design
+    /// 01 §2.3/§3.2/§3.7) rather than alphabetical node-name order, so
+    /// non-associative reducers observe a deterministic order matching the
+    /// graph's declaration order instead of task completion order.
+    pub node_registration: HashMap<String, usize>,
+
     /// Trigger table for routing
     pub trigger_table: TriggerTable<S>,
 
@@ -271,6 +279,7 @@ impl<S: State> std::fmt::Debug for PregelLoop<S> {
         f.debug_struct("PregelLoop")
             .field("state", &"<state>")
             .field("nodes", &self.nodes.len())
+            .field("node_registration", &self.node_registration.len())
             .field("trigger_table", &self.trigger_table)
             .field("field_versions", &self.field_versions)
             .field("versions_seen", &self.versions_seen)
@@ -392,6 +401,14 @@ impl<S: State> PregelLoop<S> {
         error_handler_map: HashMap<String, String>,
     ) -> Result<Self, JunctureError> {
         let node_names: Vec<String> = nodes.keys().cloned().collect();
+        // Registration order = IndexMap insertion order = `add_node` call order.
+        // Precomputed once so `apply_writes` can sort PULL writes by registration
+        // order without per-superstep allocation (design 01 §2.3/§3.2/§3.7).
+        let node_registration: HashMap<String, usize> = node_names
+            .iter()
+            .enumerate()
+            .map(|(idx, name)| (name.clone(), idx))
+            .collect();
         let field_versions = FieldVersionTracker::new(num_fields);
         let versions_seen = VersionsSeen::new(&node_names, num_fields);
         let cancellation_token = CancellationToken::new();
@@ -409,6 +426,7 @@ impl<S: State> PregelLoop<S> {
         Ok(Self {
             state,
             nodes,
+            node_registration,
             trigger_table,
             field_versions,
             versions_seen,
@@ -1205,6 +1223,7 @@ impl<S: State> PregelLoop<S> {
             &mut self.state,
             &executed_task_outputs,
             &mut self.field_versions,
+            &self.node_registration,
         )?;
 
         // Check state size limit AFTER applying writes but BEFORE committing delta counters.
@@ -2910,7 +2929,6 @@ impl<S: State> PregelLoop<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::FieldVersions;
     use crate::{
         Command,
         node::IntoNode,
@@ -3182,7 +3200,6 @@ mod tests {
 
     impl State for TestState {
         type Update = TestUpdate;
-        type FieldVersions = FieldVersions;
 
         fn apply(&mut self, _: Self::Update) -> crate::FieldsChanged {
             crate::FieldsChanged(0)
@@ -3211,7 +3228,6 @@ mod tests {
 
     impl State for DeltaTestState {
         type Update = DeltaTestUpdate;
-        type FieldVersions = FieldVersions;
 
         fn apply(&mut self, update: Self::Update) -> crate::FieldsChanged {
             let mut changed = crate::FieldsChanged(0);

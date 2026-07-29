@@ -104,4 +104,4 @@ tags: [design-conformance, store, 10-store]
 
 ## Questions
 
-- [ ] **EmbeddingFunc 后端一致性**：cosine 与搜索语义在 MemoryStore 验证；其他 Store 后端是否一致需额外集成测试。EmbeddingFunc 由调用方注入，其正确性不在本合约范围。（按用户指示推迟到试点结束后统一决策 2026-07-29）
+- [x] **EmbeddingFunc 后端一致性**：RESOLVED 2026-07-29 — 新增 `test_sqlite_store_search_orders_by_similarity`（in-memory）+ `test_postgres_store_search_orders_by_similarity`（docker postgres:16），验证 SqliteStore/PostgresStore 向量搜索按相似度降序 + 附带 score，与 MemoryStore 一致。FilterExpr 经 `evaluate_filter` 共享自由函数（后端无关，已覆盖）；TTL 仅 MemoryStore 支持（SqliteStore/PostgresStore 无 TTL 字段，feature 差异非测试缺口）。

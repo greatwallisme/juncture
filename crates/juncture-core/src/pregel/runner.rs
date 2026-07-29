@@ -11,7 +11,7 @@ use crate::{
     config::RunnableConfig,
     graph::{RetryPolicy, execute_with_retry},
     info_span,
-    interrupt::{InterruptContext, InterruptSignal, ResumeValue, Scratchpad},
+    interrupt::{InterruptContext, InterruptSignal, ResumeValue, Scratchpad, extract_namespace},
     pregel::context::TimeoutPolicy,
     pregel::types::{PendingTask, SuperstepResult, TaskOutput},
     runtime::Heartbeat,
@@ -817,9 +817,12 @@ where
 ///    been processed (tracked in the scratchpad), it receives a `Null` resume value
 ///    so the node skips re-execution of that interrupt point.
 ///
-/// 3. **`ByNamespace` (index-based matching)**: Parses numeric keys as positional indices.
-///    Processed interrupts in the scratchpad that have no explicit mapping receive
-///    a `Null` resume value.
+/// 3. **`ByNamespace` (namespace-based matching)**: Each pending interrupt's id is
+///    parsed as `"{namespace}:{local}"` via `extract_namespace`; the resume value is
+///    looked up by namespace. Interrupts without a namespace, or whose namespace is
+///    absent from the map, receive `None` (partial resume -> the interrupt re-triggers)
+///    unless they have been processed in the scratchpad, in which case they receive a
+///    `Null` resume value (design 06 §3.3).
 ///
 /// # Arguments
 ///
@@ -884,54 +887,31 @@ fn match_resume_to_interrupts(
                 .collect()
         }
         ResumeValue::ByNamespace(map) => {
-            // Index-based matching: parse numeric keys, skip processed
-            let max_index = map
-                .keys()
-                .filter_map(|k| k.parse::<usize>().ok())
-                .max()
-                .unwrap_or(0);
-
-            let size = pending_interrupts.len().max(max_index + 1);
-            let mut values = vec![None; size];
-
-            for (key, value) in map {
-                // Surface malformed keys instead of silently dropping them
-                // (audit #19): a non-numeric key, or an index outside the
-                // pending-interrupt range, is a caller mistake worth logging.
-                match key.parse::<usize>() {
-                    Ok(index) if index < values.len() => {
-                        values[index] = Some(value.clone());
+            // Namespace-based matching (design 06 §3.3): parse each pending
+            // interrupt's id as "{namespace}:{local}" via `extract_namespace`
+            // and look up the resume value by namespace. A namespace match
+            // takes precedence; otherwise a processed interrupt (tracked in the
+            // scratchpad) receives a null-resume so the node skips re-execution
+            // of that interrupt point. Interrupts with no namespace, or whose
+            // namespace is absent from the map and not processed, receive None
+            // (partial resume -> the interrupt re-triggers on re-execution).
+            pending_interrupts
+                .iter()
+                .map(|signal| {
+                    if let Some(ref id) = signal.id {
+                        let ns = extract_namespace(id);
+                        if let Some(ns) = ns
+                            && let Some(value) = map.get(ns)
+                        {
+                            return Some(value.clone());
+                        }
+                        if scratchpad.get_null_resume(id) {
+                            return Some(serde_json::Value::Null);
+                        }
                     }
-                    Ok(index) => {
-                        tracing::warn!(
-                            name: "juncture.resume.key_out_of_range",
-                            key = %key,
-                            index,
-                            pending = pending_interrupts.len(),
-                            "Resume key index out of range; ignored"
-                        );
-                    }
-                    Err(_) => {
-                        tracing::warn!(
-                            name: "juncture.resume.key_non_numeric",
-                            key = %key,
-                            "Non-numeric resume key ignored (expected positional index)"
-                        );
-                    }
-                }
-            }
-
-            // Fill processed interrupts with null-resume
-            for (i, signal) in pending_interrupts.iter().enumerate() {
-                if values[i].is_none()
-                    && let Some(ref id) = signal.id
-                    && scratchpad.get_null_resume(id)
-                {
-                    values[i] = Some(serde_json::Value::Null);
-                }
-            }
-
-            values
+                    None
+                })
+                .collect()
         }
     }
 }
@@ -969,7 +949,6 @@ where
 mod tests {
     use super::*;
     use crate::node::{IntoNode, NodeFnCommand};
-    use crate::state::FieldVersions;
     use chrono::Utc;
 
     #[tokio::test]
@@ -1467,29 +1446,45 @@ mod tests {
     }
 
     #[test]
-    fn test_match_by_namespace_index_mapping() {
+    fn test_match_by_namespace_namespace_mapping() {
         let scratchpad = Scratchpad::new();
+        // Map resume values by namespace (design 06 §3.3). Interrupt ids use
+        // the "{namespace}:{local}" convention so extract_namespace can route.
         let mut map = std::collections::HashMap::new();
-        map.insert("0".to_string(), serde_json::json!("first"));
-        map.insert("2".to_string(), serde_json::json!("third"));
+        map.insert("ns_a".to_string(), serde_json::json!("A_val"));
+        map.insert("ns_b".to_string(), serde_json::json!("B_val"));
         let resume = Some(ResumeValue::ByNamespace(map));
 
         let interrupts = vec![
             InterruptSignal {
                 index: 0,
-                id: Some("id-0".to_string()),
+                id: Some("ns_a:id-0".to_string()),
                 payload: serde_json::Value::Null,
                 timestamp: Utc::now(),
             },
             InterruptSignal {
                 index: 1,
-                id: Some("id-1".to_string()),
+                id: Some("ns_b:id-1".to_string()),
                 payload: serde_json::Value::Null,
                 timestamp: Utc::now(),
             },
             InterruptSignal {
                 index: 2,
-                id: Some("id-2".to_string()),
+                id: Some("ns_a:id-2".to_string()),
+                payload: serde_json::Value::Null,
+                timestamp: Utc::now(),
+            },
+            // No namespace prefix -> cannot be routed by namespace -> None.
+            InterruptSignal {
+                index: 3,
+                id: Some("plain_id".to_string()),
+                payload: serde_json::Value::Null,
+                timestamp: Utc::now(),
+            },
+            // Namespace absent from the map and not processed -> None.
+            InterruptSignal {
+                index: 4,
+                id: Some("ns_c:id-4".to_string()),
                 payload: serde_json::Value::Null,
                 timestamp: Utc::now(),
             },
@@ -1498,9 +1493,11 @@ mod tests {
         assert_eq!(
             result,
             vec![
-                Some(serde_json::json!("first")),
-                None,
-                Some(serde_json::json!("third")),
+                Some(serde_json::json!("A_val")), // ns_a match
+                Some(serde_json::json!("B_val")), // ns_b match
+                Some(serde_json::json!("A_val")), // ns_a match (shared namespace)
+                None,                             // no namespace prefix
+                None,                             // namespace not in map
             ]
         );
     }
@@ -1508,22 +1505,33 @@ mod tests {
     #[test]
     fn test_match_by_namespace_with_scratchpad_fill() {
         let mut scratchpad = Scratchpad::new();
-        scratchpad.mark_interrupt_processed("id-1");
+        // ns_b:id-1 is processed AND its namespace is in the map: a namespace
+        // match takes precedence over null-resume, so it gets the mapped value.
+        scratchpad.mark_interrupt_processed("ns_b:id-1");
+        // ns_c:id-2 is processed but its namespace is NOT in the map -> null-resume.
+        scratchpad.mark_interrupt_processed("ns_c:id-2");
 
         let mut map = std::collections::HashMap::new();
-        map.insert("0".to_string(), serde_json::json!("first"));
+        map.insert("ns_a".to_string(), serde_json::json!("first"));
+        map.insert("ns_b".to_string(), serde_json::json!("second"));
         let resume = Some(ResumeValue::ByNamespace(map));
 
         let interrupts = vec![
             InterruptSignal {
                 index: 0,
-                id: Some("id-0".to_string()),
+                id: Some("ns_a:id-0".to_string()),
                 payload: serde_json::Value::Null,
                 timestamp: Utc::now(),
             },
             InterruptSignal {
                 index: 1,
-                id: Some("id-1".to_string()),
+                id: Some("ns_b:id-1".to_string()),
+                payload: serde_json::Value::Null,
+                timestamp: Utc::now(),
+            },
+            InterruptSignal {
+                index: 2,
+                id: Some("ns_c:id-2".to_string()),
                 payload: serde_json::Value::Null,
                 timestamp: Utc::now(),
             },
@@ -1532,8 +1540,9 @@ mod tests {
         assert_eq!(
             result,
             vec![
-                Some(serde_json::json!("first")),
-                Some(serde_json::Value::Null), // processed -> null-resume
+                Some(serde_json::json!("first")),  // ns_a match
+                Some(serde_json::json!("second")), // ns_b match (precedence over processed)
+                Some(serde_json::Value::Null),     // ns_c processed, not in map -> null-resume
             ]
         );
     }
@@ -1542,19 +1551,12 @@ mod tests {
     fn test_match_by_namespace_no_pending_interrupts() {
         let scratchpad = Scratchpad::new();
         let mut map = std::collections::HashMap::new();
-        map.insert("0".to_string(), serde_json::json!("first"));
-        map.insert("2".to_string(), serde_json::json!("third"));
+        map.insert("ns_a".to_string(), serde_json::json!("first"));
         let resume = Some(ResumeValue::ByNamespace(map));
 
+        // No pending interrupts -> no resume values to resolve.
         let result = match_resume_to_interrupts(&resume, &[], &scratchpad);
-        assert_eq!(
-            result,
-            vec![
-                Some(serde_json::json!("first")),
-                None,
-                Some(serde_json::json!("third")),
-            ]
-        );
+        assert!(result.is_empty());
     }
 
     #[test]
@@ -1579,7 +1581,6 @@ mod tests {
 
     impl State for TestState {
         type Update = TestUpdate;
-        type FieldVersions = FieldVersions;
 
         fn apply(&mut self, _: Self::Update) -> crate::FieldsChanged {
             crate::FieldsChanged(0)

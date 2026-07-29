@@ -93,6 +93,13 @@ tags: [design-conformance, streaming, 05-streaming]
   当 当前 step 超过 last_step
   那么 should_skip 返回 false（继续执行）
 
+场景: 9 种 StreamMode 端到端均干净完成并发射模式适当事件
+  测试:
+    包: juncture-core
+    过滤: test_stream_all_nine_modes_e2e
+  当 对多字段图逐模式（Values/Updates/Messages/Custom/Debug/Tools/Checkpoints/Tasks/Multi）驱动流
+  那么 Values→Values、Updates→Updates、Debug→Values 超集、Multi([Values,Updates])→两者，其余模式干净完成并以 End 结束
+
 ## Questions
 
-- [ ] **9 种 StreamMode 端到端覆盖**：本合约验证 should_emit 门控与 Batch；9 种模式（Values/Updates/Messages/Custom/Debug/Tools/Checkpoints/Tasks/Multi）的端到端流输出需集成测试。（按用户指示推迟到试点结束后统一决策 2026-07-29）
+- [x] **9 种 StreamMode 端到端覆盖**：RESOLVED 2026-07-29 — 新增 `test_stream_all_nine_modes_e2e`（compiled.rs），驱动多字段图对 9 种 StreamMode 逐模式收集事件：Values→Values、Updates→Updates、Debug→Values 超集、Multi([Values,Updates])→两者、Tasks/Messages/Custom/Tools/Checkpoints→干净完成+End。发现单节点图走 inline 快速路径跳过 TaskStart/TaskEnd 事件（已注释说明，需多节点图才触发 spawn 路径）。

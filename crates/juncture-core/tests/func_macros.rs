@@ -222,8 +222,14 @@ mod graph_level_cache {
         let policy = CachePolicy::default_policy();
         TASK_CACHE_POLICY
             .scope(Some(policy), async {
-                let v1 = graph_cached_task(7).result().await.expect("first call succeeds");
-                let v2 = graph_cached_task(7).result().await.expect("second call succeeds");
+                let v1 = graph_cached_task(7)
+                    .result()
+                    .await
+                    .expect("first call succeeds");
+                let v2 = graph_cached_task(7)
+                    .result()
+                    .await
+                    .expect("second call succeeds");
                 assert_eq!(v1, 7);
                 assert_eq!(v2, 7);
                 assert_eq!(

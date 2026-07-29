@@ -107,4 +107,4 @@ tags: [design-conformance, checkpoint, 04-checkpoint]
 
 ## Questions
 
-- [ ] **SQLite/Postgres 后端语义一致性**：本合约只验证 MemorySaver（内存）；SqliteSaver/PostgresSaver 的 put/get/list/put_writes 是否与 MemorySaver 语义一致需额外集成测试（涉及 DB，超出 unit 范围）。（按用户指示推迟到试点结束后统一决策 2026-07-29）
+- [x] **SQLite/Postgres 后端语义一致性**：RESOLVED 2026-07-29 — 新增 `test_sqlite_saver_thread_isolation`/`_namespace_isolation`（in-memory）+ `test_postgres_saver_thread_isolation`/`_namespace_isolation`（docker postgres:16），覆盖 put/get 隔离语义与 MemorySaver 一致。运行真实 Postgres 还暴露并修复了 PostgresSaver 的 3 个潜伏 bug（测试此前 skip-if-no-DB 从未真正运行）：(a) `created_at` 列 TIMESTAMPTZ 与 String 绑定不匹配 → 改 TEXT（与 SqliteSaver 一致）；(b) `schema_version`/`idx` 列 INTEGER 与 i64 绑定不匹配 → 改 BIGINT；(c) `detect_format` 不识别 msgpack fixstr(0xa0-0xbf) → 扩展到 0x80-0xff。SqliteSaver 10/10 + PostgresSaver 7/7 全绿。

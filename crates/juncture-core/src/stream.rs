@@ -1146,7 +1146,7 @@ mod tests {
         BatchTransformer, EventEmitter, MessageBatchConfig, MessageChunk, MessageStreamMetadata,
         StreamConfig, StreamEvent, StreamMode, StreamResumption, StreamTransformer, ToolsEvent,
     };
-    use crate::state::{FieldVersions, FieldsChanged, State};
+    use crate::state::{FieldsChanged, State};
 
     /// Minimal state implementation for `EventEmitter` tests.
     #[derive(Clone, Debug, Default)]
@@ -1154,7 +1154,6 @@ mod tests {
 
     impl State for TestState {
         type Update = TestStateUpdate;
-        type FieldVersions = FieldVersions;
 
         fn apply(&mut self, _update: Self::Update) -> FieldsChanged {
             FieldsChanged(0)

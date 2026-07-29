@@ -960,7 +960,6 @@ where
 mod tests {
     use super::*;
     use crate::FieldsChanged;
-    use crate::state::FieldVersions;
 
     type BoxResult<T> = std::pin::Pin<
         Box<dyn std::future::Future<Output = Result<T, crate::JunctureError>> + Send>,
@@ -979,7 +978,6 @@ mod tests {
 
     impl State for TestState {
         type Update = TestStateUpdate;
-        type FieldVersions = FieldVersions;
 
         fn apply(&mut self, update: Self::Update) -> FieldsChanged {
             if let Some(val) = update.value {

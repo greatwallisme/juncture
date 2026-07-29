@@ -493,12 +493,12 @@ fn task_compute_delay(
     jitter: bool,
     max_interval: std::time::Duration,
 ) -> std::time::Duration {
-    let capped = base.min(max_interval);
-    if !jitter {
-        return capped;
-    }
-    let jitter_fraction: f64 = rand::random_range(0.75..=1.25);
-    capped.mul_f64(jitter_fraction).min(max_interval)
+    // Single source of truth: delegate to `graph::builder::compute_delay`
+    // (pregel-budget-retry spec #7 — the two prior implementations were
+    // equivalent since `cap_delay(d, m) == d.min(m)`). This thin alias preserves
+    // the task-retry call site + its tests without duplicating the jitter/cap
+    // logic.
+    crate::graph::compute_delay(base, jitter, max_interval)
 }
 
 /// Build a stable cache key for a `#[task]` invocation.
@@ -534,6 +534,57 @@ mod tests {
         assert!(runtime.previous.is_none());
         assert!(runtime.checkpointer.is_none());
         assert!(runtime.store.is_none());
+    }
+
+    // `task_compute_delay` delegates to `graph::compute_delay` (single source of
+    // truth, pregel-budget-retry spec #7 — the prior duplicate is removed). These
+    // pin the task-retry path's contract via that delegation: no-jitter == base
+    // capped at max; jitter in [0.75, 1.25] x
+    // capped; result always capped by max (parity with `compute_delay`).
+    #[test]
+    fn task_compute_delay_no_jitter_equals_capped_base() {
+        let base = std::time::Duration::from_millis(100);
+        let max = std::time::Duration::from_secs(10);
+        let result = task_compute_delay(base, false, max);
+        assert_eq!(result, std::time::Duration::from_millis(100));
+    }
+
+    #[test]
+    fn task_compute_delay_caps_at_max() {
+        let base = std::time::Duration::from_secs(20);
+        let max = std::time::Duration::from_secs(10);
+        let result = task_compute_delay(base, false, max);
+        assert_eq!(result, std::time::Duration::from_secs(10));
+    }
+
+    #[test]
+    fn task_compute_delay_with_jitter_stays_within_range() {
+        let base = std::time::Duration::from_millis(100);
+        let max = std::time::Duration::from_secs(10);
+        // Run multiple times to verify jitter stays within +/- 25%
+        for _ in 0..100 {
+            let result = task_compute_delay(base, true, max);
+            let millis = result.as_secs_f64() * 1000.0;
+            // 100ms * 0.75 = 75ms, 100ms * 1.25 = 125ms
+            assert!(
+                (75.0..=125.0).contains(&millis),
+                "jittered delay {millis}ms outside expected range [75, 125]"
+            );
+        }
+    }
+
+    #[test]
+    fn task_compute_delay_jitter_capped_by_max() {
+        let base = std::time::Duration::from_millis(100);
+        // Set max very low to force capping even with jitter
+        let max = std::time::Duration::from_millis(50);
+        for _ in 0..100 {
+            let result = task_compute_delay(base, true, max);
+            assert!(
+                result <= max,
+                "jittered delay {result:?} exceeded max {max:?}",
+            );
+        }
     }
 
     #[test]

@@ -652,7 +652,9 @@ where
         .try_with(|policy| {
             policy.as_ref().and_then(|policy| {
                 let key = crate::func::task_cache_key(namespace, args);
-                policy.get(&key).and_then(|v| serde_json::from_value::<O>(v).ok())
+                policy
+                    .get(&key)
+                    .and_then(|v| serde_json::from_value::<O>(v).ok())
             })
         })
         .ok()

@@ -1254,7 +1254,6 @@ mod tests {
 
     impl crate::State for StateDummy {
         type Update = StateDummyUpdate;
-        type FieldVersions = crate::state::FieldVersions;
 
         fn apply(&mut self, _update: Self::Update) -> crate::FieldsChanged {
             crate::FieldsChanged(0)
@@ -1583,14 +1582,12 @@ impl SubgraphTransformer {
     ///
     /// ```
     /// use juncture_core::{EventEmitter, SubgraphTransformer, StreamMode};
-    /// use juncture_core::state::FieldVersions;
     /// use tokio::sync::mpsc;
     ///
     /// #[derive(Clone, Debug, Default)]
     /// struct MyState;
     /// impl juncture_core::State for MyState {
     ///     type Update = MyUpdate;
-    ///     type FieldVersions = FieldVersions;
     ///     fn apply(&mut self, _u: MyUpdate) -> juncture_core::FieldsChanged {
     ///         juncture_core::FieldsChanged(0)
     ///     }

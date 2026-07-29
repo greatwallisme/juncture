@@ -40,6 +40,10 @@ pub use builder::{
     NodeError, NodeMetadata, RetryPolicy, RetryingNode, StateGraph, TimeoutNode,
     execute_with_retry, execute_with_timeout,
 };
+// Single source of truth for retry backoff delay (pregel-budget-retry spec #7):
+// the `#[task]` retry path (`func`) delegates here instead of duplicating the
+// +/-25% jitter + cap logic.
+pub(crate) use builder::compute_delay;
 pub use compiled::{
     CompiledGraph, DrawableEdge, DrawableGraph, DrawableNode, GraphOutput, GraphOutputMetadata,
     InterruptInfo, StateFilter, StateUpdate, StreamHandle, SubgraphInfo,

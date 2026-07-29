@@ -99,6 +99,13 @@ tags: [design-conformance, pregel, budget, retry, 03-pregel-engine]
   当 model_call 累计超过配置上限
   那么 check() 返回 Some(BudgetExceededReason)（未超时为 None）
 
+场景: task 路径退避委托 compute_delay（单一 source，no-jitter=capped）
+  测试:
+    包: juncture-core
+    过滤: task_compute_delay_no_jitter_equals_capped_base
+  当 `task_compute_delay`(base ≤ max, jitter=false)（委托 `compute_delay`）
+  那么 返回 base（无 jitter 时等于封顶后 base；jitter/cap 逻辑仅存于 compute_delay 一份）
+
 ## Questions
 
-- [ ] **退避算法双实现**：`compute_delay`（builder.rs:708，RetryPolicy 路径）与 `task_compute_delay`（func/mod.rs:491，`#[task]` 宏路径）是两份独立的 ±25% jitter + cap 实现。语义相同但代码重复，需决策是否合并为单一 source of truth。（按用户指示推迟到试点结束后统一决策 2026-07-29）
+- [x] **退避算法双实现**：RESOLVED 2026-07-29 — 用户决策"都要"：既补测试又合并。(a) `task_compute_delay`（func/mod.rs）此前无直接单测，已新增 4 个单测（`task_compute_delay_no_jitter_equals_capped_base`/`_caps_at_max`/`_with_jitter_stays_within_range`/`_jitter_capped_by_max`）。(b) 合并为单一 source of truth：经核实 `cap_delay(d,m) == d.min(m)`，两份实现字节级等价；`compute_delay`（builder.rs）改为 `pub(crate)` + 经 `graph/mod.rs` re-export，`task_compute_delay` 改为 1 行委托 `crate::graph::compute_delay`。jitter/cap 逻辑现仅存一份；4 个 task 路径测试保留（经委托测试 task retry 路径用 compute_delay）。

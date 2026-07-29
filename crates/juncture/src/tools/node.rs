@@ -1275,6 +1275,92 @@ mod tests {
         assert!(trace2.first_attempt_time >= trace1.first_attempt_time);
     }
 
+    /// Tool that records when its body executes into a shared order log.
+    struct RecordingTool {
+        log: Arc<std::sync::Mutex<Vec<&'static str>>>,
+    }
+
+    #[async_trait]
+    impl Tool for RecordingTool {
+        fn name(&self) -> &'static str {
+            "record"
+        }
+        fn description(&self) -> &'static str {
+            "Records execution order"
+        }
+        fn schema(&self) -> serde_json::Value {
+            json!({"type":"object","properties":{"message":{"type":"string"}},"required":["message"]})
+        }
+        async fn invoke(&self, _input: serde_json::Value) -> Result<String, ToolError> {
+            self.log.lock().expect("order log").push("tool");
+            Ok("ok".to_string())
+        }
+    }
+
+    /// Interceptor that records pre/post hook calls into a shared order log.
+    struct RecordingInterceptor {
+        log: Arc<std::sync::Mutex<Vec<&'static str>>>,
+    }
+
+    #[async_trait]
+    impl crate::tools::interceptor::ToolInterceptor for RecordingInterceptor {
+        async fn pre_execute(
+            &self,
+            _tool_call: &ToolCall,
+            _state: &serde_json::Value,
+        ) -> Result<(), ToolError> {
+            self.log.lock().expect("order log").push("pre");
+            Ok(())
+        }
+        async fn post_execute(
+            &self,
+            _tool_call: &ToolCall,
+            result: &Result<String, ToolError>,
+        ) -> Result<String, ToolError> {
+            self.log.lock().expect("order log").push("post");
+            result.clone()
+        }
+    }
+
+    /// Pre/post hook timing relative to tool execution (llm-tools spec Question
+    /// #11: the existing interceptor tests exercise `pre_execute`/`post_execute`
+    /// in isolation; this drives a real `ToolNode` and pins the execution order
+    /// `pre_execute` -> tool body -> `post_execute`.
+    #[tokio::test]
+    async fn test_tool_node_interceptor_pre_post_timing_around_execution() {
+        use std::sync::Mutex;
+
+        let log: Arc<Mutex<Vec<&'static str>>> = Arc::new(Mutex::new(Vec::new()));
+        let node = TestToolNode::new(vec![Box::new(RecordingTool {
+            log: Arc::clone(&log),
+        }) as Box<dyn Tool>])
+        .with_interceptor(Arc::new(RecordingInterceptor {
+            log: Arc::clone(&log),
+        })
+            as Arc<dyn crate::tools::interceptor::ToolInterceptor>);
+
+        let messages = vec![Message::ai_with_tool_calls(
+            "record",
+            vec![ToolCall {
+                id: "call_1".to_string(),
+                name: "record".to_string(),
+                arguments: json!({"message": "hi"}),
+            }],
+        )];
+        let results = node
+            .execute(&messages)
+            .await
+            .expect("execute should succeed");
+        assert_eq!(results.len(), 1);
+
+        let order = log.lock().expect("order log").clone();
+        assert_eq!(
+            order,
+            vec!["pre", "tool", "post"],
+            "ToolNode must call pre_execute before the tool body and post_execute after"
+        );
+    }
+
     // --- StatefulTool integration tests ---
 
     /// Test stateful tool that accesses runtime state

@@ -1489,6 +1489,59 @@ mod tests {
         assert!(second.id.is_none());
         assert_eq!(second.payload, json!({"type": "confirmation"}));
     }
+
+    /// Parity with `test_memory_saver_thread_isolation` (checkpoint-persistence
+    /// spec #8): `SqliteSaver` must isolate checkpoints by `thread_id`.
+    #[tokio::test]
+    #[cfg(feature = "sqlite")]
+    async fn test_sqlite_saver_thread_isolation() {
+        let saver = SqliteSaver::from_connection_string("sqlite::memory:")
+            .await
+            .unwrap();
+        let config_t1 = create_test_config("thread1");
+        let config_t2 = create_test_config("thread2");
+        let cp1 = create_test_checkpoint("cp1");
+        let cp2 = create_test_checkpoint("cp2");
+        let metadata = create_test_metadata();
+
+        saver.put(&config_t1, cp1, metadata.clone()).await.unwrap();
+        saver.put(&config_t2, cp2, metadata).await.unwrap();
+
+        // Each thread sees only its own checkpoint.
+        let r1 = saver.get_tuple(&config_t1).await.unwrap().unwrap();
+        assert_eq!(r1.checkpoint.id, "cp1");
+        let r2 = saver.get_tuple(&config_t2).await.unwrap().unwrap();
+        assert_eq!(r2.checkpoint.id, "cp2");
+    }
+
+    /// Parity with `test_memory_saver_namespace_isolation` (checkpoint-persistence
+    /// spec #8): `SqliteSaver` must isolate checkpoints by `checkpoint_ns` within
+    /// the same thread.
+    #[tokio::test]
+    #[cfg(feature = "sqlite")]
+    async fn test_sqlite_saver_namespace_isolation() {
+        use juncture_core::checkpoint::CheckpointNamespace;
+
+        let saver = SqliteSaver::from_connection_string("sqlite::memory:")
+            .await
+            .unwrap();
+        let config_ns1 = RunnableConfig::default()
+            .with_thread_id("thread1")
+            .with_checkpoint_ns(CheckpointNamespace::parse("ns1"));
+        let config_ns2 = RunnableConfig::default()
+            .with_thread_id("thread1")
+            .with_checkpoint_ns(CheckpointNamespace::parse("ns2"));
+        let cp1 = create_test_checkpoint("cp1");
+        let cp2 = create_test_checkpoint("cp2");
+        let metadata = create_test_metadata();
+
+        saver.put(&config_ns1, cp1, metadata.clone()).await.unwrap();
+        saver.put(&config_ns2, cp2, metadata).await.unwrap();
+
+        // ns2 must not see ns1's checkpoint.
+        let r2 = saver.get_tuple(&config_ns2).await.unwrap().unwrap();
+        assert_eq!(r2.checkpoint.id, "cp2");
+    }
 }
 
 // Rust guideline compliant 2026-05-23

@@ -28,6 +28,15 @@ pub(crate) enum ErrorKind {
     TaskPanicked(String),
     NodeTimeout(NodeTimeoutError),
     ParentCommand(String),
+    /// A pending interrupt has no resume value and is not null-resumable.
+    ///
+    /// Surfaced by `validate_resume_coverage` (design 06 §3.3) when one or more
+    /// pending interrupt ids are not covered by the provided resume values and
+    /// cannot be null-resumed, so the caller is informed of the missing values
+    /// rather than silently re-triggering the interrupts.
+    MissingResumeValue {
+        interrupt_ids: Vec<String>,
+    },
 }
 
 /// Error code categorizing the error type
@@ -90,6 +99,8 @@ pub enum ErrorCode {
     NodeTimeout,
     /// Subgraph-to-parent routing command
     ParentCommand,
+    /// A pending interrupt is missing its resume value (design 06 §3.3)
+    MissingResumeValue,
 }
 
 /// Invalid update error variants
@@ -280,6 +291,7 @@ impl JunctureError {
             ErrorKind::TaskPanicked(_) => ErrorCode::TaskPanicked,
             ErrorKind::NodeTimeout(_) => ErrorCode::NodeTimeout,
             ErrorKind::ParentCommand(_) => ErrorCode::ParentCommand,
+            ErrorKind::MissingResumeValue { .. } => ErrorCode::MissingResumeValue,
         }
     }
 
@@ -372,6 +384,35 @@ impl JunctureError {
     #[must_use]
     pub const fn is_multiple_writers(&self) -> bool {
         matches!(self.kind, ErrorKind::MultipleWriters { .. })
+    }
+
+    /// Construct a `MissingResumeValue` error (design 06 §3.3).
+    ///
+    /// Used by `validate_resume_coverage` to surface pending interrupts that
+    /// have no resume value and are not null-resumable. `interrupt_ids` carries
+    /// all uncovered interrupt ids so the caller can report them together.
+    #[must_use]
+    pub fn missing_resume_value(interrupt_ids: Vec<String>) -> Self {
+        Self {
+            kind: ErrorKind::MissingResumeValue { interrupt_ids },
+            backtrace: Backtrace::capture(),
+        }
+    }
+
+    /// Check if this is a missing resume value error
+    #[must_use]
+    pub const fn is_missing_resume_value(&self) -> bool {
+        matches!(self.kind, ErrorKind::MissingResumeValue { .. })
+    }
+
+    /// Returns the uncovered interrupt ids if this is a `MissingResumeValue`
+    /// error, else `None`.
+    #[must_use]
+    pub fn missing_resume_ids(&self) -> Option<&[String]> {
+        match &self.kind {
+            ErrorKind::MissingResumeValue { interrupt_ids } => Some(interrupt_ids),
+            _ => None,
+        }
     }
 
     /// Task panicked during execution
@@ -526,6 +567,9 @@ impl std::fmt::Display for JunctureError {
             ErrorKind::NodeTimeout(err) => write!(f, "Node timeout: {err}"),
             ErrorKind::ParentCommand(target) => {
                 write!(f, "Parent command: route to '{target}'")
+            }
+            ErrorKind::MissingResumeValue { interrupt_ids } => {
+                write!(f, "Missing resume value for interrupts {interrupt_ids:?}")
             }
         }
     }

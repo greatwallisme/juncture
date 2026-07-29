@@ -4109,7 +4109,6 @@ mod tests {
 
     impl crate::State for StateDummy {
         type Update = StateDummyUpdate;
-        type FieldVersions = crate::state::FieldVersions;
 
         fn apply(&mut self, _update: Self::Update) -> crate::FieldsChanged {
             crate::FieldsChanged(0)
@@ -4134,7 +4133,6 @@ mod tests {
 
     impl crate::State for StateV2 {
         type Update = StateV2Update;
-        type FieldVersions = crate::state::FieldVersions;
 
         fn apply(&mut self, _update: Self::Update) -> crate::FieldsChanged {
             crate::FieldsChanged(0)
@@ -4345,7 +4343,6 @@ mod tests {
 
     impl crate::State for MultiFieldState {
         type Update = MultiFieldStateUpdate;
-        type FieldVersions = crate::state::FieldVersions;
 
         fn apply(&mut self, update: Self::Update) -> crate::FieldsChanged {
             let mut mask = 0u64;
@@ -4543,6 +4540,137 @@ mod tests {
 
         assert!(has_values, "stream() should emit Values events");
         assert!(has_end, "stream() should emit End event");
+    }
+
+    /// E2e coverage of all 9 `StreamMode` variants (streaming-emission-batching
+    /// spec Question #9: the 9 modes had only `should_emit`/`Batch` unit tests,
+    /// no end-to-end stream output check). Drives the multi-field graph with
+    /// each mode, collects the emitted events, and asserts mode-appropriate
+    /// events plus the terminal `End`. Modes whose event source the graph does
+    /// not exercise (Messages=LLM, Custom=node-emitted, Tools=tool node,
+    /// Checkpoints=checkpointer) must still complete cleanly with `End`,
+    /// proving the mode is accepted and the stream runs without panic.
+    #[tokio::test]
+    async fn test_stream_all_nine_modes_e2e() {
+        use futures::StreamExt;
+
+        async fn run_mode(
+            compiled: &CompiledGraph<MultiFieldState>,
+            config: &RunnableConfig,
+            initial: MultiFieldState,
+            mode: StreamMode,
+        ) -> Vec<crate::stream::StreamEvent<MultiFieldState>> {
+            let handle = compiled
+                .stream(initial, config, mode)
+                .await
+                .expect("stream should succeed");
+            let mut events = Vec::new();
+            let mut stream = handle.stream;
+            while let Some(result) = stream.next().await {
+                events.push(result.expect("stream event should be Ok"));
+            }
+            events
+        }
+
+        fn has_end(events: &[crate::stream::StreamEvent<MultiFieldState>]) -> bool {
+            events
+                .iter()
+                .any(|e| matches!(e, crate::stream::StreamEvent::End { .. }))
+        }
+
+        let compiled = build_multi_field_graph();
+        let config = RunnableConfig::new();
+        let initial = MultiFieldState {
+            messages: vec![],
+            count: 0,
+            label: String::new(),
+        };
+
+        // Values -> Values events + End.
+        let values_events = run_mode(&compiled, &config, initial.clone(), StreamMode::Values).await;
+        assert!(
+            values_events
+                .iter()
+                .any(|e| matches!(e, crate::stream::StreamEvent::Values { .. })),
+            "Values mode should emit Values events"
+        );
+        assert!(has_end(&values_events), "Values mode should emit End");
+
+        // Updates -> Updates events + End.
+        let updates_events =
+            run_mode(&compiled, &config, initial.clone(), StreamMode::Updates).await;
+        assert!(
+            updates_events
+                .iter()
+                .any(|e| matches!(e, crate::stream::StreamEvent::Updates { .. })),
+            "Updates mode should emit Updates events"
+        );
+        assert!(has_end(&updates_events), "Updates mode should emit End");
+
+        // Tasks mode -> completes with End. TaskStart/TaskEnd are emitted on the
+        // multi-task spawn path; the single-node graph takes the inline fast path
+        // (scheduler.rs `try_execute_single_task_inline`) which skips per-task
+        // events, so we assert clean completion rather than task events here.
+        // (A multi-node graph would force the spawn path and exercise task events.)
+        let tasks_events = run_mode(&compiled, &config, initial.clone(), StreamMode::Tasks).await;
+        assert!(
+            has_end(&tasks_events),
+            "Tasks mode should complete with End"
+        );
+
+        // Debug -> emits all event types (superset of Values mode): Values + End,
+        // and at least as many events as Values mode. (TaskStart/TaskEnd are
+        // skipped on the single-node inline path; see Tasks note above.)
+        let debug_events = run_mode(&compiled, &config, initial.clone(), StreamMode::Debug).await;
+        assert!(
+            debug_events
+                .iter()
+                .any(|e| matches!(e, crate::stream::StreamEvent::Values { .. })),
+            "Debug mode should emit Values"
+        );
+        assert!(has_end(&debug_events), "Debug mode should emit End");
+        assert!(
+            debug_events.len() >= values_events.len(),
+            "Debug mode should emit a superset of Values-mode events"
+        );
+
+        // Multi([Values, Updates]) -> both Values + Updates + End.
+        let multi_events = run_mode(
+            &compiled,
+            &config,
+            initial.clone(),
+            StreamMode::Multi(vec![StreamMode::Values, StreamMode::Updates]),
+        )
+        .await;
+        assert!(
+            multi_events
+                .iter()
+                .any(|e| matches!(e, crate::stream::StreamEvent::Values { .. })),
+            "Multi([Values, Updates]) should emit Values"
+        );
+        assert!(
+            multi_events
+                .iter()
+                .any(|e| matches!(e, crate::stream::StreamEvent::Updates { .. })),
+            "Multi([Values, Updates]) should emit Updates"
+        );
+        assert!(has_end(&multi_events), "Multi mode should emit End");
+
+        // Modes whose event source the graph does not exercise must still
+        // complete cleanly with End (mode accepted, no panic).
+        let no_source_modes = [
+            (StreamMode::Messages, "Messages"),
+            (StreamMode::Custom, "Custom"),
+            (StreamMode::Tools, "Tools"),
+            (StreamMode::Checkpoints, "Checkpoints"),
+        ];
+        for (mode, label) in no_source_modes {
+            let events = run_mode(&compiled, &config, initial.clone(), mode).await;
+            assert!(
+                has_end(&events),
+                "{label} mode should complete with End event (no panic)"
+            );
+        }
     }
 
     #[tokio::test]

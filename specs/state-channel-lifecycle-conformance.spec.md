@@ -114,6 +114,13 @@ tags: [design-conformance, state, channel, 01-state-channel]
   当 `NamedBarrierChannel` 收到不在 required sources 中的 source 写入
   那么 panic，消息含 "NamedBarrierChannel: source"
 
+场景: EphemeralChannel consume 清零值（design §2.5）
+  测试:
+    包: juncture-core
+    过滤: ephemeral_channel_consume_clears_value
+  当 `EphemeralChannel` 写入非默认值后调用 consume()
+  那么 get() 返回 Default（值被 consume 清零，design 01 §2.5）
+
 ## Questions
 
-- [ ] **EphemeralChannel 用 `consumed` 标志而非真正清零值**：design §2.5 描述 ephemeral "consume 清除值（恢复 None/默认）"，但实际实现用 `consumed: bool` 标志 + 由引擎 `reset_ephemeral()`/`consume_field()` 协同清零，consume() 本身只翻转标志。语义等价但实现路径不同，需确认是否符合 design 意图。（按用户指示推迟到试点结束后统一决策 2026-07-29）
+- [x] **EphemeralChannel 用 `consumed` 标志而非真正清零值**：RESOLVED 2026-07-29 — 用户决策 #4：对齐 design §2.5。`EphemeralChannel::consume()` 现在**清零值到 Default**（design §2.5 "consume 清除值"），并保留 `consumed` 标志返回值作为幂等信号（`update()` 重置标志）。引擎侧 `State::reset_ephemeral()` 仍在 superstep 末清零（design §3.3），两层一致。新增绑定测试 `ephemeral_channel_consume_clears_value` 断言 consume 后 `get()` 返回 Default。注：引擎不直接调用 `Channel::consume()`（用 `State::consume_field`+`reset_ephemeral`），故 channel 层清零是 API 自洽，不影响引擎行为。

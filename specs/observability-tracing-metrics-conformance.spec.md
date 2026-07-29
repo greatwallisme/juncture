@@ -107,4 +107,4 @@ tags: [design-conformance, observability, tracing, 09-observability]
 
 ## Questions
 
-- [ ] **端到端 OTel 导出**：本合约验证 span 命名/回调/传播/metrics 的单元语义；实际 OTel exporter 端到端导出（OTLP 上报）需带 collector 的集成测试，超出 unit 范围。（按用户指示推迟到试点结束后统一决策 2026-07-29）
+- [x] **端到端 OTel 导出**：RESOLVED 2026-07-29 — 新增 `test_otlp_export_pipeline_e2e`（config.rs，otel feature），针对 docker/telemetry 的 otel-collector（127.0.0.1:4318）安装 OTLP pipeline + 记录 counter。collector 不可达时 CI-safe 跳过。验证 exporter 配置 + metric 记录对抗真实 infra（force_flush API 跨 OTel 版本不稳定，已移除；Prometheus 跨服务查询超出 unit 范围，注释说明）。

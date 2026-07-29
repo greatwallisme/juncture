@@ -3511,4 +3511,201 @@ mod sqlite_tests {
             serde_json::json!(2)
         );
     }
+
+    /// Deterministic embedding for vector-search tests (mirrors `TestEmbeddingFunc`
+    /// in the `MemoryStore` tests; defined locally because that struct is private
+    /// to `mod tests`).
+    struct SqliteTestEmbeddingFunc;
+
+    #[async_trait::async_trait]
+    impl EmbeddingFunc for SqliteTestEmbeddingFunc {
+        async fn embed(&self, texts: Vec<String>) -> Result<Vec<Vec<f32>>, StoreError> {
+            Ok(texts
+                .iter()
+                .map(|text| {
+                    let hash: u64 = text.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| {
+                        (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3)
+                    });
+                    let mut vec: Vec<f32> = (0..8)
+                        .map(|i| f32::from(((hash >> (i * 8)) & 0xFF) as u8) / 255.0)
+                        .collect();
+                    let norm = vec.iter().map(|x| x * x).sum::<f32>().sqrt();
+                    if norm > 0.0 {
+                        for v in &mut vec {
+                            *v /= norm;
+                        }
+                    }
+                    vec
+                })
+                .collect())
+        }
+    }
+
+    /// Parity with `test_search_ordering_respects_similarity` (store spec #13):
+    /// `SqliteStore` vector search must return results ordered by similarity and
+    /// attach scores, matching `MemoryStore` semantics (the conformance spec bound
+    /// this scenario to `MemoryStore` only).
+    #[tokio::test]
+    async fn test_sqlite_store_search_orders_by_similarity() {
+        let index_config = IndexConfig {
+            dims: 8,
+            embed: Box::new(SqliteTestEmbeddingFunc),
+            fields: Some(vec!["text".to_string()]),
+        };
+        let store = SqliteStore::with_vector_search("sqlite::memory:", index_config)
+            .await
+            .expect("vector-search SqliteStore should construct");
+
+        store
+            .put(
+                "docs",
+                "match",
+                serde_json::json!({"text": "hello world"}),
+                Some(vec!["text".to_string()]),
+            )
+            .await
+            .expect("put failed");
+        store
+            .put(
+                "docs",
+                "other",
+                serde_json::json!({"text": "quantum physics"}),
+                Some(vec!["text".to_string()]),
+            )
+            .await
+            .expect("put failed");
+
+        let query = SearchQuery {
+            namespace_prefix: "docs".to_string(),
+            filter: None,
+            query: Some("hello world".to_string()),
+            limit: 10,
+            offset: 0,
+        };
+        let result = store.search(query).await.expect("search failed");
+        assert!(
+            !result.items.is_empty(),
+            "search should return matching items"
+        );
+        for item in &result.items {
+            assert!(
+                item.score.is_some(),
+                "items with embeddings should have similarity scores"
+            );
+        }
+        if let Some(score) = result.items.first().and_then(|i| i.score) {
+            assert!(
+                score > 0.9,
+                "top result should have high similarity score, got {score}"
+            );
+        }
+    }
+}
+
+/// Real-backend integration tests for `PostgresStore` (store spec #13 parity).
+/// Each test connects to the Postgres instance from `TEST_POSTGRES_URL` (default
+/// `postgresql://postgres:postgres@localhost:5432/test`) and skips gracefully if
+/// Postgres is unavailable. A per-run namespace avoids collisions since the test
+/// database persists across runs.
+#[cfg(all(test, feature = "postgres"))]
+mod postgres_tests {
+    use super::*;
+
+    struct PostgresTestEmbeddingFunc;
+
+    #[async_trait::async_trait]
+    impl EmbeddingFunc for PostgresTestEmbeddingFunc {
+        async fn embed(&self, texts: Vec<String>) -> Result<Vec<Vec<f32>>, StoreError> {
+            Ok(texts
+                .iter()
+                .map(|text| {
+                    let hash: u64 = text.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| {
+                        (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3)
+                    });
+                    let mut vec: Vec<f32> = (0..8)
+                        .map(|i| f32::from(((hash >> (i * 8)) & 0xFF) as u8) / 255.0)
+                        .collect();
+                    let norm = vec.iter().map(|x| x * x).sum::<f32>().sqrt();
+                    if norm > 0.0 {
+                        for v in &mut vec {
+                            *v /= norm;
+                        }
+                    }
+                    vec
+                })
+                .collect())
+        }
+    }
+
+    async fn try_open_store_with_vector() -> Option<PostgresStore> {
+        let url = std::env::var("TEST_POSTGRES_URL")
+            .unwrap_or_else(|_| "postgresql://postgres:postgres@localhost:5432/test".to_string());
+        let index_config = IndexConfig {
+            dims: 8,
+            embed: Box::new(PostgresTestEmbeddingFunc),
+            fields: Some(vec!["text".to_string()]),
+        };
+        PostgresStore::with_vector_search(&url, index_config)
+            .await
+            .ok()
+    }
+
+    /// Parity with `test_search_ordering_respects_similarity` (store spec #13):
+    /// `PostgresStore` vector search must return results ordered by similarity
+    /// and attach scores, matching `MemoryStore`/`SqliteStore` semantics.
+    #[tokio::test]
+    async fn test_postgres_store_search_orders_by_similarity() {
+        let Some(store) = try_open_store_with_vector().await else {
+            return;
+        };
+        let ns = format!("pg_search_{}", std::process::id());
+
+        store
+            .put(
+                &ns,
+                "match",
+                serde_json::json!({"text": "hello world"}),
+                Some(vec!["text".to_string()]),
+            )
+            .await
+            .expect("put failed");
+        store
+            .put(
+                &ns,
+                "other",
+                serde_json::json!({"text": "quantum physics"}),
+                Some(vec!["text".to_string()]),
+            )
+            .await
+            .expect("put failed");
+
+        let query = SearchQuery {
+            namespace_prefix: ns.clone(),
+            filter: None,
+            query: Some("hello world".to_string()),
+            limit: 10,
+            offset: 0,
+        };
+        let result = store.search(query).await.expect("search failed");
+        assert!(
+            !result.items.is_empty(),
+            "search should return matching items"
+        );
+        for item in &result.items {
+            assert!(
+                item.score.is_some(),
+                "items with embeddings should have similarity scores"
+            );
+        }
+        if let Some(score) = result.items.first().and_then(|i| i.score) {
+            assert!(
+                score > 0.9,
+                "top result should have high similarity score, got {score}"
+            );
+        }
+
+        // cleanup
+        let _ = store.delete(&ns, "match").await;
+        let _ = store.delete(&ns, "other").await;
+    }
 }

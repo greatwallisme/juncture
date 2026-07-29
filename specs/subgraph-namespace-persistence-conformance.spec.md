@@ -95,6 +95,13 @@ tags: [design-conformance, subgraph, 07-subgraph]
   当 子图嵌套三层
   那么 命名空间按层级正确链接（每层独立 uuid）
 
+场景: StateSubset 共享状态循环（extract→map_update→parent.apply）
+  测试:
+    包: juncture-core
+    过滤: subset_shared_state_cycle_applies_child_changes_to_parent
+  当 子图 extract 父状态→产生 delta→map_update→父 apply
+  那么 子图变更传播到父（name replace、messages append、age 父专属字段不动）
+
 ## Questions
 
-- [ ] **StateSubset 共享状态语义**：本合约覆盖命名空间/transformer；StateSubset 的 extract/map_update（共享状态子图模式）语义需额外集成测试（涉及实际子图执行）。（按用户指示推迟到试点结束后统一决策 2026-07-29）
+- [x] **StateSubset 共享状态语义**：RESOLVED 2026-07-29 — 新增 `subset_shared_state_cycle_applies_child_changes_to_parent`（derive_state.rs），覆盖完整共享状态循环：`extract` 子状态 → 子图产生 delta → `map_update` 投影回父 Update → 父 `apply` 使子图变更可见（name replace、messages append、age 父专属字段不动）。补齐了原 extract/map_update 单元测试缺失的 apply-back 步骤。

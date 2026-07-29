@@ -103,5 +103,5 @@ tags: [design-conformance, state, reducer, channel, 01-state-channel]
 
 ## Questions
 
-- [ ] **多写入值顺序（注册序 vs 完成序）**：design §2.3/§3.2 明确 reducer 按节点**注册顺序**应用写入以保证确定性；但 `Reducer::reduce` 文档注释（channel.rs:44）写 "Values are provided in the order tasks **completed** (not task spawn order)"。对 associative reducer（Append）无影响，但对非结合 reducer 会产生非确定性。需决策：以注册序为准修正实现/文档，还是接受完成序。（按用户指示推迟到试点结束后统一决策 2026-07-29）
-- [ ] **结构化 `InvalidUpdateError::MultipleWriters` 未产出**：design §3.6/§3.9 承诺多写入返回带 `conflicting_nodes` 的结构化错误，但全代码库中 `MultipleWriters` 仅在 enum 定义与一处 doc-comment 出现，**从未被构造**。实际强制依赖 `ReplaceReducer` panic（本合约验证）+ 引擎 `check_replace_conflicts`。需决策：实现结构化错误路径，还是更新 design 移除该承诺。（按用户指示推迟到试点结束后统一决策 2026-07-29）
+- [x] **多写入值顺序（注册序 vs 完成序）**：RESOLVED 2026-07-29 — 用户决策 #3：严格按 design §2.3/§3.2 **注册序**实现。`apply_writes` 现按节点注册序（`add_node` 调用序，存于 `PregelLoop.node_registration`）排序 PULL 写入，**非**完成序、**非**字母序。`Reducer::reduce` doc-comment（channel.rs:44）已从错误的"完成序"修正为"注册序"。新增区分性测试 `test_apply_writes_merges_in_registration_order_not_alphabetical`（注册 zebra 先于 apple → 合并 [z, a]，字母序会得 [a, z]）。
+- [x] **结构化 `InvalidUpdateError::MultipleWriters` 未产出**：RESOLVED 2026-07-29 — 用户决策 #1：对齐 design §3.6/§3.9。主路径 `apply_writes`→`check_replace_conflicts_from_state` 已返回结构化 `JunctureError::multiple_writers(field,writers)`；遗留 `check_replace_conflicts`（原返回通用 `Execution`）已统一为返回 `multiple_writers()`。`ReplaceReducer` panic 保留为 channel 级最后防线（design §3.1）。新增 Err-path 测试 `test_check_replace_conflicts_returns_multiple_writers_error` + `test_apply_writes_replace_conflict_errors_before_apply`。

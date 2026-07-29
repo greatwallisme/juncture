@@ -103,7 +103,14 @@ tags: [design-conformance, hitl, interrupt, 06-hitl]
   当 节点名形如 "__route__"
   那么 is_hidden_node 返回 true（普通名 "my_node" 返回 false，由 normal_nodes_are_not_hidden 覆盖反面）
 
+场景: ByNamespace 按 extract_namespace 真正命名空间匹配
+  测试:
+    包: juncture-core
+    过滤: test_match_by_namespace_namespace_mapping
+  当 `match_resume_to_interrupts` 收 `ByNamespace` + "{ns}:{local}" 格式中断 id
+  那么 按 namespace 路由（ns_a→A_val、ns_b→B_val、无命名空间前缀→None、命名空间不在 map→None）
+
 ## Questions
 
-- [ ] **`match_resume_to_interrupts` 未实现**：design §3.3 详细描述了 `match_resume_to_interrupts`（Single/ById/ByNamespace 三模式匹配 + null-resume 回退 + MissingResumeValue 错误），但实际代码库中无此函数；实际只有更简单的 `validate_resume_coverage`（返回 `Vec<String>` 而非 `JunctureError::MissingResumeValue`）。需决策：实现完整 match 算法对齐 design，还是把 design 收敛到实际实现。（按用户指示推迟到试点结束后统一决策 2026-07-29）
-- [ ] **`validate_resume_coverage` 返回类型**：design 承诺 `JunctureError::MissingResumeValue`，实际返回 `Result<(), Vec<String>>`。错误类型不一致。（同上推迟）
+- [x] **`match_resume_to_interrupts` 未实现**：RESOLVED 2026-07-29 — 经核实该函数**已存在**于 `pregel/runner.rs:838`（原 spec 结论"未实现"已过时），处理 Single/ById/ByNamespace。用户决策 #2：对齐 design §3.3 — (a) 新增 `JunctureError::MissingResumeValue { interrupt_ids }` 变体；(b) `ByNamespace` 从错误的"数字索引匹配"修正为真正用 `extract_namespace(id)` 按命名空间匹配（runner.rs 3 个测试已改为命名空间场景）；(c) 引擎 resume 路径保留 `Vec<Option<Value>>` 返回（partial-resume 再触发，per design §3.4）。
+- [x] **`validate_resume_coverage` 返回类型**：RESOLVED 2026-07-29 — 用户决策 #2：`validate_resume_coverage` 返回类型从 `Result<(), Vec<String>>` 改为 `Result<(), JunctureError>`，未覆盖中断返回结构化 `MissingResumeValue { interrupt_ids }`（携带全部未覆盖 id，符合本合约 `validate_resume_coverage_multiple_uncovered` 场景"含全部未覆盖 id"）。测试已更新为 `is_missing_resume_value()` + `missing_resume_ids()` 断言。

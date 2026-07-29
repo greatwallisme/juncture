@@ -1,0 +1,43 @@
+# Juncture Postgres test database
+#
+# Provides a local PostgreSQL instance for running the PostgresSaver /
+# PostgresStore integration tests (conformance specs checkpoint-persistence
+# and store-filter-vector-ttl, gaps #8 / #13).
+#
+# The connection string matches the default expected by the gated tests:
+#   postgresql://postgres:postgres@localhost:5432/test
+# (override with TEST_POSTGRES_URL). PostgresSaver::new / PostgresStore::new
+# run CREATE TABLE IF NOT EXISTS themselves, so no init script is needed.
+#
+# Usage:
+#   docker compose up -d          # start postgres
+#   docker compose down           # stop + remove container
+#   docker compose logs -f        # follow logs
+#
+# Then run the gated tests:
+#   TEST_POSTGRES_URL=postgresql://postgres:postgres@localhost:5432/test \
+#     cargo test -p juncture-checkpoint --features postgres
+#   TEST_POSTGRES_URL=postgresql://postgres:postgres@localhost:5432/test \
+#     cargo test -p juncture-core --features postgres -- store
+
+services:
+  postgres:
+    image: postgres:16
+    container_name: juncture-postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: test
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d test"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    # Persist data across restarts so repeated test runs are stable.
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
+volumes:
+  postgres-data:

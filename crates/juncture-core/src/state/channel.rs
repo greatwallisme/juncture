@@ -41,8 +41,12 @@ pub trait Reducer<T> {
 
     /// Merge multiple values into current
     ///
-    /// Values are provided in the order tasks completed (not task spawn order).
-    /// For deterministic results, use associative reducers like `AppendReducer`.
+    /// Values are provided in node registration order (the order nodes were
+    /// added via `add_node`), which `apply_writes` enforces deterministically
+    /// regardless of task completion order (design 01 §2.3/§3.2/§3.7).
+    /// Associative reducers like `AppendReducer` are order-independent; this
+    /// registration-order guarantee is what makes non-associative reducers
+    /// deterministic across runs.
     fn reduce(current: &mut T, values: Vec<T>);
 }
 
@@ -571,8 +575,11 @@ impl<T: Default + Send + Sync + 'static, R: Reducer<T> + Send + Sync + 'static> 
 
 /// Ephemeral channel: value is cleared at the start of each superstep
 ///
-/// Has a `consumed` flag set by `consume()`. The value resets between
-/// supersteps and is never persisted.
+/// `consume()` clears the value to `Default` (design 01 §2.5: `EphemeralValue`
+/// only lives one superstep) and tracks a `consumed` flag for idempotency.
+/// The value is never persisted. The Pregel engine additionally clears
+/// ephemeral fields via `State::reset_ephemeral()` at superstep end, so the
+/// one-superstep lifetime is enforced at both the Channel API and the engine.
 #[derive(Debug)]
 pub struct EphemeralChannel<T, R: Reducer<T>> {
     value: T,
@@ -610,6 +617,11 @@ impl<T: Default + Send + Sync + 'static, R: Reducer<T> + Send + Sync + 'static> 
 
     fn consume(&mut self) -> bool {
         let was_consumed = self.consumed;
+        // Design 01 §2.5: EphemeralValue consume() clears the value to Default
+        // so it only lives one superstep. The `consumed` flag additionally
+        // tracks idempotency (whether this channel was already consumed this
+        // superstep), returned as the prior flag state.
+        self.value = T::default();
         self.consumed = true;
         was_consumed
     }
@@ -1043,6 +1055,21 @@ mod tests {
         assert!(!ch.consume()); // consumed was reset by update
     }
 
+    // Design 01 §2.5: EphemeralValue consume() must clear the value to Default
+    // (the value only lives one superstep). The `consumed` flag's prior state is
+    // returned for idempotency. This test pins the value-clearing behavior that
+    // the flag-only implementation previously deferred to reset_ephemeral().
+    #[test]
+    fn ephemeral_channel_consume_clears_value() {
+        let mut ch: EphemeralChannel<i32, ReplaceReducer> = EphemeralChannel::new(0);
+        assert!(ch.update(vec![42]));
+        assert_eq!(*ch.get(), 42);
+
+        let was_consumed = ch.consume();
+        assert!(!was_consumed); // not previously consumed
+        assert_eq!(*ch.get(), 0); // value cleared to Default by consume()
+    }
+
     #[test]
     fn ephemeral_channel_checkpoint_is_none() {
         let ch: EphemeralChannel<i32, ReplaceReducer> = EphemeralChannel::new(3);
@@ -1207,7 +1234,11 @@ mod tests {
     fn append_reducer_accumulates_in_order() {
         let mut val: Vec<i32> = Vec::new();
         AppendReducer::reduce(&mut val, vec![vec![1, 2], vec![3, 4]]);
-        assert_eq!(val, vec![1, 2, 3, 4], "AppendReducer must preserve write order");
+        assert_eq!(
+            val,
+            vec![1, 2, 3, 4],
+            "AppendReducer must preserve write order"
+        );
         // reduce_one fast path extends without building a Vec<Vec<T>>
         AppendReducer::reduce_one(&mut val, vec![5, 6]);
         assert_eq!(val, vec![1, 2, 3, 4, 5, 6]);
@@ -1217,7 +1248,10 @@ mod tests {
     fn last_write_wins_reducer_allows_multiple_last_wins() {
         let mut val = 0;
         LastWriteWinsReducer::reduce(&mut val, vec![1, 2, 3]);
-        assert_eq!(val, 3, "LastWriteWins keeps the last value; must not panic on multi-write");
+        assert_eq!(
+            val, 3,
+            "LastWriteWins keeps the last value; must not panic on multi-write"
+        );
 
         let mut single = 0;
         LastWriteWinsReducer::reduce(&mut single, vec![42]);
@@ -1228,7 +1262,10 @@ mod tests {
     fn any_value_reducer_equal_values_last_wins() {
         let mut val = 0;
         AnyValueReducer::reduce(&mut val, vec![7, 7, 7]);
-        assert_eq!(val, 7, "AnyValue with equal inputs keeps the last without panicking");
+        assert_eq!(
+            val, 7,
+            "AnyValue with equal inputs keeps the last without panicking"
+        );
     }
 
     // debug_assert is only active under the debug profile used by `cargo test`,

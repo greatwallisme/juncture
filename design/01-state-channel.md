@@ -213,20 +213,11 @@ pub trait State: Clone + Send + Sync + std::fmt::Debug + 'static {
     /// proc-macro 生成的 partial update 类型
     type Update: Default + Send + Sync + 'static;
 
-    /// 字段版本追踪类型
-    type FieldVersions: Default + Clone + Send + Sync + 'static;
-
     /// 将 update 合并进 self，返回被修改的字段集合
     fn apply(&mut self, update: Self::Update) -> FieldsChanged;
 
     /// 清除 ephemeral 字段（superstep 结束后调用）
     fn reset_ephemeral(&mut self);
-
-    /// 获取当前字段版本号
-    fn field_versions(&self) -> &Self::FieldVersions;
-
-    /// 递增被修改字段的版本号
-    fn bump_versions(&mut self, changed: &FieldsChanged);
 
     /// schema 版本号
     fn schema_version() -> u32 { 1 }
@@ -310,6 +301,12 @@ pub trait State: Clone + Send + Sync + std::fmt::Debug + 'static {
         &[]
     }
 }
+
+> **Implementation Note (C-01-7)**: The per-state `type FieldVersions`, `fn field_versions()`, and
+> `fn bump_versions()` shown in earlier revisions of this trait have been **removed**. Field version
+> tracking is managed entirely by the engine-side `FieldVersionTracker` (see §2.6: "字段版本号不存储在
+> State 本身，而是由 PregelLoop 管理"). The per-state methods had zero production call sites (dead
+> code), so they were removed to keep the trait minimal; `#[derive(State)]` no longer generates them.
 
 /// CowState: Copy-on-Write State wrapper（默认状态包装器）
 ///
