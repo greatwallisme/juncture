@@ -9,7 +9,7 @@ src/
   lib.rs          -- crate root, re-exports
   spans.rs        -- Span name constants and attribute key constants
   callback.rs     -- GraphCallbackHandler, GraphInterruptEvent, GraphResumeEvent
-  test_utils.rs   -- TestMetricsCollector for asserting metrics in tests
+  test_utils.rs   -- TestMetricsCollector for asserting metrics in tests (gated by feature `test-util` / `cfg(test)`)
   types.rs        -- LlmCacheKeyInput, LlmCachePolicy, ServerInfo
   config.rs       -- TracingConfig, init() builder for OTLP setup (feature `otel`)
   metrics.rs      -- MetricsRegistry for OpenTelemetry metrics (feature `otel`)
@@ -34,6 +34,7 @@ With OTel: use `init().with_service_name("...").install()` (requires `otel` feat
 ## Features
 
 - `otel` -- OpenTelemetry OTLP export (config, metrics modules)
+- `test-util` -- (default-off) test-only utilities such as `TestMetricsCollector`; the `test_utils` module and `pub use test_utils::TestMetricsCollector` are gated by `#[cfg(any(test, feature = "test-util"))]` so test doubles never ship in release builds
 
 ## Testing
 

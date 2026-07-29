@@ -588,6 +588,33 @@ impl MyStore {
 
 ---
 
+## 函数式 API 宏与 RemoteGraph
+
+Juncture 在 `StateGraph` 之上提供了函数式 API 层，并支持跨进程图执行。
+
+### `#[task]` 与 `#[entrypoint]`
+
+两个属性宏均由门面重新导出（`use juncture::{entrypoint, task};`），由 `juncture-derive` 生成（design `03-pregel-engine` §13.3/§14）：
+
+- `#[task(cache = ..., retry = ..., timeout = ..., name = ...)]` 将 `async fn(...) -> Result<O, E>` 包装为返回 `SyncAsyncFuture<O>` 的可调用对象。命中缓存时同步返回、不执行函数体；`retry` 对瞬时失败做指数退避重试，`timeout` 将超时转为 `Err`。
+- `#[entrypoint(checkpointer = ..., cache = ..., retry = ..., timeout = ..., name = ...)]` 标注一个节点兼容函数，并生成 `compile()` 访问器以构建 `CompiledGraph`。它可访问上一次执行的返回值（§14），支持累积/增量工作流。
+
+```rust
+use juncture::task;
+
+// 图级缓存 + 退避重试；仅在未命中时才执行函数体。
+#[task(cache = true, retry = 3)]
+async fn summarize(text: String) -> Result<String, juncture::llm::LlmError> {
+    Ok(format!("summary of: {text}"))
+}
+```
+
+### RemoteGraph
+
+`RemoteGraph`（`juncture_core::graph::remote`）在独立进程中运行已编译的图，并通过客户端/服务端通道暴露。客户端（`GraphClient` / `JunctureClient`）使用与本地图相同的 `invoke` / `stream` API 驱动它，从而在不改变编程模型的前提下实现跨进程或跨服务的图执行。
+
+---
+
 ## 下一步
 
 - [快速入门](getting-started.md) -- 安装和第一个图

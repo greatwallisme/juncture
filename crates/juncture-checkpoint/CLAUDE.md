@@ -10,7 +10,7 @@ src/
   memory.rs    -- MemorySaver implementation
   types.rs     -- DeltaSnapshot, ChannelDelta, TtlConfig, recover_from_deltas()
   serde.rs     -- JsonSerializer, MsgpackSerializer, JsonPlusSerializer, EncryptedSerializer
-  cache.rs     -- BaseCache, MemoryCache for checkpoint caching
+  cache.rs     -- BaseCache, MemoryCache for checkpoint caching; `MemoryCache::new` / `MemoryCache::with_ttl` take a `NonZeroUsize` capacity (a zero-capacity cache is unrepresentable)
   error.rs     -- CheckpointError enum
   sqlite.rs    -- SqliteSaver (feature `sqlite`)
   postgres.rs  -- PostgresSaver (feature `postgres`)

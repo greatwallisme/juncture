@@ -317,8 +317,8 @@ impl Tool for CalculatorTool {
 use juncture::llm::{ChatModel, ChatOpenAI};
 use futures::StreamExt;
 
-let llm = ChatOpenAI::new("sk-...".to_string())
-    .with_model("gpt-4o".to_string());
+let llm = ChatOpenAI::new("sk-...")?
+    .with_model("gpt-4o");
 
 // 单次调用
 let response = llm.invoke(&messages, None).await?;

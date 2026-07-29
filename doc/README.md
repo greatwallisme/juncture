@@ -20,6 +20,14 @@ English | [中文](#中文文档)
 | [示例指南](zh/examples-guide.md) | 所有 17 个示例的详细讲解（01-15、深度研究、遥测） |
 | [高级功能](zh/advanced-features.md) | 流式、人在回路、检查点、错误处理、工具、结构化输出、中间件、遥测、子智能体、Store |
 
+## Changes since v0.2.0 / 自 v0.2.0 以来的变更
+
+- Provider constructors `ChatOpenAI` / `ChatAnthropic` / `ChatOllama::new()` now return `Result<Self, LlmError>` -- propagate with `?` (e.g. `ChatOpenAI::new(key)?`).
+- 提供者构造 `ChatOpenAI` / `ChatAnthropic` / `ChatOllama::new()` 现返回 `Result<Self, LlmError>`，请用 `?` 传播（如 `ChatOpenAI::new(key)?`）。
+- Functional-API macros `#[task]` / `#[entrypoint]` and cross-process `RemoteGraph` are now available -- see [Advanced Features](en/advanced-features.md) / 函数式 API 宏 `#[task]` / `#[entrypoint]` 与跨进程 `RemoteGraph` 已可用，见[高级功能](zh/advanced-features.md)。
+
+See `git log v0.2.0..HEAD` for the full history / 完整历史见 `git log v0.2.0..HEAD`。
+
 ## Quick Links / 快速链接
 
 - **First time?** Start with [Getting Started](en/getting-started.md) / 第一次使用？从[快速入门](zh/getting-started.md)开始

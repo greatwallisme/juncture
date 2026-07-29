@@ -317,8 +317,8 @@ The `ChatModel` trait provides a unified interface for LLM providers:
 use juncture::llm::{ChatModel, ChatOpenAI};
 use futures::StreamExt;
 
-let llm = ChatOpenAI::new("sk-...".to_string())
-    .with_model("gpt-4o".to_string());
+let llm = ChatOpenAI::new("sk-...")?
+    .with_model("gpt-4o");
 
 // Single invocation
 let response = llm.invoke(&messages, None).await?;

@@ -22,11 +22,26 @@ src/
 | `anthropic.rs` | `ChatAnthropic` (feature `anthropic`) -- Anthropic Claude API |
 | `openai.rs` | `ChatOpenAI` (feature `openai`) -- OpenAI GPT API |
 | `ollama.rs` | `ChatOllama` (feature `ollama`) -- Ollama local model API |
-| `mock.rs` | `MockChatModel` for testing (uses `MockError` custom error type) |
+| `mock.rs` | `MockChatModel` for testing (uses `MockError` custom error type); module gated by `#[cfg(any(test, feature = "test-util"))]` (feature `test-util`, off in release builds) |
 | `retry.rs` | `RetryingModel` wrapper with configurable retry policy (`RetryExhaustedError` custom error type) |
 | `pricing.rs` | `ModelPricing`, `PricingTable` for cost tracking |
 | `middleware.rs` | `LlmMiddleware` trait for wrapping individual `ChatModel::invoke()` calls |
 | `circuit_breaker.rs` | `CircuitBreaker` for LLM provider health tracking |
+
+## Provider Constructors (fallible)
+
+Since the breaking API change, all provider constructors return `Result<Self, LlmError>` (they validate the API key / config). Propagate with `?`; never chain `.with_*` off a bare `new(...)`:
+
+```rust
+use juncture::llm::{ChatOpenAI, LlmError};
+
+fn build_model(api_key: &str) -> Result<ChatOpenAI, LlmError> {
+    let model = ChatOpenAI::new(api_key)?.with_model("gpt-4o");
+    Ok(model)
+}
+```
+
+`ChatAnthropic` and `ChatOllama` follow the same fallible `new()` pattern.
 
 ## Tools Module (`tools/`)
 
@@ -57,11 +72,14 @@ src/
 
 ## Features
 
+- `multi-thread` -- (default) true multi-core parallelism via `tokio::spawn` + `JoinSet`; turning it off serializes execution
 - `anthropic` -- Anthropic Claude provider (reqwest + SSE streaming)
 - `openai` -- OpenAI GPT provider (reqwest + SSE streaming)
 - `ollama` -- Ollama local model provider (reqwest)
-- `store` -- Enable `juncture-store` integration
-- `reqwest` -- Enable WebFetchTool and other HTTP-dependent built-in tools
+- `reqwest` -- shared HTTP enablement pulled in by the provider features; also gates `WebFetchTool` and other HTTP-dependent built-in tools
+- `store` -- enable `juncture-store` integration
+- `wasm` -- forward to `juncture-core/wasm` for WASM targets
+- `test-util` -- (default-off) test-only utilities such as `MockChatModel`; the `mock` module is gated by `#[cfg(any(test, feature = "test-util"))]` so test doubles never ship in release builds
 
 ## Testing
 
