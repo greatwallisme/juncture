@@ -117,14 +117,13 @@ async fn auth_middleware(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
 
-    if let Some(encoded) = auth_header.strip_prefix("Basic ") {
-        if let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(encoded) {
-            if let Ok(creds) = String::from_utf8(decoded) {
-                let parts: Vec<&str> = creds.splitn(2, ':').collect();
-                if parts.len() == 2 && parts[0] == public_key && parts[1] == secret_key {
-                    return next.run(req).await;
-                }
-            }
+    if let Some(encoded) = auth_header.strip_prefix("Basic ")
+        && let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(encoded)
+        && let Ok(creds) = String::from_utf8(decoded)
+    {
+        let parts: Vec<&str> = creds.splitn(2, ':').collect();
+        if parts.len() == 2 && parts[0] == public_key && parts[1] == secret_key {
+            return next.run(req).await;
         }
     }
 
@@ -278,10 +277,10 @@ async fn handle_trace_ingestion(
     trace.output = body.get("output").cloned();
 
     // Parse timestamps if provided
-    if let Some(ts) = body.get("timestamp").and_then(|v| v.as_str()) {
-        if let Ok(dt) = DateTime::parse_from_rfc3339(ts) {
-            trace.start_time = dt.with_timezone(&Utc);
-        }
+    if let Some(ts) = body.get("timestamp").and_then(|v| v.as_str())
+        && let Ok(dt) = DateTime::parse_from_rfc3339(ts)
+    {
+        trace.start_time = dt.with_timezone(&Utc);
     }
 
     state.store.upsert_trace(&trace).await

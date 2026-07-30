@@ -627,27 +627,27 @@ impl Store for MemoryStore {
             return Ok(None);
         }
 
-        if self.ttl_config.refresh_on_read {
-            if let Some(ttl) = self.ttl_config.default_ttl {
-                // Phase 2b: write lock -- refresh TTL and return item
-                let now = Utc::now();
-                let new_expires =
-                    now + chrono::Duration::from_std(ttl).unwrap_or(chrono::Duration::MAX);
+        if self.ttl_config.refresh_on_read
+            && let Some(ttl) = self.ttl_config.default_ttl
+        {
+            // Phase 2b: write lock -- refresh TTL and return item
+            let now = Utc::now();
+            let new_expires =
+                now + chrono::Duration::from_std(ttl).unwrap_or(chrono::Duration::MAX);
 
-                let mut data = self.data.write().await;
-                if let Some(ns_map) = data.get_mut(namespace)
-                    && let Some(item) = ns_map.get_mut(key)
-                {
-                    item.expires_at = Some(new_expires);
-                    item.updated_at = now;
-                    let cloned = item.clone();
-                    drop(data);
-                    return Ok(Some(cloned));
-                }
+            let mut data = self.data.write().await;
+            if let Some(ns_map) = data.get_mut(namespace)
+                && let Some(item) = ns_map.get_mut(key)
+            {
+                item.expires_at = Some(new_expires);
+                item.updated_at = now;
+                let cloned = item.clone();
                 drop(data);
-                // Item was removed between read and write phases
-                return Ok(None);
+                return Ok(Some(cloned));
             }
+            drop(data);
+            // Item was removed between read and write phases
+            return Ok(None);
         }
 
         // Phase 2c: read lock -- return item without modification

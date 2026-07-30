@@ -563,34 +563,33 @@ impl<S: State> PregelLoop<S> {
         let mut blocked_ids = std::collections::HashSet::new();
 
         for task in &self.pending_tasks {
-            if let Some(config) = self.circuit_breaker_configs.get(&task.node_name) {
-                if let Some(state) = self.circuit_breaker_states.get_mut(&task.node_name) {
-                    if !state.should_allow(config) {
-                        let failures = state.consecutive_failures();
+            if let Some(config) = self.circuit_breaker_configs.get(&task.node_name)
+                && let Some(state) = self.circuit_breaker_states.get_mut(&task.node_name)
+                && !state.should_allow(config)
+            {
+                let failures = state.consecutive_failures();
 
-                        tracing::warn!(
-                            name: "juncture.circuit_breaker.open",
-                            node_name = %task.node_name,
-                            consecutive_failures = failures,
-                            "Circuit breaker is open, skipping node execution"
-                        );
+                tracing::warn!(
+                    name: "juncture.circuit_breaker.open",
+                    node_name = %task.node_name,
+                    consecutive_failures = failures,
+                    "Circuit breaker is open, skipping node execution"
+                );
 
-                        blocked_outputs.push(crate::pregel::types::TaskOutput {
-                            task_id: task.id.clone(),
-                            node_name: task.node_name.clone(),
-                            command: crate::Command::default(),
-                            duration: std::time::Duration::ZERO,
-                            trigger: crate::pregel::types::TaskTrigger::Pull,
-                            triggered_fields: Vec::new(),
-                            error: Some(crate::JunctureError::execution(format!(
-                                "Circuit breaker open for node '{}': {failures} consecutive failures",
-                                task.node_name,
-                            ))),
-                            circuit_blocked: true,
-                        });
-                        blocked_ids.insert(task.id.clone());
-                    }
-                }
+                blocked_outputs.push(crate::pregel::types::TaskOutput {
+                    task_id: task.id.clone(),
+                    node_name: task.node_name.clone(),
+                    command: crate::Command::default(),
+                    duration: std::time::Duration::ZERO,
+                    trigger: crate::pregel::types::TaskTrigger::Pull,
+                    triggered_fields: Vec::new(),
+                    error: Some(crate::JunctureError::execution(format!(
+                        "Circuit breaker open for node '{}': {failures} consecutive failures",
+                        task.node_name,
+                    ))),
+                    circuit_blocked: true,
+                });
+                blocked_ids.insert(task.id.clone());
             }
         }
 
@@ -616,26 +615,26 @@ impl<S: State> PregelLoop<S> {
         }
 
         for output in outputs {
-            if let Some(config) = self.circuit_breaker_configs.get(&output.node_name) {
-                if let Some(state) = self.circuit_breaker_states.get_mut(&output.node_name) {
-                    // Consume half-open probe budget for tasks that actually executed.
-                    // This must happen before record_success/record_failure because
-                    // those methods may change the circuit state.
-                    state.mark_half_open_attempt();
+            if let Some(config) = self.circuit_breaker_configs.get(&output.node_name)
+                && let Some(state) = self.circuit_breaker_states.get_mut(&output.node_name)
+            {
+                // Consume half-open probe budget for tasks that actually executed.
+                // This must happen before record_success/record_failure because
+                // those methods may change the circuit state.
+                state.mark_half_open_attempt();
 
-                    if output.error.is_some() {
-                        state.record_failure(config);
+                if output.error.is_some() {
+                    state.record_failure(config);
 
-                        tracing::debug!(
-                            name: "juncture.circuit_breaker.failure_recorded",
-                            node_name = %output.node_name,
-                            consecutive_failures = state.consecutive_failures(),
-                            circuit_state = ?state.state(),
-                            "Circuit breaker recorded failure"
-                        );
-                    } else {
-                        state.record_success();
-                    }
+                    tracing::debug!(
+                        name: "juncture.circuit_breaker.failure_recorded",
+                        node_name = %output.node_name,
+                        consecutive_failures = state.consecutive_failures(),
+                        circuit_state = ?state.state(),
+                        "Circuit breaker recorded failure"
+                    );
+                } else {
+                    state.record_success();
                 }
             }
         }
@@ -1507,32 +1506,31 @@ impl<S: State> PregelLoop<S> {
         // this path handles markers that survived a crash. Skipped entirely
         // when no error handlers are registered (no recovery possible) to
         // avoid the `get_tuple` round-trip on the common superstep.
-        if !self.error_handler_map.is_empty() {
-            if let Some(ref cp) = self.checkpointer {
-                if let Ok(Some(tuple)) = cp.get_tuple(&self.runnable_config).await {
-                    // Exclude nodes already scheduled in-memory this superstep
-                    // (failed nodes present in executed_outputs) so the two
-                    // paths do not double-schedule the same recovery.
-                    let already_handled: std::collections::HashSet<String> = executed_outputs
-                        .iter()
-                        .filter_map(|o| o.error.as_ref().map(|_| o.node_name.clone()))
-                        .collect();
-                    let persisted_recovery = schedule_error_handlers_from_writes(
-                        &tuple.pending_writes,
-                        &self.nodes,
-                        &self.error_handler_map,
-                        &already_handled,
-                    );
-                    if !persisted_recovery.is_empty() {
-                        tracing::debug!(
-                            name: "juncture.error_handler.persisted_recovery_tasks",
-                            step = self.step,
-                            count = persisted_recovery.len(),
-                            "Scheduling error handler recovery from persisted markers"
-                        );
-                        self.pending_tasks.extend(persisted_recovery);
-                    }
-                }
+        if !self.error_handler_map.is_empty()
+            && let Some(ref cp) = self.checkpointer
+            && let Ok(Some(tuple)) = cp.get_tuple(&self.runnable_config).await
+        {
+            // Exclude nodes already scheduled in-memory this superstep
+            // (failed nodes present in executed_outputs) so the two
+            // paths do not double-schedule the same recovery.
+            let already_handled: std::collections::HashSet<String> = executed_outputs
+                .iter()
+                .filter_map(|o| o.error.as_ref().map(|_| o.node_name.clone()))
+                .collect();
+            let persisted_recovery = schedule_error_handlers_from_writes(
+                &tuple.pending_writes,
+                &self.nodes,
+                &self.error_handler_map,
+                &already_handled,
+            );
+            if !persisted_recovery.is_empty() {
+                tracing::debug!(
+                    name: "juncture.error_handler.persisted_recovery_tasks",
+                    step = self.step,
+                    count = persisted_recovery.len(),
+                    "Scheduling error handler recovery from persisted markers"
+                );
+                self.pending_tasks.extend(persisted_recovery);
             }
         }
 

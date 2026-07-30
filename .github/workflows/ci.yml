@@ -20,7 +20,7 @@ name: CI
 #     (design checklist coverage + CLAUDE.md/doc drift invariants)
 #   wasm32 build (juncture crates + wasm-example; design 11)
 #   cargo-deny (advisories/licenses/bans/sources supply-chain gate)
-# Plus a separate MSRV (1.87) build job.
+# Plus a separate MSRV (1.88) build job.
 
 on:
   push:
@@ -209,11 +209,11 @@ jobs:
           command: check
 
   msrv:
-    name: MSRV (1.87) build
+    name: MSRV (1.88) build
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.87
+      - uses: dtolnay/rust-toolchain@1.88
       - name: Install SQLite development libraries
         run: sudo apt-get update && sudo apt-get install -y libsqlite3-dev
       - uses: Swatinem/rust-cache@v2

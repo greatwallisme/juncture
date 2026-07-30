@@ -167,14 +167,14 @@ impl TelemetryCollector {
     ) -> Observation {
         let mut obs = Observation::generation(trace_id, "llm_call", model);
         obs.parent_observation_id = parent_id;
-        if self.capture_config.capture_full_messages {
-            if let Some(prompt) = prompt {
-                let serialized = serde_json::to_string(prompt).unwrap_or_default();
-                let truncated = self
-                    .capture_config
-                    .truncate(&serialized, self.capture_config.max_prompt_chars);
-                obs.input = Some(serde_json::Value::String(truncated));
-            }
+        if self.capture_config.capture_full_messages
+            && let Some(prompt) = prompt
+        {
+            let serialized = serde_json::to_string(prompt).unwrap_or_default();
+            let truncated = self
+                .capture_config
+                .truncate(&serialized, self.capture_config.max_prompt_chars);
+            obs.input = Some(serde_json::Value::String(truncated));
         }
         obs
     }

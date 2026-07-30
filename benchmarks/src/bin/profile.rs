@@ -687,10 +687,10 @@ fn main() {
     ];
 
     for (name, runner) in scenarios {
-        if let Some(ref f) = filter {
-            if !name.contains(f.as_str()) {
-                continue;
-            }
+        if let Some(ref f) = filter
+            && !name.contains(f.as_str())
+        {
+            continue;
         }
         status(&format!("Profiling: {name}..."));
         runner(&mut results);

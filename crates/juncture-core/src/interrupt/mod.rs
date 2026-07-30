@@ -230,10 +230,10 @@ pub fn validate_resume_coverage(
     let mut uncovered = Vec::new();
 
     for signal in pending {
-        if let Some(ref id) = signal.id {
-            if !resume_values.contains_key(id) {
-                uncovered.push(id.clone());
-            }
+        if let Some(ref id) = signal.id
+            && !resume_values.contains_key(id)
+        {
+            uncovered.push(id.clone());
         }
     }
 

@@ -185,8 +185,8 @@ fn derive_generates_update_struct() {
         count: Some(42),
         label: Some("test".to_string()),
     };
-    assert!(update.count == Some(42));
-    assert!(update.label == Some("test".to_string()));
+    assert_eq!(update.count, Some(42));
+    assert_eq!(update.label, Some("test".to_string()));
 }
 
 #[test]

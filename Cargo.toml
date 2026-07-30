@@ -26,7 +26,7 @@ repository = "https://github.com/greatwallisme/juncture"
 readme = "README.md"
 keywords = ["llm", "agent", "state-machine", "langgraph", "graph"]
 categories = ["development-tools", "network-programming", "asynchronous"]
-rust-version = "1.87"
+rust-version = "1.88"
 
 [workspace.lints.rust]
 ambiguous_negative_literals = "warn"

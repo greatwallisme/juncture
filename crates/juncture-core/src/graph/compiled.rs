@@ -491,10 +491,10 @@ impl<S: State, I: IntoState<S>, O: FromState<S>> CompiledGraph<S, I, O> {
         // `TASK_CACHE_POLICY` task-local, letting `#[task]` calls within this
         // graph share one cache store.
         run_config.task_cache_policy = self.inner.cache_policy.clone();
-        if let Some(cp) = self.inner.checkpointer.as_ref() {
-            if let Ok(Some(tuple)) = cp.get_tuple(&run_config).await {
-                run_config.previous = tuple.metadata.return_value;
-            }
+        if let Some(cp) = self.inner.checkpointer.as_ref()
+            && let Ok(Some(tuple)) = cp.get_tuple(&run_config).await
+        {
+            run_config.previous = tuple.metadata.return_value;
         }
 
         // Create Pregel loop
@@ -608,12 +608,11 @@ impl<S: State, I: IntoState<S>, O: FromState<S>> CompiledGraph<S, I, O> {
             if let (Some(policy), Some(state_json)) = (
                 self.inner.cache_policy.as_ref(),
                 cache_key_input_json.as_ref(),
-            ) {
-                if let Ok(result_json) = serde_json::to_value(&final_state) {
+            )
+                && let Ok(result_json) = serde_json::to_value(&final_state) {
                     let key = policy.generate_key(state_json, config);
                     policy.put(key, result_json);
                 }
-            }
 
             // Previous Result Injection (design `03-pregel-engine` §14): persist
             // this run's output as `__return__` (metadata.return_value) on the

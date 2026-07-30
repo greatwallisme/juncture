@@ -655,8 +655,11 @@ mod tests {
 
         // Verify schema structure
         assert_eq!(def.parameters["type"], "object");
-        assert!(def.parameters["properties"]["subagent_type"]["type"] == "string");
-        assert!(def.parameters["properties"]["task"]["type"] == "string");
+        assert_eq!(
+            def.parameters["properties"]["subagent_type"]["type"],
+            "string"
+        );
+        assert_eq!(def.parameters["properties"]["task"]["type"], "string");
     }
 
     #[tokio::test]

@@ -548,15 +548,15 @@ impl CachePolicy {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let (value, inserted) = store.get(key)?;
-        if let Some(ttl) = self.ttl {
-            if inserted.elapsed() > ttl {
-                drop(store);
-                self.store
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .remove(key);
-                return None;
-            }
+        if let Some(ttl) = self.ttl
+            && inserted.elapsed() > ttl
+        {
+            drop(store);
+            self.store
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(key);
+            return None;
         }
         Some(value.clone())
     }
@@ -569,10 +569,11 @@ impl CachePolicy {
             .store
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(max) = self.max_entries {
-            if store.len() >= max && !store.contains_key(&key) {
-                store.clear();
-            }
+        if let Some(max) = self.max_entries
+            && store.len() >= max
+            && !store.contains_key(&key)
+        {
+            store.clear();
         }
         store.insert(key, (value, std::time::Instant::now()));
     }
