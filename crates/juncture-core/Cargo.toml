@@ -28,7 +28,7 @@ chrono = { version = "0.4", features = ["serde"] }
 schemars = "0.8"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"], optional = true }
 opentelemetry = { version = "0.27", optional = true }
-sqlx = { version = "0.8", optional = true, default-features = false, features = ["runtime-tokio", "chrono"] }
+sqlx = { version = "0.9", optional = true, default-features = false, features = ["runtime-tokio", "chrono"] }
 
 # Browser-only: wasm32-unknown-unknown
 # On browser WASM, reqwest uses Fetch API (wasm-bindgen). Remove rustls-tls
