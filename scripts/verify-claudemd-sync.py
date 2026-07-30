@@ -63,6 +63,30 @@ def extract_section(text: str, header: str) -> str:
     return "\n".join(out)
 
 
+def extract_toml_table(text: str, table: str) -> str:
+    """Return the body of a TOML `[table]` (lines until the next table header)."""
+    header = f"[{table}]"
+    out: list[str] = []
+    cap = False
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("[") and not stripped.startswith("[["):
+            if cap:
+                break
+            cap = stripped == header
+        elif cap:
+            out.append(line)
+    return "\n".join(out)
+
+
+def _lint_group_is_warn(block: str, group: str) -> bool:
+    """True if `group` is enabled at warn level, in either table form
+    (`group = { level = "warn", ... }`) or string form (`group = "warn"`)."""
+    if re.search(rf'^{group}\s*=\s*\{{[^}}]*"warn"', block, re.M):
+        return True
+    return bool(re.search(rf'^{group}\s*=\s*"warn"', block, re.M))
+
+
 def cargo_feature_keys(cargo_text: str) -> set[str]:
     keys: set[str] = set()
     in_features = False
@@ -182,6 +206,31 @@ def check_files_present() -> tuple[bool, str]:
     return True, f"all {len(CLAUDEMD_FILES)} CLAUDE.md files present"
 
 
+def check_clippy_lint_config() -> tuple[bool, str]:
+    """The docs claim clippy enables the `all`/`pedantic`/`nursery`/`cargo`
+    groups wholesale plus a *curated subset* of `restriction` lints (not the
+    whole restriction group). Assert Cargo.toml matches that posture and that
+    CLAUDE.md points at the lint table as source of truth -- this is the exact
+    drift that previously had the doc claiming wholesale `restriction`."""
+    cargo = read(REPO / "Cargo.toml")
+    block = extract_toml_table(cargo, "workspace.lints.clippy")
+    if not block:
+        return False, "root Cargo.toml missing [workspace.lints.clippy]"
+    missing = [g for g in ("all", "pedantic", "nursery", "cargo")
+               if not _lint_group_is_warn(block, g)]
+    if missing:
+        return False, f"[workspace.lints.clippy] missing warn-level groups: {missing}"
+    if re.search(r'^restriction\s*=\s*\{', block, re.M) or re.search(r'^restriction\s*=\s*"warn"', block, re.M):
+        return False, "[workspace.lints.clippy] enables `restriction` wholesale; docs claim only a curated subset"
+    individual = re.findall(r'^([a-z0-9_]+)\s*=\s*"warn"', block, re.M)
+    if len(individual) < 5:
+        return False, f"[workspace.lints.clippy] has too few individual warn lints: {individual}"
+    if "[workspace.lints.clippy]" not in read(REPO / "CLAUDE.md"):
+        return False, "root CLAUDE.md lint line must reference `[workspace.lints.clippy]` as source of truth"
+    return True, (f"clippy groups all/pedantic/nursery/cargo + {len(individual)} curated "
+                  f"restriction lints; CLAUDE.md points to Cargo.toml")
+
+
 CHECKS = [
     ("facade Features match Cargo.toml", check_features_match_cargo),
     ("tracing test-util documented", check_tracing_test_util),
@@ -189,6 +238,7 @@ CHECKS = [
     ("provider new() is Result", check_provider_new_result),
     ("crate module refs resolve", check_module_refs),
     ("checkpoint MemoryCache NonZeroUsize", check_cache_nonzero),
+    ("clippy lint config matches docs", check_clippy_lint_config),
     ("CLAUDE.md files present", check_files_present),
 ]
 

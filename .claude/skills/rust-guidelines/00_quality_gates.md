@@ -6,7 +6,7 @@ ALL Rust code must pass with zero errors and zero warnings.
 
 **This is non-negotiable:**
 - rustc errors/warnings
-- cargo clippy (all, pedantic, nursery, cargo, restriction)
+- cargo clippy (`all`/`pedantic`/`nursery`/`cargo` groups + a curated subset of `restriction` lints; see `[workspace.lints.clippy]` in `Cargo.toml`)
 - cargo doc warnings
 - cargo fmt issues
 - cargo test failures

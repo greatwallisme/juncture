@@ -89,7 +89,7 @@ python3 scripts/verify-doc-sync.py         # doc/ invariants (fallible provider 
 
 ## Constraints
 
-- All Rust code must pass with zero warnings and zero errors (clippy pedantic/nursery/cargo/restriction)
+- All Rust code must pass with zero warnings and zero errors (clippy `all`/`pedantic`/`nursery`/`cargo` groups enabled wholesale, plus a curated subset of `restriction` lints — see `[workspace.lints.clippy]` in the root `Cargo.toml` for the authoritative list)
 - Never use `unwrap()`, `todo!()`, `unimplemented!()` in committed code
 - Never write placeholder/mock code
 - Never use file-level `#![allow(...)]` or `#![expect(...)]` -- always apply `#[allow(...)]` or `#[expect(...)]` at the item level (function, struct, field, impl block) with a reason

@@ -1,0 +1,31 @@
+# Dependabot configuration for the Juncture workspace.
+# Keeps Cargo dependencies and GitHub Actions versions current. PRs follow the
+# repo's conventional-commit style (`deps(...)`). Reviewer discretion still
+# gates merges -- CI (cargo-deny + the full test matrix) runs on every PR.
+
+version: 2
+
+updates:
+  # Workspace Cargo dependencies (root Cargo.toml covers all member crates).
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 10
+    commit-message:
+      prefix: "deps"
+      include: "scope"
+    labels:
+      - "dependencies"
+
+  # GitHub Actions used by .github/workflows/*.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "deps"
+      include: "scope"
+    labels:
+      - "dependencies"
+      - "github-actions"

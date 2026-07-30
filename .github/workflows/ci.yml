@@ -7,6 +7,19 @@ name: CI
 #   cargo test --workspace --all-targets --all-features
 #   cargo test --workspace --doc --all-features
 #   RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps
+# The build/test/doc job also runs a postgres:16 service container and exports
+# TEST_POSTGRES_URL, so the `--all-features` Postgres integration tests
+# (juncture-checkpoint::postgres, juncture-core::store PostgresStore) execute
+# against a live database instead of self-skipping.
+# Additional CI-only gates beyond the local quality gate:
+#   cargo hack check --each-feature / default / no-default-features
+#     (catches cfg-gate errors that --all-features masks)
+#   agent-spec guard --spec-dir specs --code .
+#     (14 semantic conformance contracts, design modules 01-10)
+#   scripts/verify-design-coverage.py / verify-claudemd-sync.py / verify-doc-sync.py
+#     (design checklist coverage + CLAUDE.md/doc drift invariants)
+#   wasm32 build (juncture crates + wasm-example; design 11)
+#   cargo-deny (advisories/licenses/bans/sources supply-chain gate)
 # Plus a separate MSRV (1.87) build job.
 
 on:
@@ -49,6 +62,27 @@ jobs:
   build-test-doc:
     name: build + test + doc
     runs-on: ubuntu-latest
+    env:
+      # Drives the real-backend Postgres integration tests in
+      # juncture-checkpoint::postgres (7 tests) and juncture-core::store
+      # (PostgresStore parity, store spec #13). With `--all-features` these
+      # tests are compiled; without a live DB they self-skip, so the service
+      # container below is what makes them actually run.
+      TEST_POSTGRES_URL: postgresql://postgres:postgres@localhost:5432/test
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -65,6 +99,114 @@ jobs:
         env:
           RUSTDOCFLAGS: "-D warnings"
         run: cargo doc --workspace --all-features --no-deps
+
+  feature-matrix:
+    name: feature matrix
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install SQLite development libraries
+        run: sudo apt-get update && sudo apt-get install -y libsqlite3-dev
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-hack
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-hack
+      # `--all-features` masks cfg-gate errors (commits 433c7d8/970fbd3 broke the
+      # default build unseen). These three checks prove every feature set compiles.
+      - name: Each feature compiles (no dev-deps)
+        run: cargo hack check --each-feature --no-dev-deps --workspace
+      - name: Default features build
+        run: cargo check --workspace --locked
+      - name: No-default-features per crate
+        run: cargo hack check --no-default-features --workspace
+
+  agent-spec:
+    name: agent-spec conformance (14 specs)
+    runs-on: ubuntu-latest
+    env:
+      # The store (#13) and checkpoint specs bind the live-DB Postgres tests;
+      # this service makes them execute instead of self-skipping.
+      TEST_POSTGRES_URL: postgresql://postgres:postgres@localhost:5432/test
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install SQLite development libraries
+        run: sudo apt-get update && sudo apt-get install -y libsqlite3-dev
+      - uses: Swatinem/rust-cache@v2
+      - name: Install agent-spec (pinned to verified version)
+        run: cargo install agent-spec --locked --version 1.2.0
+      - name: Guard (lint + verify all 14 specs against source)
+        run: agent-spec guard --spec-dir specs --code .
+
+  verify-scripts:
+    name: design/doc-drift invariants
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Stdlib-only Python; no toolchain needed. Pins the invariants the local
+      # session hooks already enforce so a merged PR cannot drift them silently.
+      - name: Design coverage (216 checklist items)
+        run: python3 scripts/verify-design-coverage.py
+      - name: CLAUDE.md sync invariants
+        run: python3 scripts/verify-claudemd-sync.py
+      - name: doc/ sync invariants
+        run: python3 scripts/verify-doc-sync.py
+
+  wasm:
+    name: wasm32 build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      # design/11-wasm.md target. `--no-default-features --features wasm` drops
+      # native-only deps (sqlite/postgres/reqwest). The juncture crates build
+      # clean (warnings are allowed; this is a compiles-for-wasm32 gate).
+      - name: Check juncture crates compile for wasm32
+        run: |
+          cargo check --target wasm32-unknown-unknown -p juncture-core       --no-default-features --features wasm
+          cargo check --target wasm32-unknown-unknown -p juncture            --no-default-features --features wasm
+          cargo check --target wasm32-unknown-unknown -p juncture-checkpoint --no-default-features --features wasm
+      # wasm-example is the real wasm-bindgen cdylib (excluded from the
+      # workspace, so it needs --manifest-path).
+      - name: Check wasm-example (wasm-bindgen cdylib)
+        run: cargo check --manifest-path examples/wasm-example/Cargo.toml --target wasm32-unknown-unknown
+      # NOTE: examples/wasm-edge-{cli,server} are WASI/Spin targets, not plain
+      # wasm32-unknown-unknown, and need their own toolchain -- intentionally
+      # out of scope for this job.
+
+  cargo-deny:
+    name: supply chain (cargo-deny)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # deny.toml at repo root. Advisories deny known vulns + yanked crates;
+      # licenses use an explicit allowlist; bans/sources warn on dupes and deny
+      # non-crates.io sources. Runs against all features.
+      - name: cargo-deny (advisories + licenses + bans + sources)
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
 
   msrv:
     name: MSRV (1.87) build

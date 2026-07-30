@@ -1,0 +1,65 @@
+# cargo-deny configuration for the Juncture workspace.
+#
+# Run locally and in CI:
+#     cargo deny check
+#
+# Gate posture:
+#   * advisories: deny known vulnerabilities and yanked crates; *warn* on
+#     unmaintained crates (surfaced, not blocking) so the gate can be green
+#     today without forcing a sweep of every soft-deprecated transitive dep.
+#   * licenses: deny anything outside the explicit allowlist below.
+#   * bans: *warn* on duplicate/wildcard versions -- the project already
+#     tolerates duplicates (clippy `multiple_crate_versions = "allow"`), so we
+#     surface them without failing the gate.
+#   * sources: only crates.io is allowed; git/path-sourced deps are denied.
+
+[graph]
+all-features = true
+no-default-features = false
+
+[advisories]
+version = 2
+db-path = "$CARGO_HOME/advisory-dbs"
+db-urls = ["https://github.com/rustsec/advisory-db"]
+yanked = "deny"
+# Scope of unmaintained-advisory checking: only workspace-member crates. Keeps
+# the gate meaningful for our own crates without failing on transitive deps we
+# don't directly control.
+unmaintained = "workspace"
+ignore = []
+
+[licenses]
+version = 2
+allow = [
+    "MIT",
+    "MIT-0",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "BSL-1.0",
+    "CDLA-Permissive-2.0",
+    "Unicode-DFS-2016",
+    "Unicode-3.0",
+    "CC0-1.0",
+    "0BSD",
+    "Unlicense",
+]
+confidence-threshold = 0.8
+
+[bans]
+multiple-versions = "warn"
+wildcards = "warn"
+highlight = "all"
+allow = []
+deny = []
+skip = []
+skip-tree = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
