@@ -110,7 +110,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libsqlite3-dev
       - uses: Swatinem/rust-cache@v2
       - name: Install cargo-hack
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@v2.85.6
         with:
           tool: cargo-hack
       # `--all-features` masks cfg-gate errors (commits 433c7d8/970fbd3 broke the
