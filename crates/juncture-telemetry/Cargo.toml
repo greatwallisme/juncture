@@ -33,7 +33,7 @@ tokio = { version = "1", features = ["sync", "time", "macros", "rt-multi-thread"
 reqwest = { version = "0.12", features = ["json"] }
 
 # Storage (sqlx with SQLite runtime - shared with juncture-core)
-sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "chrono", "derive"], optional = true }
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "sqlite", "chrono", "derive"], optional = true }
 
 # Web
 axum = { version = "0.8", features = ["json", "query"], optional = true }
