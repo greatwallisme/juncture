@@ -82,7 +82,10 @@ pub enum CompiledEdge<S: State> {
     Conditional {
         /// Router function
         router: Arc<dyn Router<S>>,
-        /// Path mapping for validation
+        /// Translates the router's branch label into the target node name at
+        /// runtime; a label that is not a key must name a registered node (or
+        /// `END`) instead. Its values also declare the static target set used
+        /// for topology validation and graph export.
         path_map: super::PathMap,
     },
 }

@@ -183,7 +183,9 @@ impl<S: State> StateGraph<S> {
     ) -> &mut Self;
 
     /// 添加条件边：from 执行完毕后，调用 router 决定下一步。
-    /// path_map 声明所有可能的分支目标（用于拓扑验证和图导出）。
+    /// path_map 将 router 返回的分支标签翻译为目标节点名（运行时生效；
+    /// 未命中键的标签必须命名已注册节点或 END，否则报执行错误），其值
+    /// 同时用于拓扑验证和图导出。
     pub fn add_conditional_edges(
         &mut self,
         from: impl Into<String>,

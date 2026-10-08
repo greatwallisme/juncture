@@ -11,7 +11,7 @@ use crate::{
     state::FieldsChanged,
 };
 use indexmap::IndexMap;
-use std::{collections::HashMap, collections::HashSet};
+use std::{collections::HashMap, collections::HashSet, sync::Arc};
 
 /// Field version tracker for Pregel execution
 ///
@@ -354,6 +354,8 @@ impl VersionsSeen {
 ///
 /// * `completed_tasks` - Tasks that completed in the previous superstep
 /// * `trigger_table` - Graph's trigger table
+/// * `nodes` - Compiled node table, used to validate conditional routing
+///   targets against registered nodes
 /// * `state` - Current state
 ///
 /// # Returns
@@ -362,9 +364,9 @@ impl VersionsSeen {
 ///
 /// # Errors
 ///
-/// Returns an error if:
-/// - A conditional edge router fails to execute
-/// - A conditional edge returns no target
+/// Returns an error if a conditional edge router fails to execute, or if the
+/// router returns a label that is neither a key in the edge's `path_map` nor
+/// a registered node name.
 ///
 /// # Examples
 ///
@@ -375,13 +377,15 @@ impl VersionsSeen {
 ///
 /// # let completed_tasks = vec![];
 /// # let trigger_table = TriggerTable::<MyState>::new();
+/// # let nodes = IndexMap::new();
 /// # let state = MyState;
-/// let next_tasks = compute_next_tasks(&completed_tasks, &trigger_table, &state)?;
+/// let next_tasks = compute_next_tasks(&completed_tasks, &trigger_table, &trigger_to_nodes, &nodes, &state)?;
 /// ```
 pub async fn compute_next_tasks<S: State>(
     completed_tasks: &[TaskOutput<S>],
     trigger_table: &TriggerTable<S>,
     trigger_to_nodes: &TriggerToNodes,
+    nodes: &IndexMap<String, Arc<dyn crate::Node<S>>>,
     state: &S,
 ) -> Result<Vec<PendingTask<S>>, JunctureError> {
     let mut next_tasks = Vec::new();
@@ -398,20 +402,18 @@ pub async fn compute_next_tasks<S: State>(
                 let triggered =
                     trigger_to_nodes.triggered_nodes(std::slice::from_ref(&task_output.node_name));
 
-                // Filter outgoing edges to only those leading to triggered nodes
                 if let Some(edges) = trigger_table.outgoing.get(&task_output.node_name) {
                     for edge in edges {
-                        // Only process edges that lead to triggered nodes
-                        if should_process_edge(edge, state, &triggered).await? {
-                            process_edge(
-                                edge,
-                                state,
-                                &mut next_tasks,
-                                &mut seen_nodes,
-                                &task_output.node_name,
-                            )
-                            .await?;
-                        }
+                        process_edge(
+                            edge,
+                            state,
+                            nodes,
+                            &triggered,
+                            &mut next_tasks,
+                            &mut seen_nodes,
+                            &task_output.node_name,
+                        )
+                        .await?;
                     }
                 }
             }
@@ -459,37 +461,31 @@ pub async fn compute_next_tasks<S: State>(
     Ok(next_tasks)
 }
 
-/// Check if an edge should be processed based on triggered nodes
+/// Process a single edge and schedule the tasks it routes to
 ///
-/// For fixed edges, checks if the target is in the triggered set.
-/// For conditional edges, the router is executed to determine the actual target.
-async fn should_process_edge<S: State>(
-    edge: &CompiledEdge<S>,
-    state: &S,
-    triggered_nodes: &HashSet<String>,
-) -> Result<bool, JunctureError> {
-    match edge {
-        CompiledEdge::Fixed { target } => Ok(triggered_nodes.contains(target)),
-        CompiledEdge::Conditional { router, .. } => {
-            let route_result = router.route(state).await?;
-            Ok(route_result
-                .as_target()
-                .is_some_and(|t| triggered_nodes.contains(t)))
-        }
-    }
-}
-
-/// Process a single edge and add appropriate tasks
+/// The router of a conditional edge is invoked exactly once per edge and
+/// superstep (issue #15: the previous two-phase gate + process design invoked
+/// it twice). Its return value is a branch label that is translated through
+/// the edge's `path_map` before use; a label that is not a key falls back to
+/// being used as the node name directly, so routers that return node names
+/// (or `END`) keep working. A label that is neither a `path_map` key nor a
+/// registered node fails with an execution error instead of silently stopping
+/// the graph (issue #15).
 async fn process_edge<S: State>(
     edge: &CompiledEdge<S>,
     state: &S,
+    nodes: &IndexMap<String, Arc<dyn crate::Node<S>>>,
+    triggered_nodes: &HashSet<String>,
     next_tasks: &mut Vec<PendingTask<S>>,
     seen_nodes: &mut HashSet<String>,
     from_node: &str,
 ) -> Result<(), JunctureError> {
     match edge {
         CompiledEdge::Fixed { target } => {
-            if target != crate::edge::END && !seen_nodes.contains(target) {
+            if triggered_nodes.contains(target)
+                && target != crate::edge::END
+                && !seen_nodes.contains(target)
+            {
                 seen_nodes.insert(target.clone());
                 next_tasks.push(PendingTask::pull(
                     uuid::Uuid::new_v4().to_string(),
@@ -497,20 +493,25 @@ async fn process_edge<S: State>(
                 ));
             }
         }
-        CompiledEdge::Conditional { router, .. } => {
+        CompiledEdge::Conditional { router, path_map } => {
             let route_result = router.route(state).await?;
-            let target = route_result.as_target().ok_or_else(|| {
-                JunctureError::execution(format!(
-                    "Conditional edge from '{from_node}' returned no target: {route_result:?}"
-                ))
-            })?;
-
-            if target != crate::edge::END && !seen_nodes.contains(target) {
-                seen_nodes.insert(target.to_string());
-                next_tasks.push(PendingTask::pull(
-                    uuid::Uuid::new_v4().to_string(),
-                    target.to_string(),
-                ));
+            for label in route_result.targets() {
+                let target = path_map.get(label).map_or(label, String::as_str);
+                if !path_map.contains_key(label)
+                    && !nodes.contains_key(target)
+                    && target != crate::edge::END
+                {
+                    return Err(JunctureError::execution(format!(
+                        "Conditional edge from '{from_node}' routed to '{label}', which is neither a path_map key nor a registered node"
+                    )));
+                }
+                if target != crate::edge::END && !seen_nodes.contains(target) {
+                    seen_nodes.insert(target.to_string());
+                    next_tasks.push(PendingTask::pull(
+                        uuid::Uuid::new_v4().to_string(),
+                        target.to_string(),
+                    ));
+                }
             }
         }
     }
@@ -1086,6 +1087,7 @@ pub fn get_error_handler_node(
 mod scheduler_tests {
     use super::*;
     use crate::node::IntoNode;
+    use std::pin::Pin;
 
     // FieldVersionTracker / VersionsSeen unit coverage (design 01 §2.6).
     // These scheduling-critical primitives previously had only doc-tests; the
@@ -1917,9 +1919,247 @@ mod scheduler_tests {
         assert_eq!(tasks[0].node_name, "node_b");
         assert!(handled.contains("node_a"));
     }
+
+    // Regression tests for issue #15: conditional edges must resolve the
+    // router's return value through the edge's `path_map` before scheduling.
+    // The previous implementation destructured `path_map` away and used the
+    // raw router output as a node name, so any non-identity map silently
+    // stopped the graph after one superstep.
+
+    /// Test router returning one label (`One`) or several (`Multiple`) and
+    /// counting how many times the engine invoked it.
+    struct LabelRouter {
+        labels: Vec<&'static str>,
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl crate::edge::Router<TestState> for LabelRouter {
+        fn route(
+            &self,
+            _state: &TestState,
+        ) -> Pin<
+            Box<dyn Future<Output = Result<crate::edge::RouteResult, JunctureError>> + Send + '_>,
+        > {
+            use std::sync::atomic::Ordering;
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let result = if self.labels.len() == 1 {
+                crate::edge::RouteResult::One(self.labels[0].to_string())
+            } else {
+                crate::edge::RouteResult::Multiple(
+                    self.labels.iter().map(|&label| label.to_string()).collect(),
+                )
+            };
+            Box::pin(async move { Ok(result) })
+        }
+    }
+
+    /// Build a registered-node table containing the given node names.
+    fn registered_nodes(names: &[&str]) -> IndexMap<String, Arc<dyn crate::Node<TestState>>> {
+        names
+            .iter()
+            .map(|&name| {
+                let node: Arc<dyn crate::Node<TestState>> =
+                    crate::node::NodeFnUpdate(|_state: &TestState| {
+                        Box::pin(async { Ok(TestUpdate) })
+                    })
+                    .into_node(name);
+                (name.to_string(), node)
+            })
+            .collect()
+    }
+
+    /// Build a conditional edge whose router returns `labels` with the
+    /// indirection map from issue #15 (branch labels are not node names).
+    /// Returns the edge plus the router's invocation counter.
+    fn labeled_conditional_edge(
+        labels: Vec<&'static str>,
+    ) -> (CompiledEdge<TestState>, Arc<std::sync::atomic::AtomicUsize>) {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let edge = CompiledEdge::Conditional {
+            router: Arc::new(LabelRouter {
+                labels,
+                calls: Arc::clone(&calls),
+            }),
+            path_map: crate::edge::PathMap::from(
+                &[("continue", "plan"), ("done", crate::edge::END)][..],
+            ),
+        };
+        (edge, calls)
+    }
+
+    /// Run `process_edge` on `edge` with the given registered nodes and
+    /// triggered set; returns the scheduled task node names.
+    async fn run_process_edge(
+        edge: &CompiledEdge<TestState>,
+        nodes: &IndexMap<String, Arc<dyn crate::Node<TestState>>>,
+        triggered: &[&str],
+    ) -> Result<Vec<String>, JunctureError> {
+        let mut next_tasks: Vec<PendingTask<TestState>> = Vec::new();
+        let mut seen_nodes = HashSet::new();
+        let triggered: HashSet<String> = triggered.iter().map(|&name| name.to_string()).collect();
+        process_edge(
+            edge,
+            &TestState,
+            nodes,
+            &triggered,
+            &mut next_tasks,
+            &mut seen_nodes,
+            "source",
+        )
+        .await?;
+        Ok(next_tasks.into_iter().map(|task| task.node_name).collect())
+    }
+
+    #[tokio::test]
+    async fn process_edge_conditional_resolves_router_label_through_path_map() {
+        // Router yields the branch label "continue"; the map must translate
+        // it to the node "plan" instead of looking up a node named "continue".
+        let (edge, _calls) = labeled_conditional_edge(vec!["continue"]);
+        let nodes = registered_nodes(&["plan"]);
+
+        let scheduled = run_process_edge(&edge, &nodes, &["plan"])
+            .await
+            .expect("routing should succeed");
+
+        assert_eq!(scheduled, vec!["plan".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn process_edge_conditional_maps_done_label_to_end_schedules_nothing() {
+        // Router yields "done", which the map translates to END: no task
+        // must be scheduled.
+        let (edge, _calls) = labeled_conditional_edge(vec!["done"]);
+        let nodes = registered_nodes(&["plan"]);
+
+        let scheduled = run_process_edge(&edge, &nodes, &[])
+            .await
+            .expect("routing should succeed");
+
+        assert!(scheduled.is_empty());
+    }
+
+    #[tokio::test]
+    async fn process_edge_conditional_falls_back_to_identity_for_registered_node() {
+        // A label absent from the map falls back to identity when it names a
+        // registered node: routers that return node names directly keep
+        // working (LangGraph's `path_map=None` mode).
+        let edge = CompiledEdge::Conditional {
+            router: Arc::new(LabelRouter {
+                labels: vec!["plan"],
+                calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            }),
+            path_map: crate::edge::PathMap::new(),
+        };
+        let nodes = registered_nodes(&["plan"]);
+
+        let scheduled = run_process_edge(&edge, &nodes, &[])
+            .await
+            .expect("routing should succeed");
+
+        assert_eq!(scheduled, vec!["plan".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn process_edge_conditional_end_label_with_empty_map_terminates() {
+        // A router returning END with an empty map terminates the branch
+        // instead of failing node validation.
+        let edge = CompiledEdge::Conditional {
+            router: Arc::new(LabelRouter {
+                labels: vec![crate::edge::END],
+                calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            }),
+            path_map: crate::edge::PathMap::new(),
+        };
+        let nodes = registered_nodes(&["plan"]);
+
+        let scheduled = run_process_edge(&edge, &nodes, &[])
+            .await
+            .expect("routing should succeed");
+
+        assert!(scheduled.is_empty());
+    }
+
+    #[tokio::test]
+    async fn process_edge_conditional_unknown_label_is_error() {
+        // A label that is neither a `path_map` key nor a registered node must
+        // fail loudly instead of silently stopping the graph (issue #15).
+        let (edge, _calls) = labeled_conditional_edge(vec!["bogus"]);
+        let nodes = registered_nodes(&["plan"]);
+
+        let error = run_process_edge(&edge, &nodes, &[])
+            .await
+            .expect_err("unknown label must error");
+
+        assert!(
+            error.to_string().contains("bogus"),
+            "error must name the offending label, got: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn process_edge_conditional_resolves_each_multiple_branch() {
+        // RouteResult::Multiple: every branch label is resolved through the
+        // map and scheduled independently.
+        let edge = CompiledEdge::Conditional {
+            router: Arc::new(LabelRouter {
+                labels: vec!["continue", "done"],
+                calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            }),
+            path_map: crate::edge::PathMap::from(&[("continue", "plan"), ("done", "wrap_up")][..]),
+        };
+        let nodes = registered_nodes(&["plan", "wrap_up"]);
+
+        let scheduled = run_process_edge(&edge, &nodes, &["plan", "wrap_up"])
+            .await
+            .expect("routing should succeed");
+
+        assert_eq!(scheduled.len(), 2);
+        assert!(scheduled.contains(&"plan".to_string()));
+        assert!(scheduled.contains(&"wrap_up".to_string()));
+    }
+
+    /// The router must run exactly once per edge per superstep. The previous
+    /// implementation routed once in the gate check and again when processing
+    /// the edge, doubling work for async/LLM-backed routers (issue #15
+    /// secondary finding).
+    #[tokio::test]
+    async fn process_edge_conditional_invokes_router_exactly_once() {
+        use std::sync::atomic::Ordering;
+
+        let (edge, calls) = labeled_conditional_edge(vec!["continue"]);
+        let nodes = registered_nodes(&["plan"]);
+
+        let scheduled = run_process_edge(&edge, &nodes, &["plan"])
+            .await
+            .expect("routing should succeed");
+
+        assert_eq!(scheduled, vec!["plan".to_string()]);
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "router must run exactly once"
+        );
+    }
+
+    #[tokio::test]
+    async fn process_edge_fixed_keeps_triggered_gate() {
+        // Fixed edges keep the pre-fix behavior: target scheduled only when
+        // present in the triggered set.
+        let edge = CompiledEdge::Fixed {
+            target: "plan".to_string(),
+        };
+        let nodes = registered_nodes(&["plan"]);
+
+        let scheduled = run_process_edge(&edge, &nodes, &["plan"])
+            .await
+            .expect("fixed edge processing should succeed");
+        assert_eq!(scheduled, vec!["plan".to_string()]);
+
+        let scheduled = run_process_edge(&edge, &nodes, &["other"])
+            .await
+            .expect("fixed edge processing should succeed");
+        assert!(scheduled.is_empty());
+    }
 }
 
-// Rust guideline compliant 2026-05-20
-
-// Rust guideline compliant 2026-05-19
-// Rust guideline compliant 2026-05-20
+// Rust guideline compliant 2026-10-08

@@ -178,8 +178,11 @@ impl RouteResult {
 
 /// Path mapping for conditional edges
 ///
-/// Maps router return values to target node names. Used for validation
-/// and graph visualization.
+/// Maps router return values (branch labels) to target node names. The Pregel
+/// scheduler resolves the router's raw return value through this map before
+/// scheduling; a label that is not a key must name a registered node (or
+/// `END`) instead. Its values also feed graph visualization and topology
+/// validation.
 ///
 /// # Examples
 ///

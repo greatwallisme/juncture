@@ -1092,19 +1092,20 @@ pub fn compute_next_tasks<S: State>(
                         }
                     }
                     CompiledEdge::Conditional { router, path_map } => {
+                        // router 每个超步对每条边只调用一次；返回值是分支标签，
+                        // 先经 path_map 翻译为目标节点名。未命中键的标签必须
+                        // 命名已注册节点（或 END），否则报执行错误（issue #15）。
                         let route_result = router.route(state).await?;
-                        match route_result {
-                            RouteResult::One(target) => {
-                                if target != END && seen_nodes.insert(target.clone()) {
-                                    next_tasks.push(PendingTask::pull(target.clone()));
-                                }
+                        for label in route_result.targets() {
+                            let target = path_map.get(label).map(String::as_str).unwrap_or(label);
+                            if !path_map.contains_key(label)
+                                && !nodes.contains_key(target)
+                                && target != END
+                            {
+                                return Err(unexpected_branch(label));
                             }
-                            RouteResult::Multiple(targets) => {
-                                for target in targets {
-                                    if target != END && seen_nodes.insert(target.clone()) {
-                                        next_tasks.push(PendingTask::pull(target.clone()));
-                                    }
-                                }
+                            if target != END && seen_nodes.insert(target.to_string()) {
+                                next_tasks.push(PendingTask::pull(target.to_string()));
                             }
                         }
                     }
@@ -1112,10 +1113,22 @@ pub fn compute_next_tasks<S: State>(
             }
         }
     }
-    
+
     Ok(next_tasks)
 }
 ```
+
+**翻译与失败语义（issue #15）**：
+
+- `path_map` 是**翻译映射**：router 返回的每个分支标签先经
+  `path_map.get(label)` 翻译为目标节点名；未命中键的标签回退为原始值
+  使用，以兼容直接返回节点名的 router 与 `END`（LangGraph
+  `path_map=None` 模式）。
+- router 在同一超步内对同一条边**只调用一次**（不得为"过滤"与"调度"
+  各调用一次）。
+- `RouteResult::Multiple` 的每个元素独立完成翻译与调度。
+- 一个既不是 `path_map` 键、也不是已注册节点（或 `END`）的标签必须
+  返回执行错误（`JunctureError`），而不是静默终止图。
 
 ### 6.2 调度优先级
 

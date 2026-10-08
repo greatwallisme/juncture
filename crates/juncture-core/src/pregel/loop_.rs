@@ -1444,6 +1444,7 @@ impl<S: State> PregelLoop<S> {
             &executed_outputs,
             &self.trigger_table,
             &self.trigger_to_nodes,
+            &self.nodes,
             &self.state,
         )
         .await?;

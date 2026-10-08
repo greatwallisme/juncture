@@ -1498,6 +1498,12 @@ impl<S: State, I: IntoState<S>, O: FromState<S>> StateGraph<S, I, O> {
     /// graph.add_conditional_edges("decide", Arc::new(router), path_map)?;
     /// ```
     ///
+    /// At runtime the router's return value is translated through
+    /// `path_map`: each returned branch label is mapped to its target node,
+    /// and a label that is not a key must name a registered node (or `END`)
+    /// instead, otherwise execution fails with an error. The router is
+    /// invoked exactly once per superstep.
+    ///
     /// # Errors
     ///
     /// This method doesn't validate node existence or path map targets.
