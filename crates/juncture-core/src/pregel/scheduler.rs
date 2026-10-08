@@ -2035,7 +2035,7 @@ mod scheduler_tests {
             .await
             .expect("routing should succeed");
 
-        assert!(scheduled.is_empty());
+        assert!(scheduled.is_empty(), "no task must be scheduled");
     }
 
     #[tokio::test]
@@ -2076,7 +2076,7 @@ mod scheduler_tests {
             .await
             .expect("routing should succeed");
 
-        assert!(scheduled.is_empty());
+        assert!(scheduled.is_empty(), "no task must be scheduled");
     }
 
     #[tokio::test]
@@ -2158,7 +2158,7 @@ mod scheduler_tests {
         let scheduled = run_process_edge(&edge, &nodes, &["other"])
             .await
             .expect("fixed edge processing should succeed");
-        assert!(scheduled.is_empty());
+        assert!(scheduled.is_empty(), "no task must be scheduled");
     }
 }
 

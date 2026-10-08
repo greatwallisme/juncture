@@ -1148,7 +1148,10 @@ mod tests {
             chunk.tool_call_chunks[0].name.as_deref(),
             Some("get_weather")
         );
-        assert!(chunk.tool_call_chunks[0].args_delta.is_empty());
+        assert!(
+            chunk.tool_call_chunks[0].args_delta.is_empty(),
+            "assistant preamble chunk must carry no tool-call argument delta"
+        );
         assert_eq!(chunk.tool_call_chunks[0].index, 0);
     }
 

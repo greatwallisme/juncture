@@ -481,7 +481,10 @@ mod tests {
     #[test]
     fn trace_new_has_id_and_name() {
         let trace = Trace::new("test_graph");
-        assert!(!trace.name.is_empty());
+        assert!(
+            !trace.name.is_empty(),
+            "trace name must be preserved through persistence"
+        );
         assert!(trace.end_time.is_none());
     }
 

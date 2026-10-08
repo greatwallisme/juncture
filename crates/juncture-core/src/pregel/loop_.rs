@@ -4980,7 +4980,10 @@ mod tests {
         while let Ok(event) = rx.try_recv() {
             if let StreamEvent::Custom { node, data, ns } = event {
                 assert_eq!(node, "test_node");
-                assert!(ns.is_empty());
+                assert!(
+                    ns.is_empty(),
+                    "top-level custom event must carry no namespace"
+                );
                 custom_data.push(data);
             }
         }

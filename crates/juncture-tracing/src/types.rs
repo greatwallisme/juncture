@@ -380,7 +380,10 @@ mod tests {
 
         assert_eq!(input.model, "claude-3");
         assert_eq!(input.messages.len(), 1);
-        assert!(input.tools.is_empty());
+        assert!(
+            input.tools.is_empty(),
+            "serialized input must default to no tools"
+        );
         assert!(input.config.is_none());
     }
 }

@@ -977,7 +977,10 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(result.is_empty());
+        assert!(
+            result.is_empty(),
+            "no resume values must resolve without pending interrupts"
+        );
     }
 
     #[tokio::test]
@@ -1254,7 +1257,10 @@ mod tests {
     fn test_match_resume_none_returns_empty() {
         let scratchpad = Scratchpad::new();
         let result = match_resume_to_interrupts(&None, &[], &scratchpad);
-        assert!(result.is_empty());
+        assert!(
+            result.is_empty(),
+            "no resume values must resolve without pending interrupts"
+        );
     }
 
     #[test]
@@ -1556,7 +1562,10 @@ mod tests {
 
         // No pending interrupts -> no resume values to resolve.
         let result = match_resume_to_interrupts(&resume, &[], &scratchpad);
-        assert!(result.is_empty());
+        assert!(
+            result.is_empty(),
+            "no resume values must resolve without pending interrupts"
+        );
     }
 
     #[test]

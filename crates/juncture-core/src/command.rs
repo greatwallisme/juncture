@@ -310,25 +310,37 @@ mod tests {
     #[test]
     fn command_default_has_empty_stream_data() {
         let cmd = Command::<TestState>::default();
-        assert!(cmd.stream_data.is_empty());
+        assert!(
+            cmd.stream_data.is_empty(),
+            "command must not carry stream data"
+        );
     }
 
     #[test]
     fn command_update_has_empty_stream_data() {
         let cmd = Command::<TestState>::update(TestUpdate);
-        assert!(cmd.stream_data.is_empty());
+        assert!(
+            cmd.stream_data.is_empty(),
+            "command must not carry stream data"
+        );
     }
 
     #[test]
     fn command_goto_has_empty_stream_data() {
         let cmd = Command::<TestState>::goto("target");
-        assert!(cmd.stream_data.is_empty());
+        assert!(
+            cmd.stream_data.is_empty(),
+            "command must not carry stream data"
+        );
     }
 
     #[test]
     fn command_end_has_empty_stream_data() {
         let cmd = Command::<TestState>::end();
-        assert!(cmd.stream_data.is_empty());
+        assert!(
+            cmd.stream_data.is_empty(),
+            "command must not carry stream data"
+        );
     }
 
     #[test]
@@ -370,12 +382,18 @@ mod tests {
     #[test]
     fn command_send_has_empty_stream_data() {
         let cmd = Command::<TestState>::send(vec![]);
-        assert!(cmd.stream_data.is_empty());
+        assert!(
+            cmd.stream_data.is_empty(),
+            "command must not carry stream data"
+        );
     }
 
     #[test]
     fn command_goto_parent_has_empty_stream_data() {
         let cmd = Command::<TestState>::goto_parent("parent");
-        assert!(cmd.stream_data.is_empty());
+        assert!(
+            cmd.stream_data.is_empty(),
+            "command must not carry stream data"
+        );
     }
 }

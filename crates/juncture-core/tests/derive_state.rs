@@ -415,7 +415,10 @@ fn subset_extract_omits_parent_only_fields() {
 
     // Child state has no age field -- only name and messages are visible
     assert_eq!(child.name, "Bob");
-    assert!(child.messages.is_empty());
+    assert!(
+        child.messages.is_empty(),
+        "child state must start with empty messages"
+    );
 }
 
 #[test]

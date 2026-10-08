@@ -109,7 +109,7 @@ impl<S: State> StreamHandle<S> {
     }
 
     /// Consumes the handle, returning the run ID and stream as a tuple.
-    #[must_use]
+    #[must_use = "dropping the tuple drops the stream handle and ends the run"]
     #[allow(
         clippy::type_complexity,
         reason = "return type mirrors StreamHandle fields"
@@ -797,6 +797,11 @@ impl<S: State, I: IntoState<S>, O: FromState<S>> CompiledGraph<S, I, O> {
     #[expect(
         clippy::unused_async,
         reason = "function signature follows async convention for consistency with invoke_async"
+    )]
+    #[allow(
+        unknown_lints,
+        clippy::unused_async_trait_impl,
+        reason = "unused_async_trait_impl only exists since clippy 1.99 (CI stable); older toolchains would reject it as an unknown lint. The body must stay lazy: it wires channels and spawns the PregelLoop task that should only start on first poll, and the awaits live inside nested unfold blocks"
     )]
     pub async fn stream_with_config(
         &self,
@@ -4220,8 +4225,14 @@ mod tests {
     #[test]
     fn test_compile_config_default_is_empty() {
         let config = super::super::CompileConfig::default();
-        assert!(config.interrupt_before.is_empty());
-        assert!(config.interrupt_after.is_empty());
+        assert!(
+            config.interrupt_before.is_empty(),
+            "interrupt_before must default to empty"
+        );
+        assert!(
+            config.interrupt_after.is_empty(),
+            "interrupt_after must default to empty"
+        );
     }
 
     #[test]
@@ -4712,7 +4723,7 @@ mod tests {
             })
             .collect();
 
-        assert!(!filtered.is_empty());
+        assert!(!filtered.is_empty(), "filter must keep matching events");
 
         for data in &filtered {
             assert!(
@@ -4882,7 +4893,10 @@ mod tests {
             state: StateDummy,
             step: 0,
         };
-        assert!(event.namespace().is_empty());
+        assert!(
+            event.namespace().is_empty(),
+            "top-level event must carry no namespace"
+        );
     }
 
     #[test]
@@ -4892,13 +4906,19 @@ mod tests {
             update: StateDummyUpdate,
             step: 0,
         };
-        assert!(event.namespace().is_empty());
+        assert!(
+            event.namespace().is_empty(),
+            "top-level event must carry no namespace"
+        );
     }
 
     #[test]
     fn test_stream_event_namespace_end_is_empty() {
         let event: StreamEvent<StateDummy> = StreamEvent::End { output: StateDummy };
-        assert!(event.namespace().is_empty());
+        assert!(
+            event.namespace().is_empty(),
+            "top-level event must carry no namespace"
+        );
     }
 
     #[test]
@@ -4908,7 +4928,10 @@ mod tests {
             task_id: "t".to_string(),
             step: 0,
         };
-        assert!(event.namespace().is_empty());
+        assert!(
+            event.namespace().is_empty(),
+            "top-level event must carry no namespace"
+        );
     }
 
     #[test]
@@ -4918,7 +4941,10 @@ mod tests {
                 step: 0,
                 pending_nodes: vec![],
             });
-        assert!(event.namespace().is_empty());
+        assert!(
+            event.namespace().is_empty(),
+            "top-level event must carry no namespace"
+        );
     }
 
     // --- Tests for subgraph_filter in stream_with_config ---
@@ -4944,9 +4970,15 @@ mod tests {
         // When include_subgraphs is false, subgraph_filter is irrelevant.
 
         // Top-level event should always pass
-        assert!(top_level_event.namespace().is_empty());
+        assert!(
+            top_level_event.namespace().is_empty(),
+            "top-level event must carry no namespace"
+        );
         // Subgraph event has namespace
-        assert!(!subgraph_event.namespace().is_empty());
+        assert!(
+            !subgraph_event.namespace().is_empty(),
+            "subgraph event must carry its namespace"
+        );
 
         // Filtering logic (mirrors the forwarding task):
         // if !ns.is_empty() && !include_subgraphs { skip }
@@ -5053,7 +5085,10 @@ mod tests {
         };
 
         let include_subgraphs = false;
-        assert!(!subgraph_messages.namespace().is_empty());
+        assert!(
+            !subgraph_messages.namespace().is_empty(),
+            "subgraph event must carry its namespace"
+        );
 
         let ns = subgraph_messages.namespace();
         let should_skip = !ns.is_empty() && !include_subgraphs;
@@ -5075,7 +5110,10 @@ mod tests {
         };
 
         let include_subgraphs = false;
-        assert!(!subgraph_interrupt.namespace().is_empty());
+        assert!(
+            !subgraph_interrupt.namespace().is_empty(),
+            "subgraph event must carry its namespace"
+        );
 
         let ns = subgraph_interrupt.namespace();
         let should_skip = !ns.is_empty() && !include_subgraphs;
@@ -5102,7 +5140,10 @@ mod tests {
 
         // Has non-empty namespace (correctly identified as subgraph event)
         assert_eq!(nested_event.namespace(), &["parent", "child"]);
-        assert!(!nested_event.namespace().is_empty());
+        assert!(
+            !nested_event.namespace().is_empty(),
+            "nested subgraph event must carry its namespace"
+        );
 
         let should_skip = !nested_event.namespace().is_empty() && !include_subgraphs;
         assert!(

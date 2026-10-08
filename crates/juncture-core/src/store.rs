@@ -1727,11 +1727,10 @@ fn bytea_to_vector(bytes: &[u8]) -> Result<Vec<f32>, StoreError> {
         ));
     }
     let vec = bytes
-        .chunks_exact(std::mem::size_of::<f32>())
-        .map(|chunk| {
-            let arr: [u8; 4] = chunk.try_into().expect("chunk is exactly 4 bytes");
-            f32::from_le_bytes(arr)
-        })
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|chunk| f32::from_le_bytes(*chunk))
         .collect();
     Ok(vec)
 }
@@ -1759,11 +1758,10 @@ fn blob_to_vector(bytes: &[u8]) -> Result<Vec<f32>, StoreError> {
         ));
     }
     let vec = bytes
-        .chunks_exact(std::mem::size_of::<f32>())
-        .map(|chunk| {
-            let arr: [u8; 4] = chunk.try_into().expect("chunk is exactly 4 bytes");
-            f32::from_le_bytes(arr)
-        })
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|chunk| f32::from_le_bytes(*chunk))
         .collect();
     Ok(vec)
 }

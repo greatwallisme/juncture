@@ -854,7 +854,10 @@ mod tests {
         let registry = MetricsRegistry::new();
         let histogram = registry.histogram("test_histogram", |b| b);
 
-        assert!(histogram.get_values().is_empty());
+        assert!(
+            histogram.get_values().is_empty(),
+            "fresh histogram must have no observations"
+        );
         histogram.record(1.0);
         histogram.record(2.5);
         histogram.record(3.0);

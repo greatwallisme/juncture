@@ -435,7 +435,10 @@ mod tests {
     fn test_default() {
         let collector = TestMetricsCollector::default();
         assert_eq!(collector.get_counter("test"), 0);
-        assert!(collector.get_histogram_values("test").is_empty());
+        assert!(
+            collector.get_histogram_values("test").is_empty(),
+            "no histogram values must be recorded before any observation"
+        );
         assert_eq!(collector.get_gauge("test"), None);
     }
 
@@ -501,7 +504,10 @@ mod tests {
         metrics.clear();
 
         assert_eq!(metrics.get_counter("counter"), 0);
-        assert!(metrics.get_histogram_values("histogram").is_empty());
+        assert!(
+            metrics.get_histogram_values("histogram").is_empty(),
+            "no histogram values must be recorded before any observation"
+        );
         assert_eq!(metrics.get_gauge("gauge"), None);
     }
 
