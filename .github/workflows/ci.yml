@@ -38,7 +38,7 @@ jobs:
     name: rustfmt
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
@@ -49,7 +49,7 @@ jobs:
     name: clippy (deny warnings)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
@@ -84,7 +84,7 @@ jobs:
           --health-timeout 5s
           --health-retries 5
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - name: Install SQLite development libraries
         run: sudo apt-get update && sudo apt-get install -y libsqlite3-dev
@@ -104,7 +104,7 @@ jobs:
     name: feature matrix
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - name: Install SQLite development libraries
         run: sudo apt-get update && sudo apt-get install -y libsqlite3-dev
@@ -144,7 +144,7 @@ jobs:
           --health-timeout 5s
           --health-retries 5
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - name: Install SQLite development libraries
         run: sudo apt-get update && sudo apt-get install -y libsqlite3-dev
@@ -158,7 +158,7 @@ jobs:
     name: design/doc-drift invariants
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # Stdlib-only Python; no toolchain needed. Pins the invariants the local
       # session hooks already enforce so a merged PR cannot drift them silently.
       - name: Design coverage (216 checklist items)
@@ -172,7 +172,7 @@ jobs:
     name: wasm32 build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
@@ -197,7 +197,7 @@ jobs:
     name: supply chain (cargo-deny)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       # deny.toml at repo root. Advisories deny known vulns + yanked crates;
@@ -212,7 +212,7 @@ jobs:
     name: MSRV (1.88) build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.88
       - name: Install SQLite development libraries
         run: sudo apt-get update && sudo apt-get install -y libsqlite3-dev
