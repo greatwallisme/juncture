@@ -12,3 +12,4 @@ __pycache__
 .shadow
 .shadow.local
 shadow.toml
+.planning
