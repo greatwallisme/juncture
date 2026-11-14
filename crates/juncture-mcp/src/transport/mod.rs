@@ -35,6 +35,13 @@ pub trait McpTransport: Send + Sync {
         None
     }
 
+    /// Register a tool's input schema so a transport can mirror
+    /// `x-mcp-header`-annotated arguments into request headers.
+    ///
+    /// Only transports that carry per-request headers (Streamable HTTP) act on
+    /// this; the default is a no-op.
+    fn register_tool_schema(&self, _tool_name: &str, _schema: serde_json::Value) {}
+
     /// Human-readable transport kind, for diagnostics.
     fn kind(&self) -> &'static str;
 }

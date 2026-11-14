@@ -20,6 +20,14 @@ use crate::protocol::{CacheScope, McpTool};
 /// "cache forever", because a stale tool table silently changes the LLM prefix.
 pub const DEFAULT_TTL: Duration = Duration::from_secs(60);
 
+/// Upper bound on a server-supplied `ttlMs`.
+///
+/// A server controls this value, and `Instant::now() + Duration::from_millis(u64::MAX)`
+/// overflows and panics inside a request path. Clamping also bounds staleness:
+/// a tool table pinned longer than a day is indistinguishable from a bug, and a
+/// stale table is worse than a refetch.
+pub const MAX_TTL: Duration = Duration::from_secs(24 * 60 * 60);
+
 /// Cache key for one page of a `tools/list` result.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct CacheKey {
@@ -89,10 +97,18 @@ impl ToolListCache {
     ) -> Option<(Vec<McpTool>, Option<String>)> {
         let key = Self::key(server_id, scope, auth_fingerprint, cursor);
         let now = Instant::now();
-        // Take ownership of the entry: an expired one is simply not reinserted,
-        // which evicts it without a second lookup or a clone.
-        let entry = self.lock().remove(&key)?;
+        // A live entry is cloned out and stays in the map: a lookup must not
+        // consume the page, or the second read of a warm list falls through to
+        // the server. An expired entry is removed here, which is the only place
+        // expiry can be observed. The clone happens under the lock and the guard
+        // is released before returning, so a caller serializing a tool table
+        // never holds the cache mutex.
+        let entry = {
+            let entries = self.lock();
+            entries.get(&key).cloned()
+        }?;
         if now >= entry.expires_at {
+            self.lock().remove(&key);
             return None;
         }
         Some((entry.tools, entry.next_cursor))
@@ -152,7 +168,11 @@ impl ToolListCache {
         }
 
         let key = Self::key(server_id, scope, auth_fingerprint, cursor);
-        let ttl = ttl_ms.map_or(DEFAULT_TTL, Duration::from_millis);
+        // Clamp before constructing the deadline: the TTL is server-controlled
+        // and an unclamped `Instant + Duration` can overflow and panic.
+        let ttl = ttl_ms
+            .map_or(DEFAULT_TTL, Duration::from_millis)
+            .min(MAX_TTL);
         let entry = CacheEntry {
             tools,
             next_cursor,
@@ -326,6 +346,68 @@ mod tests {
             )
             .expect("store");
         assert!(cache.get("srv", CacheScope::Public, None, None).is_none());
+    }
+
+    #[test]
+    fn test_repeated_reads_keep_the_entry_live() {
+        // A lookup must not consume the page: without this, the second read of
+        // a warm list falls through to the server and the cache never hits.
+        let cache = ToolListCache::new();
+        cache
+            .put(
+                "srv",
+                CacheScope::Public,
+                None,
+                None,
+                vec![tool("a")],
+                None,
+                Some(60_000),
+            )
+            .expect("store");
+
+        for attempt in 0..3 {
+            assert!(
+                cache.get("srv", CacheScope::Public, None, None).is_some(),
+                "read {attempt} must hit"
+            );
+        }
+        assert_eq!(cache.live_len(), 1, "the page must still be cached");
+    }
+
+    #[test]
+    fn test_expired_entry_is_evicted_on_read() {
+        let cache = ToolListCache::new();
+        cache
+            .put(
+                "srv",
+                CacheScope::Public,
+                None,
+                None,
+                vec![tool("a")],
+                None,
+                Some(0),
+            )
+            .expect("store");
+        assert!(cache.get("srv", CacheScope::Public, None, None).is_none());
+        assert_eq!(cache.live_len(), 0);
+    }
+
+    #[test]
+    fn test_absurd_ttl_is_clamped_not_overflowing() {
+        // `ttlMs` is server-controlled; an unclamped deadline addition panics.
+        let cache = ToolListCache::new();
+        cache
+            .put(
+                "srv",
+                CacheScope::Public,
+                None,
+                None,
+                vec![tool("a")],
+                None,
+                Some(u64::MAX),
+            )
+            .expect("a hostile ttlMs must not panic the client");
+        assert!(cache.get("srv", CacheScope::Public, None, None).is_some());
     }
 
     #[test]

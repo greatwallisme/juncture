@@ -8,12 +8,14 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use futures::StreamExt as _;
 use serde_json::Value;
 
 use crate::cache::ToolListCache;
 use crate::protocol::{
-    CacheScope, DiscoverResult, JsonRpcRequest, JsonRpcResponse, MCP_PROTOCOL_VERSION, McpError,
-    McpResult, McpTool, ResultType, ToolCallResult, ToolsListResult,
+    CacheScope, DiscoverResult, JsonRpcRequest, JsonRpcResponse, LEGACY_PROTOCOL_VERSION,
+    MCP_PROTOCOL_VERSION, McpError, McpResult, McpTool, ResultType, ToolCallResult,
+    ToolsListResult,
 };
 use crate::transport::McpTransport;
 
@@ -56,9 +58,12 @@ impl std::fmt::Debug for McpClient {
 impl McpClient {
     /// Discover a server and negotiate a protocol version.
     ///
-    /// Sends `server/discover` first, as §1.4 requires. A transport error is
-    /// surfaced rather than silently degrading, because a discover failure on a
-    /// modern server means the endpoint or headers are wrong.
+    /// Sends `server/discover` first, as §1.4 requires. A server that predates
+    /// 2026-07-28 does not implement it and answers `-32601 Method not found`;
+    /// that is the documented compatibility probe, so the client falls back to
+    /// the legacy `initialize` handshake and remembers the mode. A transport
+    /// fault is still surfaced, because an unreachable endpoint is never a
+    /// version negotiation outcome.
     ///
     /// # Errors
     ///
@@ -83,7 +88,17 @@ impl McpClient {
             tool_cache: ToolListCache::new(),
         };
 
-        let discovered = client.discover().await?;
+        let discovered = match client.discover().await {
+            Ok(discovered) => discovered,
+            // `-32601` on `server/discover` is the specified legacy probe:
+            // the server is old, not broken.
+            Err(McpError::Protocol(error))
+                if error.code == crate::protocol::JsonRpcError::METHOD_NOT_FOUND =>
+            {
+                return client.into_legacy().await;
+            }
+            Err(error) => return Err(error),
+        };
         let mode = Self::negotiate_mode(&discovered)?;
 
         Ok(Self {
@@ -91,6 +106,42 @@ impl McpClient {
             mode,
             ..client
         })
+    }
+
+    /// Complete the legacy `initialize` handshake.
+    ///
+    /// Legacy servers have no `server/discover`, and a failed `initialize` is a
+    /// real connection failure rather than a version-negotiation result, so the
+    /// error is returned. The negotiated mode is stored so later requests stop
+    /// sending modern-only `_meta`.
+    async fn into_legacy(mut self) -> Result<Self, McpError> {
+        // Switch modes before `initialize`: the handshake itself is a legacy
+        // request and must not carry the modern `_meta` envelope.
+        self.mode = ProtocolMode::Legacy;
+        let params = serde_json::json!({
+            "protocolVersion": LEGACY_PROTOCOL_VERSION,
+            "clientInfo": {"name": "juncture-mcp", "version": env!("CARGO_PKG_VERSION")},
+            "capabilities": {"tools": {}},
+        });
+        let response = self.send("initialize", Some(params)).await?;
+        let payload = Self::extract_result(response)?;
+        let initialized: crate::protocol::InitializeResult =
+            serde_json::from_value(payload).map_err(McpError::from)?;
+
+        self.server_info = DiscoverResult {
+            supported_versions: vec![
+                initialized
+                    .protocol_version
+                    .unwrap_or_else(|| LEGACY_PROTOCOL_VERSION.to_string()),
+            ],
+            capabilities: crate::protocol::ServerCapabilities {
+                tools: initialized.capabilities.tools,
+            },
+            server_info: initialized.server_info,
+            ttl_ms: None,
+            cache_scope: None,
+        };
+        Ok(self)
     }
 
     /// Build a client for unit tests that never performs I/O.
@@ -134,6 +185,16 @@ impl McpClient {
     #[must_use]
     pub fn server_id(&self) -> &str {
         &self.server_id
+    }
+
+    /// The underlying transport.
+    ///
+    /// Exposed so a toolset can register tool schemas for `x-mcp-header`
+    /// mirroring: only the transport knows how to turn an annotation into a
+    /// request header.
+    #[must_use]
+    pub fn transport(&self) -> &Arc<dyn McpTransport> {
+        &self.transport
     }
 
     /// Run `server/discover`.
@@ -263,10 +324,38 @@ impl McpClient {
 
     /// Invalidate cached tool lists for this server.
     ///
-    /// Called when `notifications/tools/list_changed` arrives, which must take
-    /// effect immediately rather than at TTL expiry (§1.7).
+    /// Takes effect immediately rather than at TTL expiry (§1.7).
     pub fn invalidate_tool_cache(&self) {
         self.tool_cache.invalidate_server(&self.server_id);
+    }
+
+    /// Apply one server notification.
+    ///
+    /// The protocol's only actionable notification for a tools-only client is
+    /// `notifications/tools/list_changed`: the tool table feeds the LLM prefix
+    /// segment S1, so a stale table both misroutes calls and silently changes
+    /// the cache prefix. Callers drive this from
+    /// [`McpTransport::notifications`].
+    pub fn handle_notification(&self, notification: &crate::protocol::JsonRpcNotification) {
+        if notification.method == "notifications/tools/list_changed" {
+            self.invalidate_tool_cache();
+        }
+    }
+
+    /// Drain the transport's notification stream until it closes.
+    ///
+    /// Returns `None` when the transport provides no stream (the default), so a
+    /// caller can invoke this unconditionally. Intended to run for the life of
+    /// the connection.
+    pub fn spawn_notification_listener(self: &Arc<Self>) -> Option<tokio::task::JoinHandle<()>> {
+        let stream = self.transport.notifications()?;
+        let client = Arc::clone(self);
+        Some(tokio::spawn(async move {
+            let mut stream = std::pin::pin!(stream);
+            while let Some(notification) = stream.next().await {
+                client.handle_notification(&notification);
+            }
+        }))
     }
 
     /// Call a tool and return the raw result envelope.
@@ -293,17 +382,7 @@ impl McpClient {
             });
         }
 
-        // `isError: true` is a tool-side failure the model must see, not a
-        // client-side failure. Surface it typed so the adapter maps it correctly.
-        if let Some(value) = &result.result {
-            let call: ToolCallResult = serde_json::from_value(value.clone())?;
-            if call.is_error {
-                return Err(McpError::ToolExecution {
-                    message: call.text(),
-                });
-            }
-        }
-
+        Self::reject_tool_error(&result)?;
         Ok(result)
     }
 
@@ -341,13 +420,41 @@ impl McpClient {
                 request_state: result.request_state,
             });
         }
+
+        // The retry is a normal tool call: an `isError` payload must map to the
+        // same typed error `call_tool` produces, or a failed retry would be
+        // returned as success.
+        Self::reject_tool_error(&result)?;
         Ok(result)
+    }
+
+    /// Translate an `isError: true` payload into [`McpError::ToolExecution`].
+    ///
+    /// `isError` is a tool-side failure the model must see and act on, so it is
+    /// reported with the tool's own text rather than as a transport fault
+    /// (design `12` §1.10).
+    fn reject_tool_error(result: &McpResult) -> Result<(), McpError> {
+        if let Some(value) = &result.result {
+            let call: ToolCallResult = serde_json::from_value(value.clone())?;
+            if call.is_error {
+                return Err(McpError::ToolExecution {
+                    message: call.text(),
+                });
+            }
+        }
+        Ok(())
     }
 
     /// Send one request with a fresh id and translate a JSON-RPC error.
     async fn send(&self, method: &str, params: Option<Value>) -> Result<JsonRpcResponse, McpError> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let request = JsonRpcRequest::with_meta(Value::from(id), method, params);
+        // Legacy servers predate the mandatory `_meta` envelope and reject or
+        // ignore unknown params; the legacy flag is why the mode is remembered.
+        let request = if self.mode == ProtocolMode::Legacy {
+            JsonRpcRequest::without_meta(Value::from(id), method, params)
+        } else {
+            JsonRpcRequest::with_meta(Value::from(id), method, params)
+        };
         let response = self.transport.request(request).await?;
 
         if let Some(error) = response.error {
@@ -538,6 +645,53 @@ mod tests {
             transport.seen_methods().len(),
             before,
             "cache must avoid refetch"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_tools_list_changed_invalidates_the_cached_table() {
+        // The tool table is prefix segment S1: a stale one both misroutes
+        // calls and silently changes the cache prefix, so the notification must
+        // force a refetch rather than waiting for the TTL.
+        let transport = Arc::new(ScriptedTransport::new(vec![
+            response(
+                1,
+                json!({"supportedVersions": [MCP_PROTOCOL_VERSION], "serverInfo": {}}),
+            ),
+            response(
+                2,
+                json!({
+                    "tools": [{"name": "old", "inputSchema": {}}],
+                    "ttlMs": 600_000,
+                    "cacheScope": "public"
+                }),
+            ),
+            response(
+                3,
+                json!({
+                    "tools": [{"name": "new", "inputSchema": {}}],
+                    "ttlMs": 600_000,
+                    "cacheScope": "public"
+                }),
+            ),
+        ]));
+        let client = connect_with(Arc::clone(&transport)).await;
+
+        let first = client.list_all_tools(None).await.expect("first");
+        assert_eq!(first[0].name, "old");
+
+        client.handle_notification(&crate::protocol::JsonRpcNotification {
+            method: "notifications/tools/list_changed".to_string(),
+            params: None,
+        });
+
+        let second = client
+            .list_all_tools(None)
+            .await
+            .expect("after invalidation");
+        assert_eq!(
+            second[0].name, "new",
+            "a list_changed notification must not serve the stale table"
         );
     }
 
@@ -784,8 +938,28 @@ mod tests {
 
     #[tokio::test]
     async fn test_jsonrpc_error_is_protocol_error() {
+        // Not `-32601`: that code is the legacy compatibility probe on
+        // `server/discover` and triggers the `initialize` fallback instead.
         let transport: Arc<dyn McpTransport> =
             Arc::new(ScriptedTransport::new(vec![Ok(JsonRpcResponse {
+                id: json!(1),
+                result: None,
+                error: Some(crate::protocol::JsonRpcError {
+                    code: crate::protocol::JsonRpcError::HEADER_MISMATCH,
+                    message: "header mismatch".to_string(),
+                    data: None,
+                }),
+            })]));
+        let result = McpClient::connect(transport, "srv").await;
+        assert!(matches!(result, Err(McpError::HeaderMismatch)));
+    }
+
+    #[tokio::test]
+    async fn test_legacy_server_without_discover_falls_back_to_initialize() {
+        // A pre-2026 server answers `server/discover` with -32601; the client
+        // must run the `initialize` handshake and remember legacy mode.
+        let transport = Arc::new(ScriptedTransport::new(vec![
+            Ok(JsonRpcResponse {
                 id: json!(1),
                 result: None,
                 error: Some(crate::protocol::JsonRpcError {
@@ -793,8 +967,68 @@ mod tests {
                     message: "Method not found".to_string(),
                     data: None,
                 }),
-            })]));
-        let result = McpClient::connect(transport, "srv").await;
-        assert!(matches!(result, Err(McpError::Protocol(_))));
+            }),
+            response(
+                2,
+                json!({
+                    "protocolVersion": LEGACY_PROTOCOL_VERSION,
+                    "capabilities": {"tools": {}},
+                    "serverInfo": {"name": "legacy", "version": "0.9"}
+                }),
+            ),
+        ]));
+
+        let client = connect_with_legacy(Arc::clone(&transport)).await;
+        assert_eq!(client.mode(), ProtocolMode::Legacy);
+        assert_eq!(client.server_info().server_info.name, "legacy");
+        assert_eq!(
+            transport.seen_methods(),
+            vec!["server/discover", "initialize"]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_legacy_request_omits_protocol_meta() {
+        let transport = Arc::new(ScriptedTransport::new(vec![
+            Ok(JsonRpcResponse {
+                id: json!(1),
+                result: None,
+                error: Some(crate::protocol::JsonRpcError {
+                    code: crate::protocol::JsonRpcError::METHOD_NOT_FOUND,
+                    message: "Method not found".to_string(),
+                    data: None,
+                }),
+            }),
+            response(2, json!({"serverInfo": {"name": "legacy"}})),
+            response(3, json!({"tools": []})),
+        ]));
+        let client = connect_with_legacy(Arc::clone(&transport)).await;
+        let _ = client.list_tools_page(None, None).await.expect("list");
+
+        // The `initialize` request and every later request must omit `_meta`:
+        // legacy servers do not understand the envelope.
+        let legacy_requests = transport.seen.lock().expect("lock");
+        for request in legacy_requests
+            .iter()
+            .filter(|r| r.method != "server/discover")
+        {
+            let has_meta = request
+                .params
+                .as_ref()
+                .and_then(|params| params.get("_meta"))
+                .is_some();
+            assert!(
+                !has_meta,
+                "legacy request {} must not carry _meta",
+                request.method
+            );
+        }
+    }
+
+    async fn connect_with_legacy(transport: Arc<ScriptedTransport>) -> McpClient {
+        let transport: Arc<dyn McpTransport> = transport;
+        McpClient::connect(transport, "legacy")
+            .await
+            .expect("legacy connect")
     }
 }

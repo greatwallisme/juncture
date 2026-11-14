@@ -205,8 +205,17 @@ impl McpToolset {
         client: &Arc<McpClient>,
     ) {
         for tool in tools {
+            let qualified = crate::naming::qualified_name(server_alias, &tool.name);
+            // The transport mirrors `x-mcp-header` arguments into request
+            // headers on `tools/call`; it can only do that for tools it has a
+            // schema for. The key is the *unqualified* name because that is
+            // what goes on the wire as `params.name`; the qualified name exists
+            // only on the model's side.
+            client
+                .transport()
+                .register_tool_schema(&tool.name, tool.input_schema.clone());
             self.entries.push(McpToolEntry::new(
-                crate::naming::qualified_name(server_alias, &tool.name),
+                qualified,
                 server_alias.to_string(),
                 tool.name.clone(),
                 crate::naming::annotated_description(server_alias, &tool.description),

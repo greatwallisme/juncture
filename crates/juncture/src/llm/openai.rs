@@ -317,6 +317,11 @@ impl ChatModel for ChatOpenAI {
             "juncture.tokens.output" = tracing::field::Empty,
             "juncture.llm.has_tool_calls" = false,
             "juncture.llm.stop_reason" = tracing::field::Empty,
+            // `Span::record` drops undeclared fields silently; cache
+            // observability depends on these being declared here.
+            "juncture.llm.cache.read_tokens" = tracing::field::Empty,
+            "juncture.llm.cache.write_tokens" = tracing::field::Empty,
+            "juncture.llm.cache.hit_rate" = tracing::field::Empty,
         );
         #[cfg(not(target_family = "wasm"))]
         let _enter = span.enter();
@@ -357,6 +362,7 @@ impl ChatModel for ChatOpenAI {
                 .map(Self::convert_tool_choice),
             prompt_cache_key: options.and_then(|o| o.prompt_cache_key.clone()),
             prompt_cache_options: cache_options,
+            stream_options: None,
             stream: false,
         };
 
@@ -528,6 +534,9 @@ impl ChatModel for ChatOpenAI {
                 .map(Self::convert_tool_choice),
             prompt_cache_key: options.and_then(|o| o.prompt_cache_key.clone()),
             prompt_cache_options: cache_options,
+            stream_options: Some(OpenAIStreamOptions {
+                include_usage: true,
+            }),
             stream: true,
         };
 
@@ -730,7 +739,19 @@ struct OpenAIRequest {
     /// Explicit cache mode/TTL; omitted under implicit caching.
     #[serde(skip_serializing_if = "Option::is_none")]
     prompt_cache_options: Option<OpenAIPromptCacheOptions>,
+    /// Ask for a usage block on the final stream chunk.
+    ///
+    /// Without this, `OpenAI` streams carry no usage at all, so `cached_tokens`
+    /// and `cache_write_tokens` can never be observed on the streaming path.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stream_options: Option<OpenAIStreamOptions>,
     stream: bool,
+}
+
+/// `OpenAI` `stream_options` object.
+#[derive(Debug, Serialize)]
+struct OpenAIStreamOptions {
+    include_usage: bool,
 }
 
 /// `OpenAI` `prompt_cache_options` object.
@@ -1295,6 +1316,7 @@ mod cache_wire_tests {
             tool_choice: None,
             prompt_cache_key: options.prompt_cache_key.clone(),
             prompt_cache_options: resolve_cache_options(Some(&options)),
+            stream_options: None,
             stream: false,
         };
         let serialized = serde_json::to_value(&request).expect("serialize");

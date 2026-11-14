@@ -577,36 +577,55 @@ impl<S: State> ToolNode<S> {
             // Clone state for stateful tool execution
             let state_clone = state.cloned();
 
+            // Carry the id alongside the outcome: a failed call must still be
+            // answered with a `tool_result` for *this* `tool_use`, or the
+            // provider rejects the history and a `NeedsInput` retry loses the
+            // call it belongs to.
+            let tool_call_id = tool_call.id.clone();
             results.spawn(async move {
-                Self::execute_single_tool(
+                let outcome = Self::execute_single_tool(
                     &tool_call,
                     &tool,
                     &interceptor,
                     tools_event_tx,
                     state_clone,
                 )
-                .await
+                .await;
+                (tool_call_id, outcome)
             });
         }
 
         // Collect results
         while let Some(result) = results.join_next().await {
             match result {
-                Ok(Ok((tool_call_id, output))) => {
+                Ok((tool_call_id, Ok((_answered_id, output)))) => {
                     tool_messages.push(Message::tool_result(tool_call_id, output));
                 }
-                Ok(Err(e)) => {
+                Ok((tool_call_id, Err(error))) => {
                     if self.handle_errors {
-                        // Return error as tool result for LLM to retry
-                        tool_messages.push(Message::tool_result("unknown", format!("Error: {e}")));
+                        // `NeedsInput` is not a failure: it is a request for the
+                        // model (or the node) to supply fields. Rendering it as
+                        // a plain error tells the model the tool is broken
+                        // instead of what it must provide (design 12 §1.5.3).
+                        let rendered = match &error {
+                            ToolError::NeedsInput { fields, .. } => {
+                                let names: Vec<&str> = fields.keys().map(String::as_str).collect();
+                                format!("tool needs more input: {}", names.join(", "))
+                            }
+                            _ => format!("Error: {error}"),
+                        };
+                        tool_messages.push(Message::tool_result(tool_call_id, rendered));
                     } else {
-                        return Err(e);
+                        return Err(error);
                     }
                 }
                 Err(join_err) => {
+                    // The panicking call's id is not recoverable from the join
+                    // error, so this stays unattributed; the panic itself is the
+                    // operator-visible signal.
                     let msg = format!("Tool execution panicked: {join_err}");
                     if self.handle_errors {
-                        tool_messages.push(Message::tool_result("unknown".to_string(), msg));
+                        tool_messages.push(Message::tool_result("unknown", msg));
                     } else {
                         return Err(ToolError::execution_failed(msg));
                     }

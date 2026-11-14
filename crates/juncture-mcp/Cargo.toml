@@ -19,6 +19,9 @@ thiserror = "2"
 async-trait = "0.1"
 futures = "0.3"
 tracing = "0.1"
+# Same hasher as `juncture-core::prefix::hash_prefix`: a deterministic hash is
+# what keeps a sanitized tool-name suffix stable across processes.
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
 # `process` and `io-util` are needed only by the stdio transport, but this
 # crate is native-only (it drives a subprocess or an HTTP endpoint), so the
 # feature is enabled here rather than widening the facade crate's tokio feature
@@ -46,3 +49,8 @@ workspace = true
 
 [package.metadata.docs.rs]
 all-features = true
+
+# `killpg` for killing a stdio server's whole process group; killing only the
+# direct child leaves grandchildren holding the pipes (design 12 §1.6).
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

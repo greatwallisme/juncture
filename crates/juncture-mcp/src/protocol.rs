@@ -16,6 +16,12 @@ pub const JSONRPC_VERSION: &str = "2.0";
 /// MCP protocol revision this client targets.
 pub const MCP_PROTOCOL_VERSION: &str = "2026-07-28";
 
+/// Last revision with the stateful `initialize` handshake.
+///
+/// Used only on the legacy fallback path, when a server rejects
+/// `server/discover` with `-32601`.
+pub const LEGACY_PROTOCOL_VERSION: &str = "2025-11-25";
+
 /// `_meta` keys reserved by the MCP specification.
 pub mod meta_keys {
     /// Negotiated protocol version.
@@ -47,10 +53,24 @@ pub struct JsonRpcRequest {
 }
 
 impl JsonRpcRequest {
+    /// Build a request without a `_meta` block.
+    ///
+    /// Only the legacy fallback uses this: servers that predate 2026-07-28
+    /// reject requests carrying protocol metadata they do not understand.
+    #[must_use]
+    pub fn without_meta(id: RequestId, method: impl Into<String>, params: Option<Value>) -> Self {
+        Self {
+            jsonrpc: JSONRPC_VERSION.to_string(),
+            id,
+            method: method.into(),
+            params,
+        }
+    }
+
     /// Build a request, attaching the mandatory `_meta` block.
     ///
-    /// `_meta` is mandatory under 2026-07-28, so there is deliberately no
-    /// constructor that omits it.
+    /// `_meta` is mandatory under 2026-07-28. [`Self::without_meta`] exists
+    /// because the legacy fallback must be able to omit it.
     #[must_use]
     pub fn with_meta(id: RequestId, method: impl Into<String>, params: Option<Value>) -> Self {
         let mut params = match params {
@@ -141,11 +161,14 @@ pub struct JsonRpcNotification {
 
 /// Completion state of an MCP result.
 ///
-/// Every result must carry this discriminator under 2026-07-28.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
+/// Every result must carry this discriminator under 2026-07-28. Earlier
+/// revisions had no such concept; [`McpResult`] treats its absence as
+/// [`ResultType::Complete`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ResultType {
     /// The call finished and `result` is final.
+    #[default]
     Complete,
     /// The server needs more input; retry with `inputResponses`.
     InputRequired,
@@ -163,7 +186,12 @@ impl ResultType {
 #[derive(Clone, Debug, Deserialize)]
 pub struct McpResult {
     /// Completion state.
-    #[serde(rename = "resultType")]
+    ///
+    /// `resultType` is mandatory under 2026-07-28 but absent on every earlier
+    /// revision, and the client still speaks to those servers through the
+    /// legacy `initialize` path. An absent discriminator means "complete":
+    /// there is no pre-2026 notion of an input round, so the payload is final.
+    #[serde(default, rename = "resultType")]
     pub result_type: ResultType,
     /// Final payload when `result_type` is `complete`.
     #[serde(default)]
@@ -323,6 +351,23 @@ pub struct DiscoverResult {
     /// Sharing scope for this discovery result.
     #[serde(default, rename = "cacheScope")]
     pub cache_scope: Option<CacheScope>,
+}
+
+/// `initialize` result payload from a pre-2026 server.
+///
+/// Only the legacy fallback parses this; the modern protocol replaced it with
+/// `server/discover`.
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct InitializeResult {
+    /// Protocol revision the server selected.
+    #[serde(default, rename = "protocolVersion")]
+    pub protocol_version: Option<String>,
+    /// Server capabilities.
+    #[serde(default)]
+    pub capabilities: ServerCapabilities,
+    /// Server identity.
+    #[serde(default, rename = "serverInfo")]
+    pub server_info: ServerInfo,
 }
 
 /// Errors produced by the MCP client.

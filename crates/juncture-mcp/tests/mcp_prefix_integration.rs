@@ -58,11 +58,20 @@ fn tool_set_change_only_affects_s1() {
     let s1_after = prefix_bytes(&after_defs, system, &[]);
     assert_ne!(s1_before, s1_after, "adding a tool must change S1");
 
-    // The system segment is unchanged in content, so its own bytes are stable
-    // even though the combined prefix hash differs.
-    let s2_before = prefix_bytes(&[], system, &[]);
-    let s2_after = prefix_bytes(&[], system, &[]);
-    assert_eq!(s2_before, s2_after, "S2 must not move when only S1 changed");
+    // S2 must be byte-identical: the invalidation is confined to the tool
+    // segment, so the system segment is still a cache hit. Comparing the
+    // serialized `system` field is what makes this assertion able to fail; two
+    // calls to the same function with the same arguments cannot.
+    let system_of = |bytes: &[u8]| -> serde_json::Value {
+        let payload: serde_json::Value =
+            serde_json::from_slice(bytes).expect("prefix payload is JSON");
+        payload["system"].clone()
+    };
+    assert_eq!(
+        system_of(&s1_before),
+        system_of(&s1_after),
+        "S2 must not move when only S1 changed"
+    );
 }
 
 /// Tool discovery order must not leak into wire order.

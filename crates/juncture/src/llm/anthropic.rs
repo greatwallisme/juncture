@@ -284,6 +284,13 @@ impl ChatModel for ChatAnthropic {
             "juncture.llm.has_tool_calls" = false,
             "juncture.llm.stop_reason" = tracing::field::Empty,
             "juncture.cost.usd" = tracing::field::Empty,
+            // Declared up front: `Span::record` silently drops any field the
+            // span was not created with, so cache observability would be lost
+            // without these.
+            "juncture.llm.cache.read_tokens" = tracing::field::Empty,
+            "juncture.llm.cache.write_tokens" = tracing::field::Empty,
+            "juncture.llm.cache.hit_rate" = tracing::field::Empty,
+            "juncture.llm.prefix.hash" = tracing::field::Empty,
         );
         #[cfg(not(target_family = "wasm"))]
         let _enter = span.enter();
@@ -797,9 +804,30 @@ fn convert_messages_with_breakpoints(
             }]);
         }
         AnthropicContent::Blocks(blocks) => {
-            // Attach to the last block so the marker covers the whole turn.
-            if let Some(ContentBlock::Text { cache_control, .. }) = blocks.last_mut() {
-                *cache_control = Some(breakpoint);
+            // Attach after the last block so the marker covers the whole turn,
+            // which is what "breakpoint at the end of S3" means. This must not
+            // require the last block to be text: a completed turn normally ends
+            // in `tool_use`, and a text-only match would silently drop the
+            // history breakpoint on exactly the react shape that needs it.
+            //
+            // `tool_use` is the one block type that cannot carry the marker, so
+            // an empty text block is appended when the turn ends there. Empty
+            // text is accepted by the API and adds no tokens.
+            match blocks.last_mut() {
+                Some(ContentBlock::Text { cache_control, .. }) => {
+                    *cache_control = Some(breakpoint);
+                }
+                Some(
+                    ContentBlock::Image { .. }
+                    | ContentBlock::ToolUse { .. }
+                    | ContentBlock::ToolResult { .. },
+                )
+                | None => {
+                    blocks.push(ContentBlock::Text {
+                        text: String::new(),
+                        cache_control: Some(breakpoint),
+                    });
+                }
             }
         }
     }
@@ -1448,6 +1476,39 @@ mod cache_wire_tests {
         assert!(
             matches!(target, AnthropicContent::Blocks(_)),
             "a marked plain-text message must be promoted to block form"
+        );
+    }
+
+    #[test]
+    fn test_history_breakpoint_marks_tool_call_turn() {
+        // React history ends a completed turn in `tool_use`, not text. The
+        // marker must still land on that turn, or the S3 breakpoint never
+        // exists in the shape the framework actually produces.
+        let mut messages: Vec<Message> = (0..30)
+            .map(|i| Message::human(format!("turn {i}: {}", "w".repeat(400))))
+            .collect();
+        messages.push(Message::ai_with_tool_calls(
+            "",
+            vec![ToolCall {
+                id: "call_1".to_string(),
+                name: "read".to_string(),
+                arguments: serde_json::json!({"path": "/x"}),
+            }],
+        ));
+        messages.push(Message::tool_result("call_1", "file contents"));
+
+        let refs: Vec<&Message> = messages.iter().collect();
+        let converted =
+            convert_messages_with_breakpoints(&refs, "claude-sonnet-4-20250514", 5000, 5000)
+                .expect("conversion");
+
+        let marked_index = converted.iter().position(|m| {
+            serde_json::to_string(&m.content).is_ok_and(|s| s.contains("cache_control"))
+        });
+        assert_eq!(
+            marked_index,
+            Some(converted.len() - 2),
+            "S3 must be marked even when the completed turn ends in tool_use"
         );
     }
 
