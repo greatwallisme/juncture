@@ -1483,6 +1483,7 @@ name = "juncture-simple-example"
 version = "0.4.0"
 dependencies = [
  "async-trait",
+ "axum 0.8.9",
  "chrono",
  "dotenvy",
  "futures",
@@ -1490,6 +1491,7 @@ dependencies = [
  "juncture-checkpoint",
  "juncture-core",
  "juncture-derive",
+ "juncture-mcp",
  "juncture-telemetry",
  "juncture-tracing",
  "opentelemetry",

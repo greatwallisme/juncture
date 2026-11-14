@@ -159,7 +159,7 @@ let agent = create_react_agent(model, vec![my_tool])?;
 let result = agent.invoke(input, &config).await?;
 ```
 
-See the [`examples/`](examples/) directory for 15 progressive examples, from basic state machines to production LLM pipelines.
+See the [`examples/`](examples/) directory for 23 progressive examples, from basic state machines to production LLM pipelines and MCP transports.
 
 ## Examples
 
@@ -181,6 +181,13 @@ See the [`examples/`](examples/) directory for 15 progressive examples, from bas
 | 14 | Multi-turn | Conversation history accumulation, system prompts |
 | 15 | Structured Output | `ToolChoice::Required`, JSON entity extraction |
 | 16 | Telemetry | `init()` builder, Langfuse dashboard, cloud export, real LLM + tools |
+| 17 | Circuit Breaker | Failure threshold, cooldown, `Closed`/`Open`/`HalfOpen` states |
+| 18 | Fallback Node | Graceful degradation, fallback priority over error handler |
+| 19 | Resource Limits | Max state size, enforcement with rollback |
+| 20 | Health Check | Node health states, circuit breaker monitoring |
+| 21 | Ring Buffer Channel | `RingBufferChannel`, bounded append-heavy fields |
+| 22 | Graph Visualization | `to_mermaid()`, `to_dot()`, `to_html()`, `display()` |
+| 23 | MCP Transports | `juncture-mcp` over stdio subprocess and Streamable HTTP (SSE) |
 | -- | Deep Research | Multi-agent research assistant (separate package) |
 | -- | WASM Example | Browser-based graph execution via wasm-bindgen |
 | -- | WASM Edge CLI | WASI standalone binary |
@@ -207,7 +214,7 @@ juncture/
     juncture-telemetry/  # Langfuse-compatible embedded observability
     juncture-store/      # Cross-thread persistent key-value storage
   benchmarks/            # Juncture vs LangGraph performance comparison
-  examples/              # 16 examples + deep-research + WASM demos
+  examples/              # 23 examples + deep-research + WASM demos
   design/                # Architecture design documents (11 modules)
 ```
 

@@ -223,7 +223,7 @@ juncture-checkpoint/   -- CheckpointSaver（MemorySaver、SqliteSaver、Postgres
 juncture-tracing/      -- OpenTelemetry 集成
 juncture-store/         -- 跨线程持久化键值存储
 benchmarks/            -- 性能对比（Juncture vs LangGraph）
-examples/              -- 15 个示例 + 深度研究 + 遥测演示
+examples/              -- 23 个示例 + 深度研究 + 遥测演示
 ```
 
 ## 下一步

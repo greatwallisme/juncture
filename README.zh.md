@@ -159,7 +159,7 @@ let agent = create_react_agent(model, vec![my_tool])?;
 let result = agent.invoke(input, &config).await?;
 ```
 
-更多示例见 [`examples/`](examples/) 目录，包含 15 个渐进式示例，从基础状态机到生产级 LLM 流水线。
+更多示例见 [`examples/`](examples/) 目录，包含 23 个渐进式示例，从基础状态机到生产级 LLM 流水线与 MCP 传输。
 
 ## 示例列表
 
@@ -181,6 +181,13 @@ let result = agent.invoke(input, &config).await?;
 | 14 | 多轮对话 | 对话历史累积、系统提示词 |
 | 15 | 结构化输出 | `ToolChoice::Required`、JSON 实体提取 |
 | 16 | 遥测 | `init()` builder、Langfuse 仪表盘、云端导出、真实 LLM + 工具 |
+| 17 | 熔断器 | 失败阈值、冷却期、`Closed`/`Open`/`HalfOpen` 状态 |
+| 18 | 降级节点 | 优雅降级、降级优先级高于错误处理器 |
+| 19 | 资源限制 | 最大状态体积、超限回滚 |
+| 20 | 健康检查 | 节点健康状态、熔断器监控 |
+| 21 | 环形缓冲通道 | `RingBufferChannel`、有界追加型字段 |
+| 22 | 图可视化 | `to_mermaid()`、`to_dot()`、`to_html()`、`display()` |
+| 23 | MCP 传输 | `juncture-mcp` 的 stdio 子进程与 Streamable HTTP（SSE） |
 | -- | 深度研究 | 多智能体研究助手（独立包） |
 | -- | WASM 浏览器示例 | 通过 wasm-bindgen 在浏览器中执行图 |
 | -- | WASM 边缘 CLI | WASI 独立二进制 |
@@ -207,7 +214,7 @@ juncture/
     juncture-telemetry/  # Langfuse 兼容内嵌可观测性引擎
     juncture-store/      # 跨线程持久化键值存储
   benchmarks/            # Juncture vs LangGraph 性能对比
-  examples/              # 16 个示例 + 深度研究 + WASM 演示
+  examples/              # 23 个示例 + 深度研究 + WASM 演示
   design/                # 架构设计文档（11 个模块）
 ```
 

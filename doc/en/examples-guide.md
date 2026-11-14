@@ -2,7 +2,7 @@
 
 [Chinese Version / 中文版](../zh/examples-guide.md)
 
-This guide walks through all 17 Juncture examples, explaining what each demonstrates and how to run them.
+This guide walks through all 23 Juncture examples, explaining what each demonstrates and how to run them.
 
 ## Example Progression
 
@@ -536,6 +536,57 @@ trace (react_agent)
 - Traces: name/user/date filters, token flow notation (`input -> output (total)`)
 - Trace detail: two-panel tree + detail, type filters (All/Gen/Tool/Span), observation search
 - Sessions: enriched cards with aggregated stats
+
+---
+
+## Phase 6: Resilience, Visualization, and MCP
+
+Examples 17-22 cover execution resilience and graph introspection. Example 23
+covers MCP transport integration.
+
+| Phase | Examples | Key Concepts | API Key |
+|-------|----------|--------------|---------|
+| Resilience | 17-20 | Circuit breaker, fallback nodes, resource limits, health checks | No |
+| Introspection | 21-22 | Ring buffer channel, Mermaid/DOT/HTML export | No |
+| MCP | 23 | stdio and Streamable HTTP (SSE) transports | No |
+
+### Example 23: MCP Transports (stdio and SSE)
+
+**File:** `examples/src/23_mcp_transports.rs`
+
+Exercises both transports `juncture-mcp` speaks, end to end, with no external
+server and no API key.
+
+```bash
+cargo run -p juncture-simple-example --bin 23_mcp_transports
+```
+
+**What it demonstrates:**
+- `StdioTransport` driving a subprocess: the binary re-executes itself with
+  `--stdio-server`, so the demo owns both ends of the newline-delimited
+  JSON-RPC pipe
+- `HttpTransport` against a local Streamable HTTP endpoint that answers with
+  `text/event-stream`; the single JSON-RPC response arrives after a keep-alive
+  comment and an interleaved notification, both of which the client skips
+- `McpClient::connect` negotiating the modern protocol via `server/discover`
+- `McpToolset::add_server_tools` merging two servers whose tool names collide,
+  yielding distinct `stdio__*` / `sse__*` wire names
+- `McpToolset::wire_definitions` emitting the canonical order used as the first
+  prompt-cache prefix segment
+- `ToolNode` executing one MCP call per transport through the ordinary `Tool`
+  pipeline
+
+**Flow:** stdio server -> `McpToolset` <- SSE server, then `ToolNode`
+
+**Tests:** `examples/tests/mcp_transports.rs` drives the real binary. It scripts
+the `--stdio-server` mode over stdin (discovery, tool listing, calls,
+notifications, blank lines, unknown methods, malformed lines, argument errors)
+and asserts the full demo exercises both transports in a canonical, run-stable
+tool order.
+
+```bash
+cargo test -p juncture-simple-example --test mcp_transports
+```
 
 ---
 

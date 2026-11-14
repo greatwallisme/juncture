@@ -1,6 +1,6 @@
 # CLAUDE.md -- examples
 
-16 self-contained binaries (01-16) plus standalone applications (deep-research, wasm-example, wasm-edge-cli, wasm-edge-server), demonstrating Juncture graph execution patterns from basic state machines to production-grade LLM pipelines.
+16 self-contained binaries (01-16) plus advanced binaries (17-23) and standalone applications (deep-research, wasm-example, wasm-edge-cli, wasm-edge-server), demonstrating Juncture graph execution patterns from basic state machines to production-grade LLM pipelines.
 
 ## Run Commands
 
@@ -45,6 +45,9 @@ cargo run -p deep-research -- --verbose "Research topic here"
 | 14 | `14_multi_turn` | Conversation history accumulation, system prompts |
 | 15 | `15_structured_output` | `ToolChoice::Required`, JSON entity extraction |
 | 16 | `16_juncture_telemetry` | `init()` builder, `TelemetryCollector`, Langfuse cloud export, embedded dashboard |
+| 17-20 | `17_circuit_breaker` ... `20_health_check` | Circuit breaker, fallback nodes, resource limits, health checks |
+| 21-22 | `21_ring_buffer_channel`, `22_graph_visualization` | `RingBufferChannel`, Mermaid/DOT/HTML export |
+| 23 | `23_mcp_transports` | `juncture-mcp` over stdio and Streamable HTTP (SSE responses) |
 
 ## Progression
 
@@ -53,7 +56,34 @@ cargo run -p deep-research -- --verbose "Research topic here"
 06-09: Advanced features (streaming, HITL, checkpointing, errors)
 10-15: Real LLM applications (requires `.env` with API key)
 16: Telemetry observability (real LLM + SQLite-backed traces + web dashboard)
+17-22: Resilience and visualization (no API key)
+23: MCP transports (local servers only, no API key)
 deep-research: Multi-agent research assistant (separate package, see below)
+
+## MCP Transport Example (23)
+
+`23_mcp_transports` exercises both transports `juncture-mcp` speaks, with no
+external server and no API key:
+
+- **stdio**: the binary re-executes itself with `--stdio-server` as the child
+  process, so the demo owns both ends of the newline-delimited JSON-RPC pipe.
+- **SSE**: the same binary serves a Streamable HTTP endpoint on an ephemeral
+  loopback port and answers each request with a `text/event-stream` whose final
+  frame is the JSON-RPC response (a keep-alive comment and an interleaved
+  notification precede it, which the client must skip).
+
+Both servers publish the same `echo` and `add` tools, so the aggregate
+`McpToolset` proves alias-prefixed disambiguation (`stdio__add`, `sse__echo`)
+and canonical ordering, then runs one call per transport through `ToolNode`.
+
+```bash
+cargo run -p juncture-simple-example --bin 23_mcp_transports
+cargo test -p juncture-simple-example --test mcp_transports
+```
+
+`tests/mcp_transports.rs` drives the real binary: it scripts the
+`--stdio-server` mode over stdin and asserts the full demo exercises both
+transports in a canonical, run-stable tool order.
 
 ## Deep-Research Example
 

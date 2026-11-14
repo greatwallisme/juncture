@@ -223,7 +223,7 @@ juncture-checkpoint/   -- CheckpointSaver (MemorySaver, SqliteSaver, PostgresSav
 juncture-tracing/      -- OpenTelemetry integration
 juncture-store/        -- Cross-thread persistent key-value storage
 benchmarks/            -- Performance comparison (Juncture vs LangGraph)
-examples/              -- 15 examples + deep-research + telemetry demo
+examples/              -- 23 examples + deep-research + telemetry demo
 ```
 
 ## Next Steps

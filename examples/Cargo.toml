@@ -16,9 +16,13 @@ juncture-core = { path = "../crates/juncture-core" }
 juncture-derive = { path = "../crates/juncture-derive" }
 juncture-checkpoint = { path = "../crates/juncture-checkpoint" }
 juncture-tracing = { path = "../crates/juncture-tracing", features = ["otel"] }
+juncture-mcp = { path = "../crates/juncture-mcp" }
 juncture-telemetry = { path = "../crates/juncture-telemetry", features = ["web"] }
 opentelemetry = "0.27"
 tracing = "0.1"
+# The SSE transport demo serves a local Streamable HTTP endpoint; axum is the
+# same server stack the telemetry dashboard already uses.
+axum = { version = "0.8", features = ["json", "tokio"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots", "http2", "json"] }
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
@@ -120,6 +124,16 @@ path = "src/21_ring_buffer_channel.rs"
 [[bin]]
 name = "22_graph_visualization"
 path = "src/22_graph_visualization.rs"
+
+[[bin]]
+name = "23_mcp_transports"
+path = "src/23_mcp_transports.rs"
+
+# Drives the example binary end to end: the scripted `--stdio-server` mode and
+# the full demo with its live SSE endpoint.
+[[test]]
+name = "mcp_transports"
+path = "tests/mcp_transports.rs"
 
 [lints]
 workspace = true

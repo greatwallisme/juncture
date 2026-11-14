@@ -2,7 +2,7 @@
 
 [English Version / 英文版](../en/examples-guide.md)
 
-本指南详细讲解所有 17 个 Juncture 示例，解释每个示例演示的内容以及如何运行。
+本指南详细讲解所有 23 个 Juncture 示例，解释每个示例演示的内容以及如何运行。
 
 ## 示例进阶路径
 
@@ -536,6 +536,49 @@ trace (react_agent)
 - Traces：名称/用户/日期筛选，token 流量表示（`input -> output (total)`）
 - Trace 详情：双面板树+详情，类型筛选（All/Gen/Tool/Span），观测搜索
 - Sessions：带聚合统计的富卡片
+
+---
+
+## 阶段 6：韧性、可视化与 MCP
+
+示例 17-22 覆盖执行韧性与图结构自省，示例 23 覆盖 MCP 传输集成。
+
+| 阶段 | 示例 | 核心概念 | 需要 API 密钥 |
+|------|------|----------|--------------|
+| 韧性 | 17-20 | 熔断器、降级节点、资源限制、健康检查 | 否 |
+| 自省 | 21-22 | 环形缓冲通道、Mermaid/DOT/HTML 导出 | 否 |
+| MCP | 23 | stdio 与 Streamable HTTP（SSE）传输 | 否 |
+
+### 示例 23：MCP 传输（stdio 与 SSE）
+
+**文件：** `examples/src/23_mcp_transports.rs`
+
+端到端演示 `juncture-mcp` 支持的两种传输，无需外部服务器，也无需 API 密钥。
+
+```bash
+cargo run -p juncture-simple-example --bin 23_mcp_transports
+```
+
+**演示内容：**
+- `StdioTransport` 驱动子进程：示例二进制以 `--stdio-server` 重新执行自身，
+  因此演示同时持有换行分隔 JSON-RPC 管道的两端
+- `HttpTransport` 连接本地 Streamable HTTP 端点，响应为 `text/event-stream`；
+  唯一的 JSON-RPC 响应出现在 keep-alive 注释与一条交错通知之后，客户端会跳过两者
+- `McpClient::connect` 通过 `server/discover` 完成现代协议协商
+- `McpToolset::add_server_tools` 合并两个工具名冲突的服务器，得到互不相同的
+  `stdio__*` / `sse__*` 线缆名
+- `McpToolset::wire_definitions` 输出作为提示缓存前缀第一段的标准顺序
+- `ToolNode` 通过普通 `Tool` 管线为每种传输执行一次 MCP 调用
+
+**流程：** stdio 服务器 -> `McpToolset` <- SSE 服务器，随后交给 `ToolNode`
+
+**测试：** `examples/tests/mcp_transports.rs` 驱动真实二进制。它通过 stdin 脚本化
+`--stdio-server` 模式（发现、工具列表、调用、通知、空行、未知方法、非法行、参数错误），
+并断言完整演示同时跑通两种传输，且工具顺序规范、跨运行稳定。
+
+```bash
+cargo test -p juncture-simple-example --test mcp_transports
+```
 
 ---
 
