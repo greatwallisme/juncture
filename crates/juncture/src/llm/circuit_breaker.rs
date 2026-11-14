@@ -140,6 +140,38 @@ impl Default for CircuitBreakerConfig {
     }
 }
 
+/// Time source behind recovery-timeout decisions.
+///
+/// Recovery is the one place the circuit breaker reads a clock, so it is the
+/// one place worth injecting: a test can advance logical time instead of
+/// sleeping, and the production path keeps reading the wall clock exactly as
+/// before.
+#[derive(Clone, Debug)]
+enum Clock {
+    /// Wall clock, used by every production instance.
+    System,
+
+    /// Logical milliseconds advanced explicitly by a test.
+    ///
+    /// Without this, a test that wants "no time has passed yet" has no way to
+    /// say so: `state()` reads the wall clock, and any millisecond boundary
+    /// crossed between recording a failure and checking the state silently
+    /// completes the recovery.
+    #[cfg(test)]
+    Manual(Arc<AtomicU64>),
+}
+
+impl Clock {
+    /// Milliseconds since the Unix epoch, or the test's logical time.
+    fn now_millis(&self) -> u64 {
+        match self {
+            Self::System => system_time_millis(),
+            #[cfg(test)]
+            Self::Manual(now) => now.load(Ordering::Relaxed),
+        }
+    }
+}
+
 /// Error returned when the circuit breaker is open.
 ///
 /// This error is returned by [`CircuitBreaker::pre_invoke()`] when the circuit
@@ -202,6 +234,9 @@ pub struct CircuitBreaker {
 
     /// Number of calls made in `HalfOpen` state.
     half_open_calls: Arc<AtomicU32>,
+
+    /// Source of the current time, shared by every clone.
+    clock: Clock,
 }
 
 #[allow(
@@ -247,7 +282,40 @@ impl CircuitBreaker {
             success_count: Arc::new(AtomicU32::new(0)),
             last_failure_time: Arc::new(AtomicU64::new(0)),
             half_open_calls: Arc::new(AtomicU32::new(0)),
+            clock: Clock::System,
         }
+    }
+
+    /// Build a breaker whose recovery decisions use a manually advanced clock.
+    ///
+    /// The clock is shared by clones, so a middleware chain built from this
+    /// breaker observes the same logical time as the handle the test drives.
+    #[cfg(test)]
+    fn with_manual_clock(config: CircuitBreakerConfig, start_millis: u64) -> Self {
+        let clock = Arc::new(AtomicU64::new(start_millis));
+        Self {
+            config,
+            state: Arc::new(AtomicU8::new(STATE_CLOSED)),
+            failure_count: Arc::new(AtomicU32::new(0)),
+            success_count: Arc::new(AtomicU32::new(0)),
+            last_failure_time: Arc::new(AtomicU64::new(0)),
+            half_open_calls: Arc::new(AtomicU32::new(0)),
+            clock: Clock::Manual(clock),
+        }
+    }
+
+    /// Advance a manually controlled clock.
+    ///
+    /// Returns an error on a system-clock breaker: silently reading the wall
+    /// clock instead would reintroduce the flakiness this exists to remove.
+    #[cfg(test)]
+    fn advance_clock(&self, delta: Duration) -> Result<(), &'static str> {
+        let Clock::Manual(now) = &self.clock else {
+            return Err("advance_clock requires a breaker built with with_manual_clock");
+        };
+        let delta_ms = u64::try_from(delta.as_millis()).unwrap_or(u64::MAX);
+        now.fetch_add(delta_ms, Ordering::Relaxed);
+        Ok(())
     }
 
     /// Get the current circuit state.
@@ -277,7 +345,7 @@ impl CircuitBreaker {
                 reason = "Recovery timeout fits in u64 for realistic values"
             )]
             let recovery_ms = self.config.recovery_timeout.as_millis() as u64;
-            let now = current_time_millis();
+            let now = self.clock.now_millis();
 
             // If recovery timeout has elapsed, transition to HalfOpen
             if last_failure > 0 && now.saturating_sub(last_failure) >= recovery_ms {
@@ -343,28 +411,6 @@ impl CircuitBreaker {
         self.half_open_calls.store(0, Ordering::Relaxed);
     }
 
-    /// Set the last failure time (for testing purposes).
-    ///
-    /// This method allows tests to control the timing of `Open` → `HalfOpen`
-    /// transitions without actually waiting for the recovery timeout.
-    ///
-    /// # Arguments
-    ///
-    /// * `time` - Epoch milliseconds to set as the last failure time
-    ///
-    /// # Example
-    ///
-    /// ```rust
-    /// use juncture::llm::{CircuitBreaker, CircuitBreakerConfig};
-    ///
-    /// let breaker = CircuitBreaker::new(CircuitBreakerConfig::default());
-    /// breaker.set_last_failure_time(0); // Set to epoch
-    /// ```
-    #[cfg(test)]
-    fn set_last_failure_time(&self, time: u64) {
-        self.last_failure_time.store(time, Ordering::Relaxed);
-    }
-
     /// Handle a successful LLM invocation.
     ///
     /// Resets failure counters and potentially transitions from `HalfOpen` to `Closed`.
@@ -403,7 +449,7 @@ impl CircuitBreaker {
     fn handle_failure(&self) {
         // Record failure time
         self.last_failure_time
-            .store(current_time_millis(), Ordering::Relaxed);
+            .store(self.clock.now_millis(), Ordering::Relaxed);
 
         // Increment failure count
         let failures = self.failure_count.fetch_add(1, Ordering::Relaxed) + 1;
@@ -496,12 +542,12 @@ impl fmt::Debug for CircuitBreakerOpenError {
     }
 }
 
-/// Get the current time as epoch milliseconds.
+/// Get the wall-clock time as epoch milliseconds.
 #[allow(
     clippy::cast_possible_truncation,
     reason = "Milliseconds fit in u64 for realistic time ranges"
 )]
-fn current_time_millis() -> u64 {
+fn system_time_millis() -> u64 {
     SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .map_or(0, |d| d.as_millis() as u64)
@@ -552,12 +598,16 @@ mod tests {
 
     #[tokio::test]
     async fn test_circuit_breaker_transitions_to_open() {
+        // A 1 ms recovery timeout with the wall clock made this assertion race
+        // the clock: a millisecond boundary crossed between the last recorded
+        // failure and the state read is itself a completed recovery. Logical
+        // time pins the breaker inside the timeout window.
         let config = CircuitBreakerConfig {
             failure_threshold: 3,
-            recovery_timeout: Duration::from_millis(1),
+            recovery_timeout: Duration::from_secs(30),
             half_open_max_calls: 1,
         };
-        let breaker = CircuitBreaker::new(config);
+        let breaker = CircuitBreaker::with_manual_clock(config, 1_000_000);
 
         // Simulate failures until threshold is reached
         for _ in 0..3 {
@@ -603,18 +653,20 @@ mod tests {
     async fn test_circuit_breaker_half_open_allows_limited_calls() {
         let config = CircuitBreakerConfig {
             failure_threshold: 2,
-            recovery_timeout: Duration::from_millis(1),
+            recovery_timeout: Duration::from_millis(100),
             half_open_max_calls: 2,
         };
-        let breaker = CircuitBreaker::new(config);
+        let breaker = CircuitBreaker::with_manual_clock(config, 1_000_000);
 
         // Force the circuit open
         breaker.handle_failure();
         breaker.handle_failure();
         assert_eq!(breaker.state(), CircuitState::Open);
 
-        // Set last failure time to trigger HalfOpen transition
-        breaker.set_last_failure_time(current_time_millis().saturating_sub(100));
+        // Elapse the recovery timeout in logical time.
+        breaker
+            .advance_clock(Duration::from_millis(100))
+            .expect("manual clock");
 
         // Check that state is now HalfOpen
         assert_eq!(breaker.state(), CircuitState::HalfOpen);
@@ -644,17 +696,19 @@ mod tests {
     async fn test_circuit_breaker_half_open_success_closes() {
         let config = CircuitBreakerConfig {
             failure_threshold: 2,
-            recovery_timeout: Duration::from_millis(1),
+            recovery_timeout: Duration::from_millis(100),
             half_open_max_calls: 1,
         };
-        let breaker = CircuitBreaker::new(config);
+        let breaker = CircuitBreaker::with_manual_clock(config, 1_000_000);
 
         // Force the circuit open
         breaker.handle_failure();
         breaker.handle_failure();
 
-        // Set last failure time to trigger HalfOpen transition
-        breaker.set_last_failure_time(current_time_millis().saturating_sub(100));
+        // Elapse the recovery timeout in logical time.
+        breaker
+            .advance_clock(Duration::from_millis(100))
+            .expect("manual clock");
 
         // Should be in HalfOpen now
         assert_eq!(breaker.state(), CircuitState::HalfOpen);
@@ -675,17 +729,21 @@ mod tests {
     async fn test_circuit_breaker_half_open_failure_opens() {
         let config = CircuitBreakerConfig {
             failure_threshold: 2,
-            recovery_timeout: Duration::from_millis(1),
+            recovery_timeout: Duration::from_millis(100),
             half_open_max_calls: 1,
         };
-        let breaker = CircuitBreaker::new(config);
+        let breaker = CircuitBreaker::with_manual_clock(config, 1_000_000);
 
         // Force the circuit open
         breaker.handle_failure();
         breaker.handle_failure();
 
-        // Set last failure time to trigger HalfOpen transition
-        breaker.set_last_failure_time(current_time_millis().saturating_sub(100));
+        // Elapse the recovery timeout in logical time. The clock then stays put,
+        // so the failure below is recorded at the same instant it is checked and
+        // cannot immediately re-recover.
+        breaker
+            .advance_clock(Duration::from_millis(100))
+            .expect("manual clock");
 
         // Should be in HalfOpen now
         assert_eq!(breaker.state(), CircuitState::HalfOpen);
@@ -763,21 +821,59 @@ mod tests {
     fn test_circuit_breaker_open_to_half_open_transition() {
         let config = CircuitBreakerConfig {
             failure_threshold: 2,
-            recovery_timeout: Duration::from_millis(1),
+            recovery_timeout: Duration::from_millis(100),
             half_open_max_calls: 1,
         };
-        let breaker = CircuitBreaker::new(config);
+        let breaker = CircuitBreaker::with_manual_clock(config, 1_000_000);
 
-        // Force the circuit open
+        // Force the circuit open. The clock is frozen, so the breaker cannot
+        // recover no matter how long the assertions take to run.
         breaker.handle_failure();
         breaker.handle_failure();
         assert_eq!(breaker.state(), CircuitState::Open);
 
-        // Set last failure time to trigger HalfOpen transition
-        breaker.set_last_failure_time(current_time_millis().saturating_sub(100));
+        // Still inside the recovery window: nothing has been advanced yet.
+        assert_eq!(
+            breaker.state(),
+            CircuitState::Open,
+            "an open circuit must stay open until the recovery timeout elapses"
+        );
 
-        // Check state - should transition to HalfOpen
+        // Advance logical time past the recovery timeout.
+        breaker
+            .advance_clock(Duration::from_millis(100))
+            .expect("manual clock");
         assert_eq!(breaker.state(), CircuitState::HalfOpen);
+    }
+
+    #[test]
+    fn test_circuit_breaker_half_open_transition_requires_elapsed_time() {
+        // The boundary itself: one millisecond short of recovery_timeout must
+        // not recover. This is the assertion the wall-clock version could not
+        // make reliably.
+        let config = CircuitBreakerConfig {
+            failure_threshold: 2,
+            recovery_timeout: Duration::from_millis(100),
+            half_open_max_calls: 1,
+        };
+        let breaker = CircuitBreaker::with_manual_clock(config, 1_000_000);
+
+        breaker.handle_failure();
+        breaker.handle_failure();
+
+        breaker
+            .advance_clock(Duration::from_millis(99))
+            .expect("manual clock");
+        assert_eq!(breaker.state(), CircuitState::Open);
+
+        breaker
+            .advance_clock(Duration::from_millis(1))
+            .expect("manual clock");
+        assert_eq!(
+            breaker.state(),
+            CircuitState::HalfOpen,
+            "exactly recovery_timeout must be enough to recover"
+        );
     }
 
     #[tokio::test]
