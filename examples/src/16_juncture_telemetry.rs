@@ -240,7 +240,7 @@ fn message_text(msg: &Message) -> String {
         Content::MultiPart(parts) => parts
             .iter()
             .filter_map(|p| match p {
-                juncture::llm::ContentPart::Text { text } => Some(text.as_str()),
+                juncture::llm::ContentPart::Text { text, .. } => Some(text.as_str()),
                 _ => None,
             })
             .collect::<Vec<_>>()

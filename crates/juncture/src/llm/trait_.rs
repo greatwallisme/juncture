@@ -14,7 +14,8 @@
 
 pub use juncture_core::llm::{
     BoxStream, CallOptions, ChatModel, DeserializeOwned, JsonSchema, LlmError, MessageChunk,
-    ResponseFormat, StructuredOutputModel, ToolCallChunk, ToolChoice, ToolDefinition,
+    PromptCacheMode, PromptCacheTtl, ResponseFormat, StructuredOutputModel, ToolCallChunk,
+    ToolChoice, ToolDefinition,
 };
 
 // Rust guideline compliant 2026-07-29

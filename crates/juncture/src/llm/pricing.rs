@@ -27,6 +27,7 @@ use crate::llm::TokenUsage;
 ///     input_tokens: 1000,
 ///     output_tokens: 500,
 ///     total_tokens: 1500,
+///     ..TokenUsage::default()
 /// };
 ///
 /// let cost = model.cost_for_usage(&usage);
@@ -59,6 +60,7 @@ pub trait ModelPricing {
     ///     input_tokens: 1_000_000,
     ///     output_tokens: 500_000,
     ///     total_tokens: 1_500_000,
+    ///     ..TokenUsage::default()
     /// };
     ///
     /// let cost = model.cost_for_usage(&usage);

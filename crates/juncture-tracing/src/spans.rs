@@ -97,6 +97,22 @@ pub mod attrs {
     /// LLM stop reason attribute
     pub const LLM_STOP_REASON: &str = "juncture.llm.stop_reason";
 
+    /// Prompt-cache tokens read (answered from cache) for this request.
+    pub const CACHE_READ_TOKENS: &str = "juncture.llm.cache.read_tokens";
+
+    /// Prompt-cache tokens written by this request.
+    pub const CACHE_WRITE_TOKENS: &str = "juncture.llm.cache.write_tokens";
+
+    /// Prompt-cache hit rate in the range 0.0..=1.0.
+    pub const CACHE_HIT_RATE: &str = "juncture.llm.cache.hit_rate";
+
+    /// Hash of the stable prefix segments (S1+S2), for drift detection.
+    ///
+    /// A change between two otherwise identical requests pinpoints exactly when
+    /// the prefix changed, instead of leaving a hit-rate drop unexplained
+    /// (design `12` §2.8 item 3).
+    pub const PREFIX_HASH: &str = "juncture.llm.prefix.hash";
+
     // Tool level attributes
 
     /// Tool name attribute

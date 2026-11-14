@@ -558,7 +558,7 @@ fn extract_text_content(content: &Content) -> String {
         Content::MultiPart(parts) => parts
             .iter()
             .filter_map(|p| match p {
-                ContentPart::Text { text } => Some(text.as_str()),
+                ContentPart::Text { text, .. } => Some(text.as_str()),
                 ContentPart::Thinking { text, .. } => Some(text.as_str()),
                 ContentPart::Image(_) => None,
             })
@@ -726,6 +726,7 @@ fn ollama_usage(prompt_eval_count: Option<u64>, eval_count: Option<u64>) -> Opti
         input_tokens: input,
         output_tokens: output,
         total_tokens: input + output,
+        ..TokenUsage::default()
     })
 }
 

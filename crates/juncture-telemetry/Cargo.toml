@@ -30,7 +30,7 @@ tracing = "0.1"
 
 # Async
 tokio = { version = "1", features = ["sync", "time", "macros", "rt-multi-thread", "signal"] }
-reqwest = { version = "0.12", features = ["json"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots", "http2", "json"] }
 
 # Storage (sqlx with SQLite runtime - shared with juncture-core)
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "chrono", "derive"], optional = true }
@@ -46,7 +46,7 @@ prost = { version = "0.13", optional = true }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["test-util"] }
-reqwest = { version = "0.12", features = ["json"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots", "http2", "json"] }
 
 [lints]
 workspace = true

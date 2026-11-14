@@ -67,7 +67,7 @@ impl CacheKeyInput {
                 crate::state::Content::MultiPart(parts) => {
                     for part in parts {
                         match part {
-                            crate::state::ContentPart::Text { text } => {
+                            crate::state::ContentPart::Text { text, .. } => {
                                 text.hash(&mut hasher);
                             }
                             crate::state::ContentPart::Image(data) => {

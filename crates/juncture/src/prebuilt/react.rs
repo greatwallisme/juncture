@@ -75,6 +75,17 @@ pub(super) fn convert_tool_defs(defs: &[ToolDefinition]) -> Vec<LlmToolDefinitio
         .collect()
 }
 
+/// Build the wire tool table for an agent: normalized schema plus stable order.
+///
+/// The tool table is the first segment of the prompt-cache prefix, so a
+/// caller-supplied order that varies between runs would invalidate the whole
+/// cache (design `12` §2.5). Normalization and ordering live in
+/// [`juncture_core::prefix`] so the two prebuilt factories cannot drift.
+pub(super) fn wire_tool_defs(defs: &[ToolDefinition]) -> Vec<LlmToolDefinition> {
+    let std_defs = convert_tool_defs(defs);
+    juncture_core::prefix::ordered_tool_definitions(&std_defs)
+}
+
 /// Create an agent with default configuration.
 ///
 /// Builds a graph that alternates between LLM reasoning and tool execution.
@@ -188,7 +199,7 @@ pub fn create_agent_with_config<M: ChatModel>(
     config: ReactAgentConfig,
 ) -> Result<CompiledGraph<MessagesState>, TopologyError> {
     let tool_defs: Vec<ToolDefinition> = tools.iter().map(|t| t.definition()).collect();
-    let llm_tool_defs = convert_tool_defs(&tool_defs);
+    let llm_tool_defs = wire_tool_defs(&tool_defs);
     let model_with_tools = model.bind_tools(llm_tool_defs);
 
     let prompt = config.system_message.map(PromptSource::Static);
@@ -1338,6 +1349,40 @@ mod tests {
         assert_eq!(llm_defs.len(), 1);
         assert_eq!(llm_defs[0].name, "search");
         assert_eq!(llm_defs[0].description, "Search the web");
+    }
+
+    #[test]
+    fn test_wire_tool_defs_sorted_by_name_regardless_of_input_order() {
+        let alpha = ToolDefinition::new("alpha", "a", json!({"type": "object"}));
+        let beta = ToolDefinition::new("beta", "b", json!({"type": "object"}));
+
+        let forward = wire_tool_defs(&[alpha.clone(), beta.clone()]);
+        let reverse = wire_tool_defs(&[beta, alpha]);
+
+        let forward_names: Vec<&str> = forward.iter().map(|d| d.name.as_str()).collect();
+        let reverse_names: Vec<&str> = reverse.iter().map(|d| d.name.as_str()).collect();
+        assert_eq!(forward_names, vec!["alpha", "beta"]);
+        assert_eq!(forward_names, reverse_names);
+    }
+
+    #[test]
+    fn test_wire_tool_defs_normalizes_parameter_bytes() {
+        // Same schema, different key insertion order: wire bytes must match,
+        // otherwise the first prefix segment changes and the cache is lost.
+        let first = ToolDefinition::new(
+            "tool",
+            "t",
+            json!({"type": "object", "properties": {"z": {}, "a": {}}}),
+        );
+        let second = ToolDefinition::new(
+            "tool",
+            "t",
+            json!({"properties": {"a": {}, "z": {}}, "type": "object"}),
+        );
+
+        let a = serde_json::to_vec(&wire_tool_defs(&[first])).expect("serialize a");
+        let b = serde_json::to_vec(&wire_tool_defs(&[second])).expect("serialize b");
+        assert_eq!(a, b);
     }
 }
 

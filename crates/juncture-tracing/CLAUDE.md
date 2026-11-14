@@ -26,6 +26,11 @@ All spans follow `juncture.{component}.{action}`:
 - `juncture.tool.call`
 - `juncture.checkpoint.put`
 
+LLM cache attributes recorded on `juncture.llm.call` (design 12 §2.8):
+`juncture.llm.cache.read_tokens`, `juncture.llm.cache.write_tokens`,
+`juncture.llm.cache.hit_rate`, `juncture.llm.prefix.hash` (a hash of S1+S2 for
+prefix-drift detection).
+
 ## Usage
 
 Basic (no OTel): call `init_tracing()` to set up `tracing-subscriber` with env filter.

@@ -527,7 +527,7 @@ impl Tool for SubagentTool {
                     parts
                         .iter()
                         .filter_map(|p| match p {
-                            juncture_core::state::messages::ContentPart::Text { text } => {
+                            juncture_core::state::messages::ContentPart::Text { text, .. } => {
                                 Some(text.as_str())
                             }
                             _ => None,
@@ -789,12 +789,8 @@ mod tests {
                         id: uuid::Uuid::new_v4().to_string(),
                         role: Role::Ai,
                         content: Content::MultiPart(vec![
-                            ContentPart::Text {
-                                text: "Part 1".to_string(),
-                            },
-                            ContentPart::Text {
-                                text: "Part 2".to_string(),
-                            },
+                            ContentPart::text("Part 1"),
+                            ContentPart::text("Part 2"),
                         ]),
                         tool_calls: vec![],
                         tool_call_id: None,

@@ -116,6 +116,60 @@ pub struct CallOptions {
     /// The `"nostream"` tag causes `EventEmitter::should_emit` to suppress
     /// streaming events for this call.
     pub tags: Vec<String>,
+
+    /// `OpenAI` prompt-cache routing key.
+    ///
+    /// A stable key per prefix keeps requests that share a prefix pinned to the
+    /// same machine; without it, routing can land on a host that has never seen
+    /// the prefix. Recommended by `OpenAI` above roughly 15 requests/minute.
+    /// Ignored by Anthropic, which routes on prefix hash alone.
+    pub prompt_cache_key: Option<String>,
+
+    /// Prompt-cache mode.
+    ///
+    /// `Disabled` is the cost-control switch: on `OpenAI` it means no explicit
+    /// breakpoints are emitted (and therefore no cache-write billing on GPT-5.6+);
+    /// on Anthropic it means no `cache_control` markers are attached.
+    pub prompt_cache_mode: Option<PromptCacheMode>,
+
+    /// Prompt-cache lifetime for explicit breakpoints.
+    ///
+    /// `Min30` / `Hour12` are `OpenAI`'s documented TTL values; Anthropic's
+    /// breakpoint TTL is decided per segment by
+    /// [`crate::prefix::default_ttl`] instead.
+    pub prompt_cache_ttl: Option<PromptCacheTtl>,
+}
+
+/// Prompt-cache mode for a single call.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum PromptCacheMode {
+    /// Provider-default automatic prefix caching.
+    #[default]
+    Implicit,
+    /// Emit explicit breakpoints at planned prefix-segment ends.
+    Explicit,
+    /// Emit no breakpoints at all; no cache-write cost is incurred.
+    Disabled,
+}
+
+/// `OpenAI` prompt-cache TTL for explicit breakpoints.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum PromptCacheTtl {
+    /// 30 minutes.
+    Min30,
+    /// 12 hours.
+    Hour12,
+}
+
+impl PromptCacheTtl {
+    /// `OpenAI` wire spelling.
+    #[must_use]
+    pub const fn as_openai_str(self) -> &'static str {
+        match self {
+            Self::Min30 => "30m",
+            Self::Hour12 => "12h",
+        }
+    }
 }
 
 /// Tool selection strategy

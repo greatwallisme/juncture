@@ -207,6 +207,7 @@ mod tests {
                     input_tokens: 500,
                     output_tokens: 0,
                     total_tokens: 500,
+                    ..TokenUsage::default()
                 }),
             },
             Message {
@@ -220,6 +221,7 @@ mod tests {
                     input_tokens: 300,
                     output_tokens: 0,
                     total_tokens: 300,
+                    ..TokenUsage::default()
                 }),
             },
         ];
@@ -242,6 +244,7 @@ mod tests {
                     input_tokens: 600,
                     output_tokens: 0,
                     total_tokens: 600,
+                    ..TokenUsage::default()
                 }),
             },
             Message {
@@ -255,6 +258,7 @@ mod tests {
                     input_tokens: 500,
                     output_tokens: 0,
                     total_tokens: 500,
+                    ..TokenUsage::default()
                 }),
             },
         ];
@@ -325,6 +329,7 @@ mod tests {
                 input_tokens: 500,
                 output_tokens: 0,
                 total_tokens: 500,
+                ..TokenUsage::default()
             }),
         }];
 
@@ -369,6 +374,7 @@ mod tests {
                     input_tokens: 200,
                     output_tokens: 0,
                     total_tokens: 200,
+                    ..TokenUsage::default()
                 }),
             }],
         };

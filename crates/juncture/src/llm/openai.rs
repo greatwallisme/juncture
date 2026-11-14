@@ -14,8 +14,8 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
 use crate::llm::{
-    BoxStream, CallOptions, ChatModel, Content, ContentPart, LlmError, Message, Role, TokenUsage,
-    ToolCall, ToolChoice, ToolDefinition,
+    BoxStream, CallOptions, ChatModel, Content, ContentPart, LlmError, Message, PromptCacheMode,
+    PromptCacheTtl, Role, TokenUsage, ToolCall, ToolChoice, ToolDefinition,
 };
 
 use juncture_tracing::spans::attrs;
@@ -275,7 +275,9 @@ enum StreamState {
         client: Client,
         api_key: String,
         base_url: String,
-        request: OpenAIRequest,
+        /// Boxed so the largest enum variant stays close to the others in
+        /// size; the request body is sent exactly once and never inspected.
+        request: Box<OpenAIRequest>,
     },
     Active(ByteStream),
     Done,
@@ -319,7 +321,12 @@ impl ChatModel for ChatOpenAI {
         #[cfg(not(target_family = "wasm"))]
         let _enter = span.enter();
 
-        let api_messages: Vec<_> = messages.iter().map(convert_message).collect();
+        let breakpoints = breakpoints_enabled(options);
+        let api_messages: Vec<_> = messages
+            .iter()
+            .map(|m| convert_message(m, breakpoints))
+            .collect();
+        let cache_options = resolve_cache_options(options);
 
         let request = OpenAIRequest {
             model: model.clone(),
@@ -348,6 +355,8 @@ impl ChatModel for ChatOpenAI {
             tool_choice: options
                 .and_then(|o| o.tool_choice.as_ref())
                 .map(Self::convert_tool_choice),
+            prompt_cache_key: options.and_then(|o| o.prompt_cache_key.clone()),
+            prompt_cache_options: cache_options,
             stream: false,
         };
 
@@ -377,6 +386,13 @@ impl ChatModel for ChatOpenAI {
         if let Some(usage) = &api_response.usage {
             tracing::Span::current().record(attrs::TOKENS_INPUT, usage.prompt_tokens);
             tracing::Span::current().record(attrs::TOKENS_OUTPUT, usage.completion_tokens);
+            // Cache counters live in `prompt_tokens_details`; the converted
+            // `TokenUsage` normalizes the hit-rate denominator per provider.
+            let normalized = TokenUsage::from(usage.clone());
+            tracing::Span::current().record(attrs::CACHE_READ_TOKENS, normalized.cached_tokens);
+            tracing::Span::current()
+                .record(attrs::CACHE_WRITE_TOKENS, normalized.cache_write_tokens);
+            tracing::Span::current().record(attrs::CACHE_HIT_RATE, normalized.cache_hit_rate());
         }
 
         let has_tool_calls = api_response
@@ -476,7 +492,12 @@ impl ChatModel for ChatOpenAI {
         #[cfg(not(target_family = "wasm"))]
         let _enter = span.enter();
 
-        let api_messages: Vec<_> = messages.iter().map(convert_message).collect();
+        let breakpoints = breakpoints_enabled(options);
+        let api_messages: Vec<_> = messages
+            .iter()
+            .map(|m| convert_message(m, breakpoints))
+            .collect();
+        let cache_options = resolve_cache_options(options);
 
         let request = OpenAIRequest {
             model: model.clone(),
@@ -505,6 +526,8 @@ impl ChatModel for ChatOpenAI {
             tool_choice: options
                 .and_then(|o| o.tool_choice.as_ref())
                 .map(Self::convert_tool_choice),
+            prompt_cache_key: options.and_then(|o| o.prompt_cache_key.clone()),
+            prompt_cache_options: cache_options,
             stream: true,
         };
 
@@ -518,7 +541,7 @@ impl ChatModel for ChatOpenAI {
             client,
             api_key,
             base_url,
-            request,
+            request: Box::new(request),
         };
 
         let stream = stream::unfold((init, Vec::new()), |(state, mut buffer)| async move {
@@ -652,6 +675,38 @@ impl ChatModel for ChatOpenAI {
     }
 }
 
+/// Resolve the `prompt_cache_options` object for a call.
+///
+/// `Disabled` intentionally emits `mode = "explicit"` with no breakpoints
+/// anywhere in the request: that combination produces no cache writes and
+/// therefore no cache-write billing on GPT-5.6+ (design `12` §2.6).
+fn resolve_cache_options(options: Option<&CallOptions>) -> Option<OpenAIPromptCacheOptions> {
+    let mode = options
+        .and_then(|o| o.prompt_cache_mode)
+        .unwrap_or(PromptCacheMode::Implicit);
+
+    let ttl = options
+        .and_then(|o| o.prompt_cache_ttl)
+        .map(PromptCacheTtl::as_openai_str);
+
+    match mode {
+        // Implicit caching is automatic; sending the object adds nothing.
+        PromptCacheMode::Implicit => None,
+        PromptCacheMode::Explicit | PromptCacheMode::Disabled => Some(OpenAIPromptCacheOptions {
+            mode: "explicit",
+            ttl,
+        }),
+    }
+}
+
+/// Whether explicit content-level breakpoints should be serialized.
+fn breakpoints_enabled(options: Option<&CallOptions>) -> bool {
+    !matches!(
+        options.and_then(|o| o.prompt_cache_mode),
+        Some(PromptCacheMode::Disabled)
+    )
+}
+
 /// `OpenAI` API request format.
 #[derive(Debug, Serialize)]
 struct OpenAIRequest {
@@ -669,7 +724,21 @@ struct OpenAIRequest {
     tools: Option<Vec<OpenAITool>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_choice: Option<OpenAIToolChoice>,
+    /// Stable routing key for prompt-cache prefix locality.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    prompt_cache_key: Option<String>,
+    /// Explicit cache mode/TTL; omitted under implicit caching.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    prompt_cache_options: Option<OpenAIPromptCacheOptions>,
     stream: bool,
+}
+
+/// `OpenAI` `prompt_cache_options` object.
+#[derive(Debug, Serialize)]
+struct OpenAIPromptCacheOptions {
+    mode: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ttl: Option<&'static str>,
 }
 
 /// `OpenAI` API message format.
@@ -692,13 +761,32 @@ enum OpenAIContent {
 }
 
 /// `OpenAI` API content part.
+///
+/// `prompt_cache_breakpoint` is a content-level marker (`{"mode":"explicit"}`),
+/// which is why the breakpoint abstraction lives on `ContentPart` rather than in
+/// call options (design `12` §2.5, §2.6).
 #[derive(Debug, Serialize)]
 #[serde(tag = "type")]
 enum OpenAIContentPart {
     #[serde(rename = "text")]
-    Text { text: String },
+    Text {
+        text: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        prompt_cache_breakpoint: Option<OpenAICacheBreakpoint>,
+    },
     #[serde(rename = "image_url")]
     ImageUrl { image_url: ImageUrl },
+}
+
+/// `OpenAI` explicit cache breakpoint marker.
+#[derive(Debug, Serialize)]
+struct OpenAICacheBreakpoint {
+    mode: &'static str,
+}
+
+impl OpenAICacheBreakpoint {
+    /// Marker for an explicit breakpoint.
+    const EXPLICIT: Self = Self { mode: "explicit" };
 }
 
 /// `OpenAI` API image URL.
@@ -761,24 +849,39 @@ struct OpenAIResponse {
 ///
 /// `OpenAI` uses `prompt_tokens` / `completion_tokens` (not `input_tokens` / `output_tokens`).
 #[derive(Debug, Clone, Deserialize)]
-#[expect(
-    clippy::struct_field_names,
-    reason = "field names must match OpenAI API JSON format"
-)]
 struct OpenAIUsage {
     #[allow(dead_code, reason = "deserialization target, field read indirectly")]
     prompt_tokens: u64,
     #[allow(dead_code, reason = "deserialization target, field read indirectly")]
     completion_tokens: u64,
     total_tokens: u64,
+    /// Cache counters. Present only on cached requests; GPT-5.6+ adds
+    /// `cache_write_tokens` alongside `cached_tokens`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    prompt_tokens_details: Option<OpenAIPromptTokensDetails>,
+}
+
+/// `OpenAI` nested `prompt_tokens_details` object.
+#[derive(Debug, Clone, Default, Deserialize)]
+struct OpenAIPromptTokensDetails {
+    /// Prompt tokens served from cache (already included in `prompt_tokens`).
+    #[serde(default)]
+    cached_tokens: u64,
+    /// Prompt tokens written to cache this request (GPT-5.6+).
+    #[serde(default)]
+    cache_write_tokens: u64,
 }
 
 impl From<OpenAIUsage> for TokenUsage {
     fn from(val: OpenAIUsage) -> Self {
+        let details = val.prompt_tokens_details.unwrap_or_default();
         Self {
             input_tokens: val.prompt_tokens,
             output_tokens: val.completion_tokens,
             total_tokens: val.total_tokens,
+            cached_tokens: details.cached_tokens,
+            cache_write_tokens: details.cache_write_tokens,
+            ..Self::default()
         }
     }
 }
@@ -819,7 +922,7 @@ struct OpenAIResponseFunction {
     clippy::match_same_arms,
     reason = "Explicit handling for different content types"
 )]
-fn convert_message(message: &Message) -> OpenAIMessage {
+fn convert_message(message: &Message, breakpoints_enabled: bool) -> OpenAIMessage {
     let role = match message.role {
         Role::System => "system",
         Role::Human => "user",
@@ -833,8 +936,16 @@ fn convert_message(message: &Message) -> OpenAIMessage {
             let mut content_parts = Vec::new();
             for part in parts {
                 match part {
-                    ContentPart::Text { text } => {
-                        content_parts.push(OpenAIContentPart::Text { text: text.clone() });
+                    ContentPart::Text {
+                        text,
+                        cache_control,
+                    } => {
+                        content_parts.push(OpenAIContentPart::Text {
+                            text: text.clone(),
+                            prompt_cache_breakpoint: cache_control
+                                .filter(|_| breakpoints_enabled)
+                                .map(|_| OpenAICacheBreakpoint::EXPLICIT),
+                        });
                     }
                     ContentPart::Image(img) => {
                         let url = match &img.source {
@@ -848,7 +959,10 @@ fn convert_message(message: &Message) -> OpenAIMessage {
                         });
                     }
                     ContentPart::Thinking { text, .. } => {
-                        content_parts.push(OpenAIContentPart::Text { text: text.clone() });
+                        content_parts.push(OpenAIContentPart::Text {
+                            text: text.clone(),
+                            prompt_cache_breakpoint: None,
+                        });
                     }
                 }
             }
@@ -1045,6 +1159,176 @@ fn convert_openai_sse_chunk(chunk: OpenAISSEChunk) -> Result<crate::llm::Message
         tool_call_chunks,
         usage_delta: chunk.usage.map(TokenUsage::from),
     })
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::indexing_slicing,
+    clippy::unwrap_used,
+    reason = "tests assert on JSON shapes they constructed themselves"
+)]
+mod cache_wire_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn call_options(mode: PromptCacheMode) -> CallOptions {
+        CallOptions {
+            prompt_cache_mode: Some(mode),
+            prompt_cache_key: Some("tenant-a".to_string()),
+            prompt_cache_ttl: Some(PromptCacheTtl::Min30),
+            ..CallOptions::default()
+        }
+    }
+
+    #[test]
+    fn test_breakpoint_serialized_when_explicit() {
+        let message = Message {
+            id: "m1".to_string(),
+            role: Role::Human,
+            content: Content::MultiPart(vec![ContentPart::text_with_cache_control(
+                "history",
+                juncture_core::prefix::CacheControl::ephemeral(),
+            )]),
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+            name: None,
+            usage: None,
+        };
+
+        let converted = convert_message(&message, true);
+        let serialized = serde_json::to_value(&converted).expect("serialize");
+        assert_eq!(
+            serialized["content"][0]["prompt_cache_breakpoint"]["mode"],
+            "explicit"
+        );
+    }
+
+    #[test]
+    fn test_breakpoint_omitted_when_disabled() {
+        let message = Message {
+            id: "m1".to_string(),
+            role: Role::Human,
+            content: Content::MultiPart(vec![ContentPart::text_with_cache_control(
+                "history",
+                juncture_core::prefix::CacheControl::ephemeral(),
+            )]),
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+            name: None,
+            usage: None,
+        };
+
+        let converted = convert_message(&message, false);
+        let serialized = serde_json::to_value(&converted).expect("serialize");
+        assert!(
+            serialized["content"][0]
+                .get("prompt_cache_breakpoint")
+                .is_none(),
+            "Disabled mode must emit no breakpoint (no cache-write billing)"
+        );
+    }
+
+    #[test]
+    fn test_no_breakpoint_when_none_attached() {
+        let message = Message {
+            id: "m1".to_string(),
+            role: Role::Human,
+            content: Content::MultiPart(vec![ContentPart::text("plain")]),
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+            name: None,
+            usage: None,
+        };
+
+        let converted = convert_message(&message, true);
+        let serialized = serde_json::to_value(&converted).expect("serialize");
+        assert!(
+            serialized["content"][0]
+                .get("prompt_cache_breakpoint")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn test_implicit_mode_sends_no_cache_options() {
+        let options = CallOptions::default();
+        assert!(resolve_cache_options(Some(&options)).is_none());
+    }
+
+    #[test]
+    fn test_explicit_mode_sends_mode_and_ttl() {
+        let options = call_options(PromptCacheMode::Explicit);
+        let resolved = resolve_cache_options(Some(&options)).expect("options present");
+        let serialized = serde_json::to_value(&resolved).expect("serialize");
+        assert_eq!(serialized["mode"], "explicit");
+        assert_eq!(serialized["ttl"], "30m");
+    }
+
+    #[test]
+    fn test_disabled_mode_sends_explicit_without_breakpoints() {
+        let options = call_options(PromptCacheMode::Disabled);
+        let resolved = resolve_cache_options(Some(&options)).expect("options present");
+        let serialized = serde_json::to_value(&resolved).expect("serialize");
+        assert_eq!(serialized["mode"], "explicit");
+        assert!(!breakpoints_enabled(Some(&options)));
+    }
+
+    #[test]
+    fn test_prompt_cache_ttl_wire_spelling() {
+        assert_eq!(PromptCacheTtl::Min30.as_openai_str(), "30m");
+        assert_eq!(PromptCacheTtl::Hour12.as_openai_str(), "12h");
+    }
+
+    #[test]
+    fn test_prompt_cache_key_is_routed_through_request() {
+        // The key must be present in the request body when configured; it is
+        // what keeps a warm prefix pinned to one machine.
+        let options = call_options(PromptCacheMode::Explicit);
+        let request = OpenAIRequest {
+            model: "gpt-5.6".to_string(),
+            messages: Vec::new(),
+            temperature: None,
+            max_tokens: None,
+            top_p: None,
+            stop: None,
+            tools: None,
+            tool_choice: None,
+            prompt_cache_key: options.prompt_cache_key.clone(),
+            prompt_cache_options: resolve_cache_options(Some(&options)),
+            stream: false,
+        };
+        let serialized = serde_json::to_value(&request).expect("serialize");
+        assert_eq!(serialized["prompt_cache_key"], "tenant-a");
+        assert_eq!(serialized["prompt_cache_options"]["mode"], "explicit");
+    }
+
+    #[test]
+    fn test_usage_cache_counters_deserialize() {
+        let json = json!({
+            "prompt_tokens": 1000,
+            "completion_tokens": 20,
+            "total_tokens": 1020,
+            "prompt_tokens_details": {"cached_tokens": 800, "cache_write_tokens": 0}
+        });
+        let usage: OpenAIUsage = serde_json::from_value(json).expect("parse usage");
+        let mapped = TokenUsage::from(usage);
+        assert_eq!(mapped.cached_tokens, 800);
+        assert_eq!(mapped.cache_write_tokens, 0);
+        assert!((mapped.cache_hit_rate() - 0.8).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_usage_without_details_still_parses() {
+        let json = json!({
+            "prompt_tokens": 100,
+            "completion_tokens": 10,
+            "total_tokens": 110
+        });
+        let usage: OpenAIUsage = serde_json::from_value(json).expect("parse usage");
+        let mapped = TokenUsage::from(usage);
+        assert_eq!(mapped.cached_tokens, 0);
+        assert!((mapped.cache_hit_rate() - 0.0).abs() < f64::EPSILON);
+    }
 }
 
 // Rust guideline compliant 2026-05-19

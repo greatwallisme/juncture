@@ -12,6 +12,7 @@ pub mod llm;
 pub mod node;
 pub mod observability;
 pub mod prebuilt;
+pub mod prefix;
 pub mod pregel;
 pub mod runtime;
 pub mod send;
@@ -236,12 +237,17 @@ pub use interrupt::{
     should_interrupt,
 };
 pub use llm::{
-    CallOptions, ChatModel, JsonSchema, LlmError, MessageChunk, StructuredOutputModel, ToolChoice,
-    ToolDefinition,
+    CallOptions, ChatModel, JsonSchema, LlmError, MessageChunk, PromptCacheMode, PromptCacheTtl,
+    StructuredOutputModel, ToolChoice, ToolDefinition,
 };
 pub use node::{IntoNode, Node};
 pub use observability::{CacheKeyInput, GraphLifecycleCallback, MetricsCollector};
 pub use prebuilt::{PromptSource, ReactAgentConfig};
+pub use prefix::{
+    Breakpoint, CacheControl, CacheTtl, MAX_PLANNED_BREAKPOINTS, PrefixSegment, default_ttl,
+    estimate_tokens, hash_prefix, min_cacheable_tokens, normalize_json, normalize_tool_definition,
+    ordered_tool_definitions, plan_breakpoints, prefix_bytes,
+};
 pub use pregel::{
     BubbleUp, BudgetConfig, BudgetExceededAction, BudgetExceededReason, BudgetTracker, BudgetUsage,
     Durability, ExecutionConfig, ExecutionContext, FieldVersionTracker, GraphDrained,

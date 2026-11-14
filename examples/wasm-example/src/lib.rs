@@ -159,7 +159,7 @@ pub async fn chat(
         Content::Text(t) => t.clone(),
         Content::MultiPart(parts) => {
             parts.iter().filter_map(|p| {
-                if let juncture::state::ContentPart::Text { text } = p {
+                if let juncture::state::ContentPart::Text { text, .. } = p {
                     Some(text.as_str())
                 } else {
                     None

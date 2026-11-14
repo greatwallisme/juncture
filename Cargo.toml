@@ -6,6 +6,7 @@ members = [
     "crates/juncture-derive",
     "crates/juncture-checkpoint",
     "crates/juncture-tracing",
+    "crates/juncture-mcp",
     "crates/juncture-store",
     "crates/juncture-telemetry",
     "examples",
@@ -28,6 +29,18 @@ keywords = ["llm", "agent", "state-machine", "langgraph", "graph"]
 categories = ["development-tools", "network-programming", "asynchronous"]
 rust-version = "1.88"
 
+# Dependency policy (prompt-cache correctness, design 12 §2.4 A)
+#
+# `serde_json` MUST NOT be built with `preserve_order`. Without it, `Value`
+# objects are `BTreeMap`-backed and therefore key-sorted, which keeps the
+# serialized prompt prefix byte-stable. Enabling `preserve_order` would switch
+# every `Value` to insertion order and silently invalidate the provider prompt
+# caches with no error anywhere. `juncture_core::prefix` additionally normalizes
+# explicitly so the invariant does not rely on this build detail alone; do not
+# rely on it instead of that normalization.
+#
+# Cargo has no per-dependency "negative feature" syntax, so this is enforced by
+# review and by the `prefix` module's order-independence tests.
 [workspace.lints.rust]
 ambiguous_negative_literals = "warn"
 missing_debug_implementations = "warn"

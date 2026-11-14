@@ -26,7 +26,9 @@ uuid = { version = "1", features = ["v4", "v6"] }
 tracing = "0.1"
 
 # Provider dependencies (feature-gated)
-reqwest = { version = "0.12", features = ["json", "stream"], optional = true }
+# rustls (pure Rust, ring backend) instead of the default native-tls so the
+# build never links the system OpenSSL. TLS roots come from webpki-roots.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots", "http2", "json", "stream"], optional = true }
 bytes = { version = "1", optional = true }
 
 [features]

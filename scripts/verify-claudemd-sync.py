@@ -28,7 +28,8 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 
 CRATES = ["juncture", "juncture-core", "juncture-derive",
-          "juncture-checkpoint", "juncture-tracing", "juncture-store"]
+          "juncture-checkpoint", "juncture-tracing", "juncture-mcp",
+          "juncture-store"]
 
 CLAUDEMD_FILES = [
     "CLAUDE.md",
@@ -37,6 +38,7 @@ CLAUDEMD_FILES = [
     "crates/juncture-derive/CLAUDE.md",
     "crates/juncture-checkpoint/CLAUDE.md",
     "crates/juncture-tracing/CLAUDE.md",
+    "crates/juncture-mcp/CLAUDE.md",
     "crates/juncture-store/CLAUDE.md",
     "benchmarks/CLAUDE.md",
     "examples/CLAUDE.md",

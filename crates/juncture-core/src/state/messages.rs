@@ -44,10 +44,23 @@ pub enum Content {
 }
 
 /// Content part for multimodal messages
+///
+/// Text parts carry an optional [`CacheControl`](crate::prefix::CacheControl)
+/// breakpoint. This is the only
+/// abstraction both Anthropic (`cache_control`) and `OpenAI`
+/// (`prompt_cache_breakpoint`) can express, because both mark a *content block*
+/// rather than a request. Placing the marker on the content also keeps it out of
+/// call parameters, where it does not belong (design `12` §2.5).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum ContentPart {
-    /// Text content
-    Text { text: String },
+    /// Text content, optionally ending a prompt-cache prefix segment
+    Text {
+        /// Text payload
+        text: String,
+        /// Explicit cache breakpoint; `None` serializes no marker at all
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cache_control: Option<crate::prefix::CacheControl>,
+    },
     /// Image data
     Image(ImageData),
     /// Extended thinking content (Anthropic API)
@@ -57,6 +70,47 @@ pub enum ContentPart {
         text: String,
         signature: Option<String>,
     },
+}
+
+impl ContentPart {
+    /// Create a plain text part with no cache breakpoint.
+    #[must_use]
+    pub fn text(text: impl Into<String>) -> Self {
+        Self::Text {
+            text: text.into(),
+            cache_control: None,
+        }
+    }
+
+    /// Create a text part that ends a prompt-cache prefix segment.
+    #[must_use]
+    pub fn text_with_cache_control(
+        text: impl Into<String>,
+        cache_control: crate::prefix::CacheControl,
+    ) -> Self {
+        Self::Text {
+            text: text.into(),
+            cache_control: Some(cache_control),
+        }
+    }
+
+    /// Text payload of a text part; `None` for non-text parts.
+    #[must_use]
+    pub fn as_text(&self) -> Option<&str> {
+        match self {
+            Self::Text { text, .. } => Some(text),
+            Self::Image(_) | Self::Thinking { .. } => None,
+        }
+    }
+
+    /// Cache breakpoint attached to this part, if any.
+    #[must_use]
+    pub const fn cache_control(&self) -> Option<crate::prefix::CacheControl> {
+        match self {
+            Self::Text { cache_control, .. } => *cache_control,
+            Self::Image(_) | Self::Thinking { .. } => None,
+        }
+    }
 }
 
 /// Image data for multimodal content
@@ -89,6 +143,19 @@ pub struct ToolCall {
 }
 
 /// Token usage information from LLM API responses
+///
+/// Providers disagree on which counters they report:
+///
+/// - `OpenAI` reports `prompt_tokens` / `completion_tokens` / `total_tokens` and
+///   nests `prompt_tokens_details.cached_tokens` (plus `cache_write_tokens` for
+///   GPT-5.6 and later).
+/// - Anthropic reports `input_tokens` / `output_tokens` and omits `total_tokens`
+///   entirely, adding `cache_creation_input_tokens` / `cache_read_input_tokens`.
+///
+/// Every field beyond `input_tokens` / `output_tokens` therefore carries
+/// `#[serde(default)]`: a provider that does not emit a counter must still
+/// deserialize. Missing `total_tokens` previously failed the whole response
+/// parse and broke every Anthropic `invoke` (design 12 §0.2).
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct TokenUsage {
     /// Number of input tokens
@@ -96,7 +163,70 @@ pub struct TokenUsage {
     /// Number of output tokens
     pub output_tokens: u64,
     /// Total tokens used
+    ///
+    /// Anthropic does not return this field; it defaults to 0 rather than
+    /// failing deserialization.
+    #[serde(default)]
     pub total_tokens: u64,
+    /// Anthropic: tokens written into the prompt cache by this request
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub cache_creation_input_tokens: u64,
+    /// Anthropic: tokens served from the prompt cache by this request
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub cache_read_input_tokens: u64,
+    /// `OpenAI`: tokens written into the cache (GPT-5.6 and later)
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub cache_write_tokens: u64,
+    /// `OpenAI`: `prompt_tokens_details.cached_tokens`
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub cached_tokens: u64,
+}
+
+/// Serde helper: omit zero-valued cache counters from the wire form.
+///
+/// Takes `&u64` because `serde(skip_serializing_if = ...)` hands predicates a
+/// reference; the copy lint is not applicable to that callback shape.
+#[allow(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "serde skip_serializing_if predicates receive &u64"
+)]
+const fn is_zero(value: &u64) -> bool {
+    *value == 0
+}
+
+impl TokenUsage {
+    /// Fraction of prompt tokens served from cache for this request.
+    ///
+    /// The numerator is the provider's cache-read counter. The denominator
+    /// differs by provider shape and is normalized here:
+    ///
+    /// - Anthropic: `input_tokens` counts only the *uncached* remainder, so the
+    ///   denominator is `input_tokens + cache_read_input_tokens`.
+    /// - `OpenAI`: `cached_tokens` is already included in `input_tokens`, so the
+    ///   denominator is `input_tokens`.
+    ///
+    /// Returns 0.0 when no prompt tokens were reported, which is the only
+    /// honest answer for "unknown".
+    #[must_use]
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "token counts fit exactly in f64 across the whole practical range"
+    )]
+    pub fn cache_hit_rate(&self) -> f64 {
+        let (hits, denominator) = if self.cached_tokens > 0 {
+            (self.cached_tokens, self.input_tokens)
+        } else {
+            (
+                self.cache_read_input_tokens,
+                self.input_tokens + self.cache_read_input_tokens,
+            )
+        };
+
+        if denominator == 0 {
+            return 0.0;
+        }
+        hits as f64 / denominator as f64
+    }
 }
 
 /// Special sentinel: remove all messages
@@ -277,7 +407,7 @@ impl Message {
             Content::MultiPart(parts) => parts
                 .iter()
                 .find_map(|p| match p {
-                    ContentPart::Text { text } => Some(text.as_str()),
+                    ContentPart::Text { text, .. } => Some(text.as_str()),
                     _ => None,
                 })
                 .unwrap_or(""),
@@ -405,6 +535,90 @@ mod tests {
 
         assert!(deserialized.messages.is_some());
         assert_eq!(deserialized.messages.unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_token_usage_deserializes_anthropic_shape() {
+        // Anthropic Messages API usage omits `total_tokens` entirely and adds
+        // cache counters. Parsing must succeed and expose the cache numbers,
+        // otherwise every cache observation downstream is impossible.
+        let json = r#"{
+            "input_tokens": 2095,
+            "output_tokens": 503,
+            "cache_creation_input_tokens": 1886,
+            "cache_read_input_tokens": 0
+        }"#;
+
+        let usage: TokenUsage =
+            serde_json::from_str(json).expect("Anthropic usage without total_tokens must parse");
+
+        assert_eq!(usage.input_tokens, 2095);
+        assert_eq!(usage.output_tokens, 503);
+        assert_eq!(usage.total_tokens, 0);
+        assert_eq!(usage.cache_creation_input_tokens, 1886);
+        assert_eq!(usage.cache_read_input_tokens, 0);
+        assert_eq!(usage.cached_tokens, 0);
+        assert_eq!(usage.cache_write_tokens, 0);
+    }
+
+    #[test]
+    fn test_token_usage_deserializes_openai_shape() {
+        let json = r#"{"input_tokens": 1000, "output_tokens": 20,
+                       "total_tokens": 1020, "cached_tokens": 800}"#;
+        let usage: TokenUsage = serde_json::from_str(json).expect("OpenAI usage must parse");
+        assert_eq!(usage.total_tokens, 1020);
+        assert_eq!(usage.cached_tokens, 800);
+        assert_eq!(usage.cache_read_input_tokens, 0);
+    }
+
+    #[test]
+    fn test_token_usage_cache_hit_rate_anthropic() {
+        // Anthropic: input_tokens is the uncached remainder, so the cache-read
+        // counter is added to the denominator.
+        let usage = TokenUsage {
+            input_tokens: 100,
+            output_tokens: 0,
+            total_tokens: 0,
+            cache_creation_input_tokens: 900,
+            cache_read_input_tokens: 900,
+            cache_write_tokens: 0,
+            cached_tokens: 0,
+        };
+        assert!((usage.cache_hit_rate() - 0.9).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_token_usage_cache_hit_rate_openai() {
+        // OpenAI: cached_tokens is already inside input_tokens.
+        let usage = TokenUsage {
+            input_tokens: 1000,
+            output_tokens: 0,
+            total_tokens: 0,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 0,
+            cache_write_tokens: 0,
+            cached_tokens: 800,
+        };
+        assert!((usage.cache_hit_rate() - 0.8).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_token_usage_cache_hit_rate_empty() {
+        assert!((TokenUsage::default().cache_hit_rate() - 0.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_token_usage_zero_cache_fields_omitted_from_wire() {
+        let usage = TokenUsage {
+            input_tokens: 10,
+            output_tokens: 5,
+            total_tokens: 15,
+            ..TokenUsage::default()
+        };
+        let json = serde_json::to_value(&usage).expect("serialize");
+        assert_eq!(json["input_tokens"], 10);
+        assert!(json.get("cached_tokens").is_none());
+        assert!(json.get("cache_read_input_tokens").is_none());
     }
 }
 

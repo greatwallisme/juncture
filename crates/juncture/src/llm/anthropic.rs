@@ -15,6 +15,7 @@ use crate::llm::{
     BoxStream, CallOptions, ChatModel, Content, ContentPart, LlmError, Message, Role, TokenUsage,
     ToolCall, ToolChoice, ToolDefinition,
 };
+use juncture_core::prefix::PrefixSegment;
 
 use juncture_tracing::spans::attrs;
 
@@ -291,28 +292,11 @@ impl ChatModel for ChatAnthropic {
             .iter()
             .partition(|m| matches!(m.role, Role::System));
 
-        let system = system_msg
-            .first()
-            .and_then(|m| match &m.content {
-                Content::Text(text) => Some(text.clone()),
-                Content::MultiPart(_) => None,
-            })
-            .or_else(|| {
-                if system_msg.is_empty() {
-                    None
-                } else {
-                    Some(String::new())
-                }
-            });
-
-        let mut converted_messages = Vec::new();
-        for m in &api_messages {
-            let content = convert_content(&m.content, &m.tool_calls)?;
-            converted_messages.push(AnthropicMessage {
-                role: convert_role_to_anthropic(&m.role).to_string(),
-                content,
-            });
-        }
+        let (tools_wire, tools_tokens) = build_anthropic_tools(&self.tools, model);
+        let (system, system_tokens) = build_system_blocks(&system_msg, model, tools_tokens);
+        record_prefix_hash(&self.tools, &system_msg);
+        let converted_messages =
+            convert_messages_with_breakpoints(&api_messages, model, tools_tokens, system_tokens)?;
 
         let request = AnthropicRequest {
             model: model.clone(),
@@ -324,20 +308,7 @@ impl ChatModel for ChatAnthropic {
             temperature: options.and_then(|o| o.temperature).or(self.temperature),
             top_p: options.and_then(|o| o.top_p).or(self.top_p),
             stop_sequences: options.and_then(|o| o.stop_sequences.clone()),
-            tools: if self.tools.is_empty() {
-                None
-            } else {
-                Some(
-                    self.tools
-                        .iter()
-                        .map(|t| AnthropicTool {
-                            name: t.name.clone(),
-                            description: t.description.clone(),
-                            input_schema: t.parameters.clone(),
-                        })
-                        .collect(),
-                )
-            },
+            tools: tools_wire,
             tool_choice: options
                 .and_then(|o| o.tool_choice.as_ref())
                 .map(Self::convert_tool_choice),
@@ -371,6 +342,11 @@ impl ChatModel for ChatAnthropic {
         if let Some(usage) = &api_response.usage {
             tracing::Span::current().record(attrs::TOKENS_INPUT, usage.input_tokens);
             tracing::Span::current().record(attrs::TOKENS_OUTPUT, usage.output_tokens);
+            tracing::Span::current()
+                .record(attrs::CACHE_READ_TOKENS, usage.cache_read_input_tokens);
+            tracing::Span::current()
+                .record(attrs::CACHE_WRITE_TOKENS, usage.cache_creation_input_tokens);
+            tracing::Span::current().record(attrs::CACHE_HIT_RATE, usage.cache_hit_rate());
 
             // Calculate and record cost
             let pricing_table = crate::llm::PricingTable::default();
@@ -481,36 +457,20 @@ impl ChatModel for ChatAnthropic {
             .iter()
             .partition(|m| matches!(m.role, Role::System));
 
-        let system = system_msg
-            .first()
-            .and_then(|m| match &m.content {
-                Content::Text(text) => Some(text.clone()),
-                Content::MultiPart(_) => None,
-            })
-            .or_else(|| {
-                if system_msg.is_empty() {
-                    None
-                } else {
-                    Some(String::new())
-                }
-            });
+        let (tools_wire, tools_tokens) = build_anthropic_tools(&self.tools, model);
+        let (system, system_tokens) = build_system_blocks(&system_msg, model, tools_tokens);
+        record_prefix_hash(&self.tools, &system_msg);
 
-        let mut converted_messages = Vec::new();
-        let conversion_result: Result<(), LlmError> = (|| {
-            for m in &api_messages {
-                let content = convert_content(&m.content, &m.tool_calls)?;
-                converted_messages.push(AnthropicMessage {
-                    role: convert_role_to_anthropic(&m.role).to_string(),
-                    content,
-                });
-            }
-            Ok(())
-        })();
-
-        // If conversion failed, return a stream with the error
-        if let Err(e) = conversion_result {
-            return Ok(Box::pin(stream::once(async move { Err(e) })));
-        }
+        // If conversion failed, return a stream with the error.
+        let converted_messages = match convert_messages_with_breakpoints(
+            &api_messages,
+            model,
+            tools_tokens,
+            system_tokens,
+        ) {
+            Ok(messages) => messages,
+            Err(e) => return Ok(Box::pin(stream::once(async move { Err(e) }))),
+        };
 
         let request = AnthropicRequest {
             model: model.clone(),
@@ -522,20 +482,7 @@ impl ChatModel for ChatAnthropic {
             temperature: options.and_then(|o| o.temperature).or(self.temperature),
             top_p: options.and_then(|o| o.top_p).or(self.top_p),
             stop_sequences: options.and_then(|o| o.stop_sequences.clone()),
-            tools: if self.tools.is_empty() {
-                None
-            } else {
-                Some(
-                    self.tools
-                        .iter()
-                        .map(|t| AnthropicTool {
-                            name: t.name.clone(),
-                            description: t.description.clone(),
-                            input_schema: t.parameters.clone(),
-                        })
-                        .collect(),
-                )
-            },
+            tools: tools_wire,
             tool_choice: options
                 .and_then(|o| o.tool_choice.as_ref())
                 .map(Self::convert_tool_choice),
@@ -675,13 +622,202 @@ impl ChatModel for ChatAnthropic {
     }
 }
 
+/// Build the wire tool table plus the S1 breakpoint decision.
+///
+/// Order is normalized by [`juncture_core::prefix::ordered_tool_definitions`] so
+/// the first prefix segment is byte-stable, then the planned breakpoints decide
+/// whether the last tool entry carries `cache_control` (design `12` §2.7).
+fn build_anthropic_tools(
+    tools: &[ToolDefinition],
+    model: &str,
+) -> (Option<Vec<AnthropicTool>>, u64) {
+    if tools.is_empty() {
+        return (None, 0);
+    }
+
+    let ordered = juncture_core::prefix::ordered_tool_definitions(tools);
+    let tokens = juncture_core::prefix::estimate_tokens(
+        serde_json::to_vec(&ordered).map_or(0, |bytes| bytes.len()),
+    );
+
+    let plan = juncture_core::prefix::plan_breakpoints(model, &[(PrefixSegment::Tools, tokens)]);
+    let tools_breakpoint = plan
+        .iter()
+        .find(|b| b.segment == PrefixSegment::Tools)
+        .map(|b| {
+            AnthropicCacheControl::from_provider(juncture_core::prefix::CacheControl::new(b.ttl))
+        });
+
+    let last = ordered.len().saturating_sub(1);
+    let wire = ordered
+        .iter()
+        .enumerate()
+        .map(|(index, tool)| AnthropicTool {
+            name: tool.name.clone(),
+            description: tool.description.clone(),
+            input_schema: tool.parameters.clone(),
+            cache_control: if index == last {
+                tools_breakpoint.clone()
+            } else {
+                None
+            },
+        })
+        .collect();
+
+    (Some(wire), tokens)
+}
+
+/// Build the system prompt block array plus the S2 breakpoint decision.
+///
+/// The system prompt is the segment most worth caching: it is tenant-level
+/// content (business background, output constraints) that changes least, which
+/// is why it takes the extended 1h TTL (design `12` §2.7 rule 1).
+fn build_system_blocks(
+    system_msg: &[&Message],
+    model: &str,
+    tools_tokens: u64,
+) -> (Option<Vec<AnthropicSystemBlock>>, u64) {
+    let text = system_msg.first().and_then(|m| match &m.content {
+        Content::Text(text) => Some(text.clone()),
+        Content::MultiPart(parts) => parts
+            .iter()
+            .find_map(ContentPart::as_text)
+            .map(str::to_string),
+    });
+
+    let Some(text) = text.or_else(|| {
+        if system_msg.is_empty() {
+            None
+        } else {
+            Some(String::new())
+        }
+    }) else {
+        return (None, 0);
+    };
+
+    let tokens = juncture_core::prefix::estimate_tokens(text.len());
+    let plan = juncture_core::prefix::plan_breakpoints(
+        model,
+        &[
+            (PrefixSegment::Tools, tools_tokens),
+            (PrefixSegment::System, tokens),
+        ],
+    );
+    let system_breakpoint = plan
+        .iter()
+        .find(|b| b.segment == PrefixSegment::System)
+        .map(|b| {
+            AnthropicCacheControl::from_provider(juncture_core::prefix::CacheControl::new(b.ttl))
+        });
+
+    (
+        Some(vec![AnthropicSystemBlock {
+            type_: "text",
+            text,
+            cache_control: system_breakpoint,
+        }]),
+        tokens,
+    )
+}
+
+/// Record a hash of the stable prefix (S1 tools + S2 system) on the active span.
+///
+/// A changed hash between two otherwise identical requests localizes a cache
+/// miss to the prefix instead of leaving the drop unexplained (design `12`
+/// §2.8 item 3).
+fn record_prefix_hash(tools: &[ToolDefinition], system_msg: &[&Message]) {
+    let system_text = system_msg.first().map_or("", |m| m.content_text());
+    let bytes = juncture_core::prefix::prefix_bytes(tools, system_text, &[]);
+    let hash = xxh3_64(&bytes);
+    tracing::Span::current().record(attrs::PREFIX_HASH, hash);
+}
+
+/// Stable 64-bit hash of prefix bytes.
+fn xxh3_64(bytes: &[u8]) -> u64 {
+    juncture_core::prefix::hash_prefix(bytes)
+}
+
+/// Convert messages and place the S3 history breakpoint.
+///
+/// A breakpoint covers everything *before* it, so S3 marks the last completed
+/// turn, not the newest message: the newest message is this request's volatile
+/// turn (S4) and marking it would pay a cache write then immediately invalidate
+/// it (design `12` §2.3, §2.7).
+///
+/// The breakpoint is attached to the final content block of the second-to-last
+/// message. When that message is plain text it is promoted to block form, since
+/// `cache_control` is only valid on blocks.
+fn convert_messages_with_breakpoints(
+    api_messages: &[&Message],
+    model: &str,
+    tools_tokens: u64,
+    system_tokens: u64,
+) -> Result<Vec<AnthropicMessage>, LlmError> {
+    let mut converted = Vec::with_capacity(api_messages.len());
+    for m in api_messages {
+        converted.push(AnthropicMessage {
+            role: convert_role_to_anthropic(&m.role).to_string(),
+            content: convert_content(&m.content, &m.tool_calls)?,
+        });
+    }
+
+    // History is everything except the newest message.
+    let Some(history_end) = converted.len().checked_sub(2) else {
+        return Ok(converted);
+    };
+
+    let history_tokens = juncture_core::prefix::estimate_tokens(
+        serde_json::to_vec(&converted[..=history_end]).map_or(0, |bytes| bytes.len()),
+    );
+    let plan = juncture_core::prefix::plan_breakpoints(
+        model,
+        &[
+            (PrefixSegment::Tools, tools_tokens),
+            (PrefixSegment::System, system_tokens),
+            (PrefixSegment::History, history_tokens),
+        ],
+    );
+    let Some(breakpoint) = plan
+        .iter()
+        .find(|b| b.segment == PrefixSegment::History)
+        .map(|b| {
+            AnthropicCacheControl::from_provider(juncture_core::prefix::CacheControl::new(b.ttl))
+        })
+    else {
+        return Ok(converted);
+    };
+
+    let target = &mut converted[history_end];
+    match &mut target.content {
+        AnthropicContent::Text(text) => {
+            let text = std::mem::take(text);
+            target.content = AnthropicContent::Blocks(vec![ContentBlock::Text {
+                text,
+                cache_control: Some(breakpoint),
+            }]);
+        }
+        AnthropicContent::Blocks(blocks) => {
+            // Attach to the last block so the marker covers the whole turn.
+            if let Some(ContentBlock::Text { cache_control, .. }) = blocks.last_mut() {
+                *cache_control = Some(breakpoint);
+            }
+        }
+    }
+
+    Ok(converted)
+}
+
 /// Anthropic API request format.
+///
+/// `system` is a block array, not a string: a cache breakpoint can only be
+/// attached to a block, and the system prompt is the segment most worth caching
+/// (design `12` §2.5, §2.7).
 #[derive(Debug, Serialize)]
 struct AnthropicRequest {
     model: String,
     messages: Vec<AnthropicMessage>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    system: Option<String>,
+    system: Option<Vec<AnthropicSystemBlock>>,
     max_tokens: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     temperature: Option<f32>,
@@ -711,13 +847,46 @@ enum AnthropicContent {
     Blocks(Vec<ContentBlock>),
 }
 
+/// Anthropic API system prompt block.
+#[derive(Debug, Serialize)]
+struct AnthropicSystemBlock {
+    #[serde(rename = "type")]
+    type_: &'static str,
+    text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cache_control: Option<AnthropicCacheControl>,
+}
+
+/// Anthropic API cache breakpoint marker.
+#[derive(Clone, Debug, Serialize)]
+struct AnthropicCacheControl {
+    #[serde(rename = "type")]
+    type_: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ttl: Option<&'static str>,
+}
+
+impl AnthropicCacheControl {
+    /// Convert a provider-agnostic breakpoint into the Anthropic wire shape.
+    const fn from_provider(control: juncture_core::prefix::CacheControl) -> Self {
+        Self {
+            type_: "ephemeral",
+            ttl: control.ttl.as_anthropic_str(),
+        }
+    }
+}
+
 /// Anthropic API content block.
 #[derive(Debug, Serialize)]
 #[serde(tag = "type")]
 #[allow(dead_code, reason = "deserialization target, fields read indirectly")]
 enum ContentBlock {
     #[serde(rename = "text")]
-    Text { text: String },
+    Text {
+        text: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cache_control: Option<AnthropicCacheControl>,
+    },
     #[serde(rename = "image")]
     Image { source: ImageSource },
     #[serde(rename = "tool_use")]
@@ -742,11 +911,16 @@ struct ImageSource {
 }
 
 /// Anthropic API tool definition.
+///
+/// `cache_control` sits on the *last* tool entry to place the S1 breakpoint
+/// after the entire tool table (Anthropic covers everything before the marker).
 #[derive(Debug, Serialize)]
 struct AnthropicTool {
     name: String,
     description: String,
     input_schema: serde_json::Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cache_control: Option<AnthropicCacheControl>,
 }
 
 /// Anthropic API tool choice.
@@ -818,7 +992,13 @@ fn convert_content(
             let mut blocks = Vec::new();
             for p in parts {
                 let block = match p {
-                    ContentPart::Text { text } => ContentBlock::Text { text: text.clone() },
+                    ContentPart::Text {
+                        text,
+                        cache_control,
+                    } => ContentBlock::Text {
+                        text: text.clone(),
+                        cache_control: cache_control.map(AnthropicCacheControl::from_provider),
+                    },
                     ContentPart::Image(img) => {
                         let (media_type, data) = match &img.source {
                             crate::llm::ImageSource::Base64(b64) => {
@@ -834,7 +1014,10 @@ fn convert_content(
                             source: ImageSource { media_type, data },
                         }
                     }
-                    ContentPart::Thinking { text, .. } => ContentBlock::Text { text: text.clone() },
+                    ContentPart::Thinking { text, .. } => ContentBlock::Text {
+                        text: text.clone(),
+                        cache_control: None,
+                    },
                 };
                 blocks.push(block);
             }
@@ -1058,6 +1241,258 @@ fn convert_sse_event(event: AnthropicSSEEvent) -> Result<crate::llm::MessageChun
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
+    clippy::indexing_slicing,
+    reason = "tests assert on JSON shapes they constructed themselves"
+)]
+mod cache_wire_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn tool(name: &str) -> ToolDefinition {
+        ToolDefinition {
+            name: name.to_string(),
+            description: format!("{name} description"),
+            parameters: json!({"type": "object", "properties": {"z": {}, "a": {}}}),
+        }
+    }
+
+    fn long_tools(count: usize) -> Vec<ToolDefinition> {
+        // ~200 bytes each so the whole table comfortably clears 1024 tokens.
+        (0..count)
+            .map(|i| ToolDefinition {
+                name: format!("tool_{i:03}"),
+                description: "x".repeat(180),
+                parameters: json!({"type": "object"}),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_tools_wire_is_sorted_and_normalized() {
+        let tools = vec![tool("zeta"), tool("alpha")];
+        let (wire, _tokens) = build_anthropic_tools(&tools, "claude-sonnet-4-20250514");
+        let wire = wire.expect("tools present");
+        let names: Vec<&str> = wire.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(names, vec!["alpha", "zeta"]);
+
+        let serialized = serde_json::to_string(&wire[0].input_schema).expect("serialize");
+        assert_eq!(
+            serialized,
+            r#"{"properties":{"a":{},"z":{}},"type":"object"}"#
+        );
+    }
+
+    #[test]
+    fn test_small_tool_table_gets_no_breakpoint() {
+        // Below the model's minimum cacheable length, a breakpoint would be
+        // silently ignored and waste one of four slots.
+        let (wire, _tokens) = build_anthropic_tools(&[tool("only")], "claude-sonnet-4-20250514");
+        let wire = wire.expect("tools present");
+        assert!(
+            wire.iter().all(|t| t.cache_control.is_none()),
+            "a sub-threshold tool table must not carry a breakpoint"
+        );
+    }
+
+    #[test]
+    fn test_large_tool_table_breakpoint_lands_on_last_entry_only() {
+        let (wire, _tokens) = build_anthropic_tools(&long_tools(20), "claude-sonnet-4-20250514");
+        let wire = wire.expect("tools present");
+        let marked: Vec<usize> = wire
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| t.cache_control.is_some())
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(
+            marked,
+            vec![wire.len() - 1],
+            "S1 breakpoint ends the tool table"
+        );
+    }
+
+    #[test]
+    fn test_system_block_is_array_with_breakpoint_when_long_enough() {
+        let text = "business background ".repeat(300);
+        let message = Message::system(&text);
+        let system_msg = vec![&message];
+        let (blocks, tokens) = build_system_blocks(&system_msg, "claude-sonnet-4-20250514", 5000);
+        let blocks = blocks.expect("system present");
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].type_, "text");
+        assert!(blocks[0].cache_control.is_some(), "system should be marked");
+        assert!(tokens > 0);
+    }
+
+    #[test]
+    fn test_system_block_breakpoint_uses_one_hour_ttl() {
+        // S2 is the most stable, highest-value segment, so it takes the 1h TTL.
+        let text = "x".repeat(8000);
+        let message = Message::system(&text);
+        let system_msg = vec![&message];
+        let (blocks, _tokens) = build_system_blocks(&system_msg, "claude-sonnet-4-20250514", 5000);
+        let control = blocks.expect("system present")[0]
+            .cache_control
+            .clone()
+            .expect("system breakpoint");
+        assert_eq!(control.type_, "ephemeral");
+        assert_eq!(control.ttl, Some("1h"));
+    }
+
+    #[test]
+    fn test_system_block_below_threshold_has_no_breakpoint() {
+        let message = Message::system("short prompt");
+        let system_msg = vec![&message];
+        let (blocks, _tokens) = build_system_blocks(&system_msg, "claude-sonnet-4-20250514", 0);
+        let blocks = blocks.expect("system present");
+        assert!(blocks[0].cache_control.is_none());
+    }
+
+    #[test]
+    fn test_no_system_message_produces_none() {
+        let (blocks, tokens) = build_system_blocks(&[], "claude-sonnet-4-20250514", 0);
+        assert!(blocks.is_none());
+        assert_eq!(tokens, 0);
+    }
+
+    #[test]
+    fn test_system_wire_shape_is_block_array() {
+        let message = Message::system("hello");
+        let system_msg = vec![&message];
+        let (blocks, _tokens) = build_system_blocks(&system_msg, "claude-sonnet-4-20250514", 0);
+        let serialized = serde_json::to_value(blocks).expect("serialize");
+        assert!(
+            serialized.is_array(),
+            "system must serialize as a block array"
+        );
+        assert_eq!(serialized[0]["type"], "text");
+        assert_eq!(serialized[0]["text"], "hello");
+        assert!(
+            serialized[0].get("cache_control").is_none(),
+            "no marker when no breakpoint was planned"
+        );
+    }
+
+    #[test]
+    fn test_content_part_breakpoint_serializes_ephemeral() {
+        let part = ContentPart::text_with_cache_control(
+            "history tail",
+            juncture_core::prefix::CacheControl::ephemeral(),
+        );
+        let content = Content::MultiPart(vec![part]);
+        let converted = convert_content(&content, &[]).expect("convert");
+        let serialized = serde_json::to_value(&converted).expect("serialize");
+        assert_eq!(serialized[0]["cache_control"]["type"], "ephemeral");
+        assert!(
+            serialized[0]["cache_control"].get("ttl").is_none(),
+            "the default TTL is omitted from the wire"
+        );
+    }
+
+    #[test]
+    fn test_content_part_without_breakpoint_omits_marker() {
+        let content = Content::MultiPart(vec![ContentPart::text("plain")]);
+        let converted = convert_content(&content, &[]).expect("convert");
+        let serialized = serde_json::to_value(&converted).expect("serialize");
+        assert!(serialized[0].get("cache_control").is_none());
+    }
+
+    #[test]
+    fn test_history_breakpoint_never_lands_on_last_message() {
+        // S4 (the newest turn) is volatile; a breakpoint there would be written
+        // and invalidated on every request.
+        let history: Vec<String> = (0..40)
+            .map(|i| format!("turn {i}: {}", "x".repeat(400)))
+            .collect();
+        let mut messages: Vec<Message> = history.iter().map(Message::human).collect();
+        let newest = Message::human("latest question");
+        messages.push(newest);
+
+        let refs: Vec<&Message> = messages.iter().collect();
+        let converted =
+            convert_messages_with_breakpoints(&refs, "claude-sonnet-4-20250514", 5000, 5000)
+                .expect("conversion");
+
+        let last = converted.last().expect("messages exist");
+        let last_json = serde_json::to_value(&last.content).expect("serialize");
+        let has_marker = last_json.to_string().contains("cache_control");
+        assert!(
+            !has_marker,
+            "the volatile last message must carry no breakpoint"
+        );
+
+        let marked_index = converted.iter().position(|m| {
+            serde_json::to_string(&m.content).is_ok_and(|s| s.contains("cache_control"))
+        });
+        assert_eq!(
+            marked_index,
+            Some(converted.len() - 2),
+            "S3 breakpoint belongs on the last completed turn"
+        );
+    }
+
+    #[test]
+    fn test_history_breakpoint_promotes_text_message_to_blocks() {
+        let history: Vec<Message> = (0..40)
+            .map(|i| Message::human(format!("turn {i}: {}", "y".repeat(400))))
+            .collect();
+        let mut messages = history;
+        messages.push(Message::human("latest"));
+
+        let refs: Vec<&Message> = messages.iter().collect();
+        let converted =
+            convert_messages_with_breakpoints(&refs, "claude-sonnet-4-20250514", 5000, 5000)
+                .expect("conversion");
+
+        let target = &converted[converted.len() - 2].content;
+        assert!(
+            matches!(target, AnthropicContent::Blocks(_)),
+            "a marked plain-text message must be promoted to block form"
+        );
+    }
+
+    #[test]
+    fn test_history_breakpoint_absent_when_below_threshold() {
+        let messages = [Message::human("short"), Message::human("newest")];
+        let refs: Vec<&Message> = messages.iter().collect();
+        let converted =
+            convert_messages_with_breakpoints(&refs, "claude-sonnet-4-20250514", 10, 10)
+                .expect("conversion");
+        let serialized = serde_json::to_string(&converted).expect("serialize");
+        assert!(!serialized.contains("cache_control"));
+    }
+
+    #[test]
+    fn test_history_breakpoint_skipped_with_single_message() {
+        let messages = [Message::human("only message")];
+        let refs: Vec<&Message> = messages.iter().collect();
+        let converted =
+            convert_messages_with_breakpoints(&refs, "claude-sonnet-4-20250514", 10_000, 10_000)
+                .expect("conversion");
+        let serialized = serde_json::to_string(&converted).expect("serialize");
+        assert!(!serialized.contains("cache_control"), "no history to mark");
+    }
+
+    #[test]
+    fn test_plan_never_marks_turn_segment() {
+        // The last message is the volatile turn; it must stay unmarked.
+        let plan = juncture_core::prefix::plan_breakpoints(
+            "claude-sonnet-4-20250514",
+            &[
+                (PrefixSegment::Tools, 5000),
+                (PrefixSegment::System, 5000),
+                (PrefixSegment::History, 5000),
+                (PrefixSegment::Turn, 50_000),
+            ],
+        );
+        assert!(plan.iter().all(|b| b.segment != PrefixSegment::Turn));
+        assert!(plan.len() <= 3, "the fourth slot stays reserved");
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
     clippy::too_many_lines,
     reason = "test helper constructs SSE event values with known shapes"
 )]
@@ -1177,6 +1612,7 @@ mod tests {
             input_tokens: 10,
             output_tokens: 20,
             total_tokens: 30,
+            ..TokenUsage::default()
         };
         let event = AnthropicSSEEvent::MessageDelta {
             delta: DeltaMessage {

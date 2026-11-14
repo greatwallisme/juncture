@@ -59,6 +59,32 @@ pub enum ToolError {
     /// An interceptor cancelled the tool execution.
     #[error("execution intercepted: {0}")]
     Intercepted(String),
+
+    /// The tool needs additional input before it can produce a result.
+    ///
+    /// Produced by tools that proxy a protocol with a multi-round-trip
+    /// interactive step (MCP's `resultType: "input_required"`, design
+    /// `12-mcp-and-prefix-cache` §1.5.3). It is deliberately **not** terminal:
+    /// the caller resolves the requests and retries.
+    ///
+    /// `Tool::invoke` never raises an interrupt for this. A tool body runs
+    /// inside `JoinSet::spawn`, which does not inherit the node's task-local
+    /// interrupt context, and prompting a human mid-tool would replay the tool
+    /// on resume. The human-facing branch therefore belongs in the node, which
+    /// can `interrupt!` *before* invoking the tool; see §1.5.1–1.5.2.
+    #[error("tool needs input: {fields:?}")]
+    NeedsInput {
+        /// Original protocol request state, replayed byte-for-byte on retry.
+        ///
+        /// `None` when the protocol layer did not supply one.
+        request_state: Option<String>,
+        /// Requests the caller must answer, keyed by the protocol request key.
+        ///
+        /// `BTreeMap`, not `HashMap`: this value reaches a tool message and
+        /// therefore the conversation history, which is a cache-prefix segment.
+        /// Key order must be deterministic (design `12` §1.5.3, §2.4).
+        fields: std::collections::BTreeMap<String, String>,
+    },
 }
 
 impl ToolError {
@@ -96,6 +122,27 @@ impl ToolError {
     #[must_use]
     pub const fn intercepted(msg: String) -> Self {
         Self::Intercepted(msg)
+    }
+
+    /// Create a needs-input error
+    #[must_use]
+    pub const fn needs_input(
+        request_state: Option<String>,
+        fields: std::collections::BTreeMap<String, String>,
+    ) -> Self {
+        Self::NeedsInput {
+            request_state,
+            fields,
+        }
+    }
+
+    /// Whether this error means the tool can succeed after more input.
+    ///
+    /// Callers should surface the requested fields and retry rather than
+    /// reporting a failure to the model.
+    #[must_use]
+    pub const fn is_needs_input(&self) -> bool {
+        matches!(self, Self::NeedsInput { .. })
     }
 
     /// Check if this error should prevent agent continuation

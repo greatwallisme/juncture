@@ -1,0 +1,48 @@
+[package]
+name = "juncture-mcp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "MCP client integration for Juncture: MCP tools as Juncture Tool implementations"
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+juncture-core = { version = "0.4.0", path = "../juncture-core" }
+juncture = { version = "0.4.0", path = "../juncture", default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+async-trait = "0.1"
+futures = "0.3"
+tracing = "0.1"
+# `process` and `io-util` are needed only by the stdio transport, but this
+# crate is native-only (it drives a subprocess or an HTTP endpoint), so the
+# feature is enabled here rather than widening the facade crate's tokio feature
+# set, which must stay browser/WASM-safe (design 12 §1.6).
+tokio = { version = "1", features = ["sync", "rt", "macros", "time", "process", "io-util"] }
+
+# Streamable HTTP transport. Rustls keeps the build free of a system OpenSSL
+# dependency.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"], optional = true }
+
+[features]
+default = ["stdio", "http"]
+# `stdio` has no optional dependencies: the `process` features are always
+# enabled above. The gate exists so an embedder can compile a tools-only build
+# without the subprocess surface.
+stdio = []
+http = ["dep:reqwest"]
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full"] }
+juncture = { path = "../juncture", features = ["test-util"] }
+
+[lints]
+workspace = true
+
+[package.metadata.docs.rs]
+all-features = true

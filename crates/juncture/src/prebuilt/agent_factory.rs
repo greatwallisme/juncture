@@ -44,7 +44,7 @@ use juncture_core::store::Store;
 use crate::llm::{CallOptions, ChatModel};
 use crate::prebuilt::agent_middleware::{AgentMiddlewareChain, MiddlewareAction};
 use crate::prebuilt::messages_state::{MessagesState, MessagesStateUpdate};
-use crate::prebuilt::react::{PromptSource, convert_tool_defs};
+use crate::prebuilt::react::{PromptSource, wire_tool_defs};
 use crate::tools::{Tool, ToolDefinition, ToolNode};
 
 /// Type alias for pre-model hook functions.
@@ -136,7 +136,7 @@ pub fn create_agent_with_middleware<M: ChatModel>(
     config: AgentConfig,
 ) -> Result<CompiledGraph<MessagesState>, TopologyError> {
     let tool_defs: Vec<ToolDefinition> = tools.iter().map(|t| t.definition()).collect();
-    let llm_tool_defs = convert_tool_defs(&tool_defs);
+    let llm_tool_defs = wire_tool_defs(&tool_defs);
     let model_with_tools = model.bind_tools(llm_tool_defs);
 
     let prompt = config.system_message.map(PromptSource::Static);
