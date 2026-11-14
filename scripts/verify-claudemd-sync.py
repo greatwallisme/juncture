@@ -2,9 +2,10 @@
 """
 CLAUDE.md-Sync Verification Script for Juncture
 
-Mechanically verifies that the 11 CLAUDE.md docs match the current HEAD API:
-feature gates, build/test commands, fallible provider constructors, module
-references, the NonZeroUsize cache signature, and file presence.
+Mechanically verifies that the CLAUDE.md docs match the current HEAD API and the
+seven-step workflow section: feature gates, build/test commands, fallible
+provider constructors, module references, the NonZeroUsize cache signature, file
+presence, and the workflow gate commands.
 
 Bound to `.planning/2026-07-30-claudemd-sync/claudemd-sync.spec.md`. Pure text/structural checks -- the
 failure path *is* the doc drift itself.
@@ -82,9 +83,9 @@ def extract_toml_table(text: str, table: str) -> str:
 def _lint_group_is_warn(block: str, group: str) -> bool:
     """True if `group` is enabled at warn level, in either table form
     (`group = { level = "warn", ... }`) or string form (`group = "warn"`)."""
-    if re.search(rf'^{group}\s*=\s*\{{[^}}]*"warn"', block, re.M):
+    if re.search(rf'^{group}\s*=\s*\{{[^}}]*"warn"', block, re.MULTILINE):
         return True
-    return bool(re.search(rf'^{group}\s*=\s*"warn"', block, re.M))
+    return bool(re.search(rf'^{group}\s*=\s*"warn"', block, re.MULTILINE))
 
 
 def cargo_feature_keys(cargo_text: str) -> set[str]:
@@ -220,15 +221,55 @@ def check_clippy_lint_config() -> tuple[bool, str]:
                if not _lint_group_is_warn(block, g)]
     if missing:
         return False, f"[workspace.lints.clippy] missing warn-level groups: {missing}"
-    if re.search(r'^restriction\s*=\s*\{', block, re.M) or re.search(r'^restriction\s*=\s*"warn"', block, re.M):
+    if re.search(r'^restriction\s*=\s*\{', block, re.MULTILINE) or re.search(r'^restriction\s*=\s*"warn"', block, re.MULTILINE):
         return False, "[workspace.lints.clippy] enables `restriction` wholesale; docs claim only a curated subset"
-    individual = re.findall(r'^([a-z0-9_]+)\s*=\s*"warn"', block, re.M)
+    individual = re.findall(r'^([a-z0-9_]+)\s*=\s*"warn"', block, re.MULTILINE)
     if len(individual) < 5:
         return False, f"[workspace.lints.clippy] has too few individual warn lints: {individual}"
     if "[workspace.lints.clippy]" not in read(REPO / "CLAUDE.md"):
         return False, "root CLAUDE.md lint line must reference `[workspace.lints.clippy]` as source of truth"
     return True, (f"clippy groups all/pedantic/nursery/cargo + {len(individual)} curated "
                   f"restriction lints; CLAUDE.md points to Cargo.toml")
+
+
+def check_workflow_section() -> tuple[bool, str]:
+    """The seven-step workflow must stay present, ordered, and consistent with
+    the gate scripts. Each step owns a distinct command, and the gate threshold
+    must match step 2 so guard cannot silently weaken to its 0.6 default."""
+    md = read(REPO / "CLAUDE.md")
+    section = extract_section(md, "## Development Workflow (Seven Steps)")
+    if not section.strip():
+        return False, "root CLAUDE.md missing `## Development Workflow (Seven Steps)`"
+
+    steps = re.findall(r"^\|\s*(\d+)\s+([^|]+?)\s*\|", section, re.MULTILINE)
+    if len(steps) != 7:
+        return False, f"workflow table must have exactly 7 steps, found {len(steps)}"
+    numbers = [int(n) for n, _ in steps]
+    if numbers != list(range(1, 8)):
+        return False, f"workflow steps out of order: {numbers}"
+
+    required = {
+        "step 2 lint gate": "agent-spec lint <spec> --min-score 0.7",
+        "step 3 contract read": "agent-spec contract <spec>",
+        "step 4 lifecycle": "agent-spec lifecycle <spec> --code . --format json",
+        "step 5 guard wrapper": "scripts/guard-specs.sh",
+        "step 6 acceptance": "agent-spec explain <spec> --format markdown",
+        "step 7 stamp": "agent-spec stamp <spec> --dry-run",
+    }
+    missing = [label for label, cmd in required.items() if cmd not in section]
+    if missing:
+        return False, f"workflow section missing command(s): {missing}"
+
+    if "not** recursive" not in section and "not recursive" not in section:
+        return False, "workflow section must state that guard is not recursive"
+    if "0.6" not in section:
+        return False, "workflow section must contrast the 0.7 gate with guard's 0.6 default"
+    if "sycophancy" not in section:
+        return False, "workflow section must carry the step-4 no-contract-editing discipline"
+
+    if not (REPO / "scripts" / "guard-specs.sh").is_file():
+        return False, "scripts/guard-specs.sh referenced by the workflow is missing"
+    return True, "seven-step workflow present, ordered, and gate commands exist"
 
 
 CHECKS = [
@@ -240,6 +281,7 @@ CHECKS = [
     ("checkpoint MemoryCache NonZeroUsize", check_cache_nonzero),
     ("clippy lint config matches docs", check_clippy_lint_config),
     ("CLAUDE.md files present", check_files_present),
+    ("seven-step workflow present", check_workflow_section),
 ]
 
 

@@ -1,5 +1,5 @@
 spec: task
-name: "llm-tools-interceptor-error-conformance"
+name: "08-llm-tools-interceptor-error-conformance"
 tags: [design-conformance, llm-tools, tool, interceptor, 08-llm-tools]
 ---
 
@@ -28,7 +28,7 @@ tags: [design-conformance, llm-tools, tool, interceptor, 08-llm-tools]
 ## 边界
 
 ### Allowed Changes
-- specs/llm-tools-interceptor-error-conformance.spec.md
+- specs/08-llm-tools-interceptor-error-conformance.spec.md
 - 本合约为只读核实，不改实现代码（facade tools 已有充分测试覆盖）
 
 ### Forbidden

@@ -1,5 +1,5 @@
 spec: task
-name: "state-reducer-semantics-conformance"
+name: "01-state-reducer-semantics-conformance"
 tags: [design-conformance, state, reducer, channel, 01-state-channel]
 ---
 
@@ -28,7 +28,7 @@ tags: [design-conformance, state, reducer, channel, 01-state-channel]
 ## 边界
 
 ### Allowed Changes
-- specs/state-reducer-semantics-conformance.spec.md
+- specs/01-state-reducer-semantics-conformance.spec.md
 - crates/juncture-core/src/state/channel.rs（仅 `mod tests` 内新增 4 个测试函数，不改实现）
 
 ### Forbidden

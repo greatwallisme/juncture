@@ -1,5 +1,5 @@
 spec: task
-name: "pregel-scheduling-correctness-conformance"
+name: "03-pregel-scheduling-correctness-conformance"
 tags: [design-conformance, pregel, scheduler, 03-pregel-engine]
 ---
 
@@ -28,7 +28,7 @@ tags: [design-conformance, pregel, scheduler, 03-pregel-engine]
 ## 边界
 
 ### Allowed Changes
-- specs/pregel-scheduling-correctness-conformance.spec.md
+- specs/03-pregel-scheduling-correctness-conformance.spec.md
 - 本合约为只读核实，不改实现代码（scheduler.rs 已有充分测试覆盖）
 
 ### Forbidden

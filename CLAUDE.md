@@ -8,7 +8,7 @@ Juncture is a Rust implementation of LangGraph. The programming model is semanti
 
 ## Architecture
 
-6-crate workspace + 2 supporting packages:
+7-crate workspace + 2 supporting packages:
 
 ```
 juncture/              # facade crate - prelude, LLM providers, Tool trait, prebuilt agents, middleware
@@ -16,6 +16,7 @@ juncture-core/         # Channel system, StateGraph, Pregel engine, Node/Edge, C
 juncture-derive/       # #[derive(State)] proc-macro + functional-API attribute macros #[task] / #[entrypoint] (design 03 §13.3/§14)
 juncture-checkpoint/   # CheckpointSaver trait, MemorySaver, SqliteSaver, PostgresSaver
 juncture-tracing/      # OpenTelemetry integration, node-level spans, token metrics
+juncture-telemetry/    # Langfuse-compatible observability engine (collector, OTLP, SQLite trace store, web)
 juncture-store/        # Cross-thread persistent key-value storage (Store trait, MemoryStore) -- re-exports from juncture-core
 benchmarks/            # Juncture vs LangGraph performance comparison (6 scenarios, Rust + Python)
 examples/              # 16 self-contained examples (01-16) + deep-research multi-agent application + WASM examples
@@ -38,7 +39,7 @@ Run single test: `cargo test -p juncture-core -- test_name --exact`
 
 ## Design Documents (Authoritative)
 
-All implementation MUST follow `design/index.md` and the 11 module design docs (`design/01-*.md` through `design/10-*.md`, plus `design/11-wasm.md` which is a design-only WASM roadmap).
+All implementation MUST follow `design/index.md` and the 12 module design docs (`design/01-*.md` through `design/10-*.md`, plus `design/11-wasm.md` which is a design-only WASM roadmap, and `design/12-mcp-and-prefix-cache.md` for MCP client integration and LLM cache prefix stability).
 
 ### Design-to-Code Verification
 
@@ -50,22 +51,44 @@ python3 scripts/verify-design-coverage.py --summary-only # coverage %
 python3 scripts/verify-design-coverage.py --by-finding  # grouped by finding ID
 ```
 
-Hooks in `.claude/settings.local.json` auto-run verification on `.rs` file writes and session stop.
+This gate runs in CI (`verify-scripts` job) on every push and PR. There is no local auto-run hook: the full scan takes ~12s over the concatenated source corpus, so run it explicitly when you touch `crates/`.
 
 ### Semantic Conformance Contracts
 
-Beyond literal coverage, `specs/` holds **14 agent-spec semantic conformance contracts** (behavior-level, each binding real tests, all lifecycle-passing) covering design modules 01-10. Lint and verify every spec:
+Beyond literal coverage, `specs/` holds **14 agent-spec semantic conformance contracts** (behavior-level, each binding real tests, all lifecycle-passing) covering design modules 01-10. Filenames are prefixed with their design module number (`01-state-*`, `03-pregel-*`, ...) so the flat directory stays grouped by module. Lint and verify every spec:
 
 ```bash
-agent-spec guard --spec-dir specs --code .          # lint + verify every spec in specs/ (14/14)
+scripts/guard-specs.sh                              # gate all 14: lint + verify at --min-score 0.7, no silent skip
+scripts/guard-specs.sh --change-scope worktree       # same, scoped to local edits
+agent-spec lifecycle specs/<spec> --code . --format json   # single contract self-check loop
 ```
+
+`scripts/guard-specs.sh` wraps `agent-spec guard` because guard only scans the immediate directory it is given: a spec under `specs/<subdir>/` is silently skipped while guard still exits 0. `agent-spec audit` *is* recursive, so its counts must never be read as proof that guard covered every spec. Guard's boundary layer also compares against the whole git change set, so scoped local runs need `--change-scope worktree` or explicit `--change` paths.
 
 The CLAUDE.md and `doc/` doc-drift invariants are pinned by two stdlib-only Python scripts (mirroring `scripts/verify-design-coverage.py`) so the docs cannot silently drift. (The doc-sync task descriptions live under `.planning/`; their verification is these scripts, not agent-spec scenarios.)
 
 ```bash
-python3 scripts/verify-claudemd-sync.py   # 11 CLAUDE.md invariants (features, build cmds, fallible provider ctors, module refs, NonZeroUsize)
+python3 scripts/verify-claudemd-sync.py   # 9 CLAUDE.md invariants (features, build cmds, fallible provider ctors, module refs, NonZeroUsize, seven-step workflow)
 python3 scripts/verify-doc-sync.py         # doc/ invariants (fallible provider ctors, en/zh parity, features, commands, new-macro coverage)
 ```
+
+## Development Workflow (Seven Steps)
+
+Every implementation task runs through this loop. The review point moves from reading code diffs to writing contracts: humans define what is correct, machines verify whether the code is correct, humans do final *contract acceptance*.
+
+| Step | Owner | Command | Key point |
+|------|-------|---------|-----------|
+| 1 Write contract | human | `agent-spec init` then fill the four elements by hand | Exception scenarios must be >= happy-path scenarios |
+| 2 Quality gate | machine | `agent-spec lint <spec> --min-score 0.7` | Code review applied to the contract itself |
+| 3 Read contract | agent | `agent-spec contract <spec>` | Decisions, boundaries and completion criteria are a triple constraint |
+| 4 Self-check loop | agent | `agent-spec lifecycle <spec> --code . --format json` | fail -> read evidence -> fix code -> rerun; never edit the contract |
+| 5 Guard | machine | `scripts/guard-specs.sh` | All contracts verified in one pass, blocks pre-commit/CI. Guard is **not** recursive, so it must be pointed at the flat `specs/` root; a `skip` verdict counts as not passing; the score threshold is 0.7 to match step 2, not guard's 0.6 default |
+| 6 Acceptance | human | `agent-spec explain <spec> --format markdown` | Read the contract-level summary, not the diff |
+| 7 Stamp and archive | machine | `agent-spec stamp <spec> --dry-run` / `agent-spec archive` | Git trailers establish contract <-> commit traceability |
+
+**Step 4 discipline.** When lifecycle fails, the obligation is to fix the code, not the contract. Editing a contract until verification goes green is sycophancy, not repair. If the contract genuinely must change (it is wrong, or a scenario is missing), escalate to the user for a decision first.
+
+Generated drafts from `agent-spec requirements draft-specs` land in `specs/generated/`; because guard skips that subdirectory, run `agent-spec guard --spec-dir specs/generated --code . --min-score 0.7` explicitly on them. Drafts carry `pending_*` selectors and are expected to fail until a human binds real tests.
 
 ## Required Skills
 

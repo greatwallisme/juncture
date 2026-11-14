@@ -17,12 +17,12 @@ Exit codes:
 from __future__ import annotations
 
 import argparse
+import functools
 import json
 import re
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-
 
 # ── Output helpers (stdout/stderr writers) ──────────────────────────────
 
@@ -80,6 +80,26 @@ def collect_rust_sources(src_dir: Path) -> str:
     return "\n".join(parts)
 
 
+@functools.cache
+def compile_pattern(pattern: str) -> re.Pattern[str]:
+    """Compile once per distinct pattern.
+
+    ``re.findall`` against the concatenated multi-megabyte source corpus is the
+    dominant cost of this script (~54s over 1084 patterns). The checklists only
+    need presence evidence, so ``search`` short-circuits on the first hit and is
+    ~4x faster. Cache patterns because every item shares method/field shapes.
+    """
+    return re.compile(pattern, re.MULTILINE)
+
+
+def pattern_present(pattern: str, source_text: str) -> tuple[bool, str | None]:
+    """Return (present, error). Never reports how many matches were found."""
+    try:
+        return compile_pattern(pattern).search(source_text) is not None, None
+    except re.error as e:
+        return False, str(e)
+
+
 def verify_item(item: CheckItem, source_text: str) -> None:
     """Check a single item against the source code text."""
     pattern = item.verification_pattern.strip()
@@ -88,27 +108,28 @@ def verify_item(item: CheckItem, source_text: str) -> None:
         item.details.append("No verification pattern defined")
         return
 
-    try:
-        matches = re.findall(pattern, source_text, re.MULTILINE)
-    except re.error as e:
+    present, error = pattern_present(pattern, source_text)
+    if error is not None:
         item.found = False
-        item.details.append(f"Invalid regex: {e}")
+        item.details.append(f"Invalid regex: {error}")
         return
 
-    if not matches:
+    if not present:
         item.found = False
         item.details.append(f"Pattern not found: {pattern}")
         return
 
     item.found = True
-    match_count = len(matches)
-    item.details.append(f"Found {match_count} match(es) for main pattern")
+    item.details.append("Main pattern found")
 
     for method in item.required_methods:
         method_pattern = rf"fn\s+{re.escape(method)}\s*[<(]"
-        method_matches = re.findall(method_pattern, source_text, re.MULTILINE)
-        if method_matches:
-            item.details.append(f"  method '{method}': found {len(method_matches)}")
+        present, error = pattern_present(method_pattern, source_text)
+        if error is not None:
+            item.found = False
+            item.details.append(f"  method '{method}': invalid regex ({error})")
+        elif present:
+            item.details.append(f"  method '{method}': found")
         else:
             item.found = False
             item.details.append(f"  method '{method}': MISSING")
@@ -116,18 +137,24 @@ def verify_item(item: CheckItem, source_text: str) -> None:
     for field_spec in item.required_fields:
         field_name = field_spec.split(":")[0].strip()
         field_pattern = rf"(?:pub\s+)?{re.escape(field_name)}\s*:"
-        field_matches = re.findall(field_pattern, source_text, re.MULTILINE)
-        if field_matches:
-            item.details.append(f"  field '{field_name}': found {len(field_matches)}")
+        present, error = pattern_present(field_pattern, source_text)
+        if error is not None:
+            item.found = False
+            item.details.append(f"  field '{field_name}': invalid regex ({error})")
+        elif present:
+            item.details.append(f"  field '{field_name}': found")
         else:
             item.found = False
             item.details.append(f"  field '{field_name}': MISSING")
 
     for variant in item.required_variants:
         variant_pattern = rf"\b{re.escape(variant)}\b"
-        variant_matches = re.findall(variant_pattern, source_text, re.MULTILINE)
-        if variant_matches:
-            item.details.append(f"  variant '{variant}': found {len(variant_matches)}")
+        present, error = pattern_present(variant_pattern, source_text)
+        if error is not None:
+            item.found = False
+            item.details.append(f"  variant '{variant}': invalid regex ({error})")
+        elif present:
+            item.details.append(f"  variant '{variant}': found")
         else:
             item.found = False
             item.details.append(f"  variant '{variant}': MISSING")

@@ -356,3 +356,4 @@ Juncture 保留此设计：`CheckpointSaver::put_writes()` 在每个节点完成
 | [09-observability.md](09-observability.md) | 可观测性（Tracing / OpenTelemetry / Callbacks） |
 | [10-store.md](10-store.md) | Store 跨线程长期记忆 |
 | [11-wasm.md](11-wasm.md) | WASM 支持设计（浏览器/边缘运行时） |
+| [12-mcp-and-prefix-cache.md](12-mcp-and-prefix-cache.md) | MCP 客户端集成（2026-07-28 无状态协议）与 LLM 缓存前缀稳定性 |

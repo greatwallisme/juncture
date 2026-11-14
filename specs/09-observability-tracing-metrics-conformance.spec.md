@@ -1,5 +1,5 @@
 spec: task
-name: "observability-tracing-metrics-conformance"
+name: "09-observability-tracing-metrics-conformance"
 tags: [design-conformance, observability, tracing, 09-observability]
 ---
 
@@ -31,7 +31,7 @@ tags: [design-conformance, observability, tracing, 09-observability]
 ## 边界
 
 ### Allowed Changes
-- specs/observability-tracing-metrics-conformance.spec.md
+- specs/09-observability-tracing-metrics-conformance.spec.md
 - 本合约为只读核实，不改实现代码（juncture-tracing 已有充分测试覆盖）
 
 ### Forbidden

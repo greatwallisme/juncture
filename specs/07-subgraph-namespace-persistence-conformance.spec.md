@@ -1,5 +1,5 @@
 spec: task
-name: "subgraph-namespace-persistence-conformance"
+name: "07-subgraph-namespace-persistence-conformance"
 tags: [design-conformance, subgraph, 07-subgraph]
 ---
 
@@ -29,7 +29,7 @@ tags: [design-conformance, subgraph, 07-subgraph]
 ## 边界
 
 ### Allowed Changes
-- specs/subgraph-namespace-persistence-conformance.spec.md
+- specs/07-subgraph-namespace-persistence-conformance.spec.md
 - 本合约为只读核实，不改实现代码（subgraph.rs 已有充分测试覆盖）
 
 ### Forbidden

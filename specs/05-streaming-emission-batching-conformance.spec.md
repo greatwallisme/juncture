@@ -1,5 +1,5 @@
 spec: task
-name: "streaming-emission-batching-conformance"
+name: "05-streaming-emission-batching-conformance"
 tags: [design-conformance, streaming, 05-streaming]
 ---
 
@@ -28,7 +28,7 @@ tags: [design-conformance, streaming, 05-streaming]
 ## 边界
 
 ### Allowed Changes
-- specs/streaming-emission-batching-conformance.spec.md
+- specs/05-streaming-emission-batching-conformance.spec.md
 - 本合约为只读核实，不改实现代码（stream.rs 已有充分测试覆盖）
 
 ### Forbidden

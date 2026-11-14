@@ -1,5 +1,5 @@
 spec: task
-name: "store-filter-vector-ttl-conformance"
+name: "10-store-filter-vector-ttl-conformance"
 tags: [design-conformance, store, 10-store]
 ---
 
@@ -28,7 +28,7 @@ tags: [design-conformance, store, 10-store]
 ## 边界
 
 ### Allowed Changes
-- specs/store-filter-vector-ttl-conformance.spec.md
+- specs/10-store-filter-vector-ttl-conformance.spec.md
 - 本合约为只读核实，不改实现代码（store.rs 已有充分测试覆盖）
 
 ### Forbidden

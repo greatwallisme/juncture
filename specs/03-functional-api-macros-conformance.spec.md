@@ -1,5 +1,5 @@
 spec: task
-name: "functional-api-macros-conformance"
+name: "03-functional-api-macros-conformance"
 tags: [design-conformance, functional-api, macro, entrypoint, task]
 ---
 
@@ -26,7 +26,7 @@ tags: [design-conformance, functional-api, macro, entrypoint, task]
 ## 边界
 
 ### Allowed Changes
-- specs/functional-api-macros-conformance.spec.md
+- specs/03-functional-api-macros-conformance.spec.md
 - 本合约为只读核实，不改实现代码
 
 ### Forbidden

@@ -1,5 +1,5 @@
 spec: task
-name: "checkpoint-persistence-conformance"
+name: "04-checkpoint-persistence-conformance"
 tags: [design-conformance, checkpoint, 04-checkpoint]
 ---
 
@@ -30,7 +30,7 @@ tags: [design-conformance, checkpoint, 04-checkpoint]
 ## 边界
 
 ### Allowed Changes
-- specs/checkpoint-persistence-conformance.spec.md
+- specs/04-checkpoint-persistence-conformance.spec.md
 - 本合约为只读核实，不改实现代码（juncture-checkpoint 已有充分测试覆盖）
 
 ### Forbidden

@@ -1,5 +1,5 @@
 spec: task
-name: "state-channel-lifecycle-conformance"
+name: "01-state-channel-lifecycle-conformance"
 tags: [design-conformance, state, channel, 01-state-channel]
 ---
 
@@ -28,7 +28,7 @@ tags: [design-conformance, state, channel, 01-state-channel]
 ## 边界
 
 ### Allowed Changes
-- specs/state-channel-lifecycle-conformance.spec.md
+- specs/01-state-channel-lifecycle-conformance.spec.md
 - 本合约为只读核实，不改实现代码（channel.rs 已有充分测试覆盖）
 
 ### Forbidden

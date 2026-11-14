@@ -1,5 +1,5 @@
 spec: task
-name: "pregel-budget-retry-conformance"
+name: "03-pregel-budget-retry-conformance"
 tags: [design-conformance, pregel, budget, retry, 03-pregel-engine]
 ---
 
@@ -28,7 +28,7 @@ tags: [design-conformance, pregel, budget, retry, 03-pregel-engine]
 ## 边界
 
 ### Allowed Changes
-- specs/pregel-budget-retry-conformance.spec.md
+- specs/03-pregel-budget-retry-conformance.spec.md
 - 本合约为只读核实，不改实现代码（budget.rs / builder.rs 已有充分测试覆盖）
 
 ### Forbidden

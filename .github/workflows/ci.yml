@@ -14,8 +14,10 @@ name: CI
 # Additional CI-only gates beyond the local quality gate:
 #   cargo hack check --each-feature / default / no-default-features
 #     (catches cfg-gate errors that --all-features masks)
-#   agent-spec guard --spec-dir specs --code .
-#     (14 semantic conformance contracts, design modules 01-10)
+#   scripts/guard-specs.sh
+#     (agent-spec guard at --min-score 0.7 over the 14 semantic conformance
+#     contracts for design modules 01-10, plus an assertion that guard scanned
+#     every spec on disk -- bare guard silently skips nested spec directories)
 #   scripts/verify-design-coverage.py / verify-claudemd-sync.py / verify-doc-sync.py
 #     (design checklist coverage + CLAUDE.md/doc drift invariants)
 #   wasm32 build (juncture crates + wasm-example; design 11)
@@ -150,9 +152,14 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libsqlite3-dev
       - uses: Swatinem/rust-cache@v2
       - name: Install agent-spec (pinned to verified version)
-        run: cargo install agent-spec --locked --version 1.2.0
-      - name: Guard (lint + verify all 14 specs against source)
-        run: agent-spec guard --spec-dir specs --code .
+        run: cargo install agent-spec --locked --version 1.4.0
+      # Runs guard at --min-score 0.7 (the same gate as workflow step 2, not
+      # guard's 0.6 default) and then asserts guard scanned every spec on disk.
+      # A bare `agent-spec guard --spec-dir specs` exits 0 while silently
+      # skipping any spec in a subdirectory, so a nested contract would be
+      # green without ever running.
+      - name: Guard (lint + verify all 14 specs, no silent skip)
+        run: scripts/guard-specs.sh
 
   verify-scripts:
     name: design/doc-drift invariants

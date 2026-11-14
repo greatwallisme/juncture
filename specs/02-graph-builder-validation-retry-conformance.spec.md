@@ -1,5 +1,5 @@
 spec: task
-name: "graph-builder-validation-retry-conformance"
+name: "02-graph-builder-validation-retry-conformance"
 tags: [design-conformance, graph-builder, topology, retry, 02-graph-builder]
 ---
 
@@ -28,7 +28,7 @@ tags: [design-conformance, graph-builder, topology, retry, 02-graph-builder]
 ## 边界
 
 ### Allowed Changes
-- specs/graph-builder-validation-retry-conformance.spec.md
+- specs/02-graph-builder-validation-retry-conformance.spec.md
 - 本合约为只读核实，不改实现代码（builder.rs 已有充分测试覆盖）
 
 ### Forbidden

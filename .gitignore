@@ -9,3 +9,6 @@ __pycache__
 *.env
 .codegraph
 .playwright-mcp
+.shadow
+.shadow.local
+shadow.toml

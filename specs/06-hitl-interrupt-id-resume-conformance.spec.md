@@ -1,5 +1,5 @@
 spec: task
-name: "hitl-interrupt-id-resume-conformance"
+name: "06-hitl-interrupt-id-resume-conformance"
 tags: [design-conformance, hitl, interrupt, 06-hitl]
 ---
 
@@ -29,7 +29,7 @@ tags: [design-conformance, hitl, interrupt, 06-hitl]
 ## 边界
 
 ### Allowed Changes
-- specs/hitl-interrupt-id-resume-conformance.spec.md
+- specs/06-hitl-interrupt-id-resume-conformance.spec.md
 - crates/juncture-core/src/interrupt/mod.rs（仅 `mod tests` 内新增 3 个 generate_interrupt_id 测试）
 
 ### Forbidden

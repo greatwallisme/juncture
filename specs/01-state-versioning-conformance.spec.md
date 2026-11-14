@@ -1,5 +1,5 @@
 spec: task
-name: "state-versioning-conformance"
+name: "01-state-versioning-conformance"
 tags: [design-conformance, state, pregel, scheduler, 01-state-channel]
 ---
 
@@ -29,7 +29,7 @@ tags: [design-conformance, state, pregel, scheduler, 01-state-channel]
 ## 边界
 
 ### Allowed Changes
-- specs/state-versioning-conformance.spec.md
+- specs/01-state-versioning-conformance.spec.md
 - crates/juncture-core/src/pregel/scheduler.rs（仅 `scheduler_tests` 内新增 5 个测试函数）
 
 ### Forbidden

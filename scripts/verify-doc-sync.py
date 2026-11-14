@@ -107,7 +107,7 @@ def pub_lines(files: list[Path]) -> list[str]:
     for f in files:
         for line in read(f).splitlines():
             stripped = line.lstrip()
-            if stripped.startswith("pub ") or stripped.startswith("pub("):
+            if stripped.startswith(("pub ", "pub(")):
                 out.append(line)
     return out
 
