@@ -24,6 +24,7 @@ tokio = { version = "1", features = ["rt", "macros", "time"] }
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4", "v6"] }
 tracing = "0.1"
+llm-prices = "1.1"
 
 # Provider dependencies (feature-gated)
 # rustls (pure Rust, ring backend) instead of the default native-tls so the
