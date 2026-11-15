@@ -88,6 +88,12 @@ pub trait ModelPricing {
 /// Provides pricing information for popular models from various providers.
 /// Prices are in USD per million tokens as of 2025.
 ///
+/// Models not in the built-in table (or added with [`PricingTable::insert`])
+/// fall back to the dated, source-cited table from the
+/// [`llm-prices`](https://docs.rs/llm-prices) crate, which covers current
+/// Claude, GPT, Gemini and `DeepSeek` models. Entries in this table always
+/// take precedence over the fallback.
+///
 /// # Example
 ///
 /// ```rust
@@ -144,6 +150,10 @@ impl PricingTable {
     /// Returns `Some((input_price, output_price))` if the model is found,
     /// or `None` if pricing is not available.
     ///
+    /// Entries in this table are checked first. Models not in the table fall
+    /// back to [`llm_prices::lookup`], which also accepts provider prefixes
+    /// (`anthropic/`, `models/`) and dated or Bedrock forms of Anthropic ids.
+    ///
     /// # Arguments
     ///
     /// * `model` - Model name (e.g., "claude-3-opus-20240229")
@@ -154,7 +164,10 @@ impl PricingTable {
     /// * `None` - Model not found in pricing table
     #[must_use]
     pub fn get(&self, model: &str) -> Option<(f64, f64)> {
-        self.prices.get(model).copied()
+        self.prices.get(model).copied().or_else(|| {
+            let price = llm_prices::lookup(model)?;
+            Some((price.input?, price.output?))
+        })
     }
 
     /// Add or update pricing for a model.
@@ -172,13 +185,47 @@ impl PricingTable {
     /// Check if pricing is available for a model.
     #[must_use]
     pub fn contains(&self, model: &str) -> bool {
-        self.prices.contains_key(model)
+        self.get(model).is_some()
     }
 }
 
 impl Default for PricingTable {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn builtin_entries_take_precedence() {
+        let pricing = PricingTable::default();
+        assert_eq!(pricing.get("claude-3-opus-20240229"), Some((15.0, 75.0)));
+        assert_eq!(pricing.get("gpt-4o-2024-08-06"), Some((2.5, 10.0)));
+    }
+
+    #[test]
+    fn inserted_entries_override_fallback() {
+        let mut pricing = PricingTable::default();
+        pricing.insert("claude-sonnet-4-6", 1.0, 2.0);
+        assert_eq!(pricing.get("claude-sonnet-4-6"), Some((1.0, 2.0)));
+    }
+
+    #[test]
+    fn current_models_fall_back_to_llm_prices() {
+        let pricing = PricingTable::default();
+        assert_eq!(pricing.get("claude-sonnet-4-6"), Some((3.0, 15.0)));
+        assert!(pricing.contains("anthropic/claude-sonnet-4-6"));
+        assert!(pricing.contains("gemini-2.5-pro"));
+    }
+
+    #[test]
+    fn unknown_model_returns_none() {
+        let pricing = PricingTable::default();
+        assert_eq!(pricing.get("not-a-model"), None);
+        assert!(!pricing.contains("not-a-model"));
     }
 }
 
